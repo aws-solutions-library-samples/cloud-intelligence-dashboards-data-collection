@@ -45,6 +45,7 @@ from utils import create_case, trigger_collection, get_case_data, clean_bucket
 logger = logging.getLogger(__name__)
 region = boto3.session.Session().region_name
 account_id = boto3.client('sts').get_caller_identity()['Account']
+version = json.load(open('data-collection/utils/version.json'))['version']
 
 COLLECTION_BUCKET =  f'cid-data-{account_id}'
 

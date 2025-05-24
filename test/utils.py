@@ -9,6 +9,7 @@ import boto3
 
 
 logger = logging.getLogger(__name__)
+version = json.load(open('data-collection/utils/version.json'))['version']
 
 HEADER = '\033[95m'
 BLUE = '\033[94m'
@@ -156,7 +157,7 @@ def deploy_stack(cloudformation, stack_name: str, url: str, parameters: list[dic
             TimeoutInMinutes=60,
             **options,
         )
-        logger.info(f'{stack_name} started creation strarted {res}')
+        logger.info(f'{stack_name} started creation started {res}')
     except cloudformation.exceptions.AlreadyExistsException:
         try:
             logger.info(f'{stack_name} exists')
@@ -178,7 +179,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
     deploy_stack(
         cloudformation=cloudformation,
         stack_name=f'{PREFIX}OptimizationDataReadPermissionsStack',
-        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/deploy-data-read-permissions.yaml',
+        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/v{version}/deploy-data-read-permissions.yaml',
         parameters=[
             {'ParameterKey': 'CFNSourceBucket',                 'ParameterValue': bucket},
             {'ParameterKey': 'DataCollectionAccountID',         'ParameterValue': account_id},
@@ -207,7 +208,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
     deploy_stack(
         cloudformation=cloudformation,
         stack_name=f'{PREFIX}OptimizationDataCollectionStack',
-        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/deploy-data-collection.yaml',
+        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/v{version}/deploy-data-collection.yaml',
         parameters=[
             {'ParameterKey': 'CFNSourceBucket',                 'ParameterValue': bucket},
             {'ParameterKey': 'RegionsInScope',                  'ParameterValue': REGIONS},

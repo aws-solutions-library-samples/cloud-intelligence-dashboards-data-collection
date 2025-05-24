@@ -146,6 +146,7 @@ Resources:
           BUCKET = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
           MODULE_NAME = os.environ['MODULE_NAME']
+          LANGUAGES = {'en', 'es', 'fr', 'ja', 'ko', 'pt', 'zh'}
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
@@ -160,7 +161,6 @@ Resources:
                   raise RuntimeError(f"(MissingParameterError) Lambda event missing '{key}' parameter")
 
               account = json.loads(event[key])
-
               try:
                   main(account, ROLE_NAME, MODULE_NAME, BUCKET)
               except Exception as exc: #pylint: disable=broad-exception-caught
@@ -223,92 +223,94 @@ Resources:
               except s3.exceptions.NoSuchKey as exc:
                   if exc.response['Error']['Code'] != 'NoSuchKey': # this is fine if there no status file
                       raise
-
-              case_iterator = (
-                  support
-                  .get_paginator('describe_cases')
-                  .paginate(
-                      afterTime=status["last_read"],
-                      includeCommunications=False,
-                      includeResolvedCases=True,
-                  )
-                  .search("""cases[].{
-                      CaseId: caseId,
-                      DisplayId: displayId,
-                      Subject: subject,
-                      Status: status,
-                      ServiceCode: serviceCode,
-                      CategoryCode: categoryCode,
-                      SeverityCode: severityCode,
-                      SubmittedBy: submittedBy,
-                      TimeCreated: timeCreated,
-                      CCEmailAddresses: ccEmailAddresses,
-                      Language: language
-                  }""")
-              )
-
-              for index, data in enumerate(case_iterator):
-                  case_id = data['CaseId']
-                  case_date = datetime.strptime(data["TimeCreated"], '%Y-%m-%dT%H:%M:%S.%fZ')
-                  with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
-                      data['AccountAlias'] = account_name
-                      data['Summary'] = ''
-                      f.write(to_json(data)) # single line per file
-                  key = case_date.strftime(
-                      f"{module_name}/" +
-                      f"{module_name}-data/" +
-                      f"payer_id={payer_id}/" +
-                      f"account_id={account_id}/" +
-                      f"year=%Y/month=%m/day=%d/{case_id}.json"
-                  )
-                  s3.upload_file("/tmp/tmp.json", bucket, key)
-                  logger.debug(f"Data stored to s3://{bucket}/{key}")
-
-                  communication_iterator = (
+              
+              for lang in LANGUAGES:
+                  case_iterator = (
                       support
-                      .get_paginator('describe_communications')
-                      .paginate(caseId=case_id)
-                      .search("""communications[].{
+                      .get_paginator('describe_cases')
+                      .paginate(
+                          afterTime=status["last_read"],
+                          includeCommunications=False,
+                          includeResolvedCases=True,
+                          language=lang,
+                      )
+                      .search("""cases[].{
                           CaseId: caseId,
-                          Body: body,
+                          DisplayId: displayId,
+                          Subject: subject,
+                          Status: status,
+                          ServiceCode: serviceCode,
+                          CategoryCode: categoryCode,
+                          SeverityCode: severityCode,
                           SubmittedBy: submittedBy,
                           TimeCreated: timeCreated,
-                          AttachmentSet: attachmentSet[0]
+                          CCEmailAddresses: ccEmailAddresses,
+                          Language: language
                       }""")
                   )
-                  with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
-                      for communication in communication_iterator:
-                          communication['AccountAlias'] = account_name
-                          f.write(to_json(communication) + '\n')
-                  key = case_date.strftime(
-                      f"{module_name}/" +
-                      f"{module_name}-communications/" +
-                      f"payer_id={payer_id}/" +
-                      f"account_id={account_id}/" +
-                      f"year=%Y/month=%m/day=%d/{case_id}.json"
-                  )
-                  boto3.client('s3').upload_file("/tmp/tmp.json", bucket, key)
-                  logger.info(f"Processed a total of {index+1} support cases")
-                  logger.info(f"Sending Support case {data['CaseId']} for summarization ...")
-                  message = {
-                      'Bucket': bucket,
-                      'CommunicationsKey': key
-                  }
-                  eventbridge = boto3.client('events')
-                  response = eventbridge.put_events(
-                      Entries=[
-                          {
-                              'Source': 'supportcases.datacollection.cid.aws',
-                              'DetailType': 'Event',
-                              'Detail': json.dumps(message)
-                          }
-                      ]
-                  )
-                  failed_entry_count = response['FailedEntryCount']
-                  if failed_entry_count > 0:
-                      logger.info(f"Failed to send support case event for {case_id} to Eventbridge default bus.")
-                  else:
-                      logger.info(f"Support case event for {case_id} successfully sent to Eventbridge default bus and has Event ID: {response['Entries'][0]['EventId']}")
+
+                  for index, data in enumerate(case_iterator):
+                      case_id = data['CaseId']
+                      case_date = datetime.strptime(data["TimeCreated"], '%Y-%m-%dT%H:%M:%S.%fZ')
+                      with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                          data['AccountAlias'] = account_name
+                          data['Summary'] = ''
+                          f.write(to_json(data)) # single line per file
+                      key = case_date.strftime(
+                          f"{module_name}/" +
+                          f"{module_name}-data/" +
+                          f"payer_id={payer_id}/" +
+                          f"account_id={account_id}/" +
+                          f"year=%Y/month=%m/day=%d/{case_id}.json"
+                      )
+                      s3.upload_file("/tmp/tmp.json", bucket, key)
+                      logger.debug(f"Data stored to s3://{bucket}/{key}")
+
+                      communication_iterator = (
+                          support
+                          .get_paginator('describe_communications')
+                          .paginate(caseId=case_id)
+                          .search("""communications[].{
+                              CaseId: caseId,
+                              Body: body,
+                              SubmittedBy: submittedBy,
+                              TimeCreated: timeCreated,
+                              AttachmentSet: attachmentSet[0]
+                          }""")
+                      )
+                      with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                          for communication in communication_iterator:
+                              communication['AccountAlias'] = account_name
+                              f.write(to_json(communication) + '\n')
+                      key = case_date.strftime(
+                          f"{module_name}/" +
+                          f"{module_name}-communications/" +
+                          f"payer_id={payer_id}/" +
+                          f"account_id={account_id}/" +
+                          f"year=%Y/month=%m/day=%d/{case_id}.json"
+                      )
+                      boto3.client('s3').upload_file("/tmp/tmp.json", bucket, key)
+                      logger.info(f"Processed a total of {index+1} support cases")
+                      logger.info(f"Sending Support case {data['CaseId']} for summarization ...")
+                      message = {
+                          'Bucket': bucket,
+                          'CommunicationsKey': key
+                      }
+                      eventbridge = boto3.client('events')
+                      response = eventbridge.put_events(
+                          Entries=[
+                              {
+                                  'Source': 'supportcases.datacollection.cid.aws',
+                                  'DetailType': 'Event',
+                                  'Detail': json.dumps(message)
+                              }
+                          ]
+                      )
+                      failed_entry_count = response['FailedEntryCount']
+                      if failed_entry_count > 0:
+                          logger.info(f"Failed to send support case event for {case_id} to Eventbridge default bus.")
+                      else:
+                          logger.info(f"Support case event for {case_id} successfully sent to Eventbridge default bus and has Event ID: {response['Entries'][0]['EventId']}")
 
               status["last_read"] = datetime.now().strftime('%Y-%m-%d')
               s3.put_object(
