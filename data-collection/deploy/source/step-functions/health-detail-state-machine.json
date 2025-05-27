@@ -30,7 +30,8 @@
         "LOG_KEY_BASE": "{% 'logs/modules/'&$EXE_START_TIME_SPLIT[0]&'/'&$EXE_START_TIME_SPLIT[1]&'/'&$EXE_START_TIME_SPLIT[2]&'/'&$MODULE&'detail-sf-' %}",
         "CRAWLER_STATE_MACHINE": "{% 'arn:aws:states:'&$DATA_COLLECTION_REGION&':'&$DATA_COLLECTION_ACCOUNT&':stateMachine:'&$PREFIX&'CrawlerExecution-StateMachine' %}",
         "SUB_UUID": {
-          "parent-state-machine-exid": "{% $PARENT_UUID %}"
+          "child-state-machine-exid": "{% $CHILD_UUID %}",
+          "statemachine-id": "{% $states.context.StateMachine.Id %}"
         }
       },
       "Next": "EntryLog"
@@ -82,7 +83,8 @@
       "ItemReader": {
         "Resource": "arn:aws:states:::s3:getObject",
         "ReaderConfig": {
-          "InputType": "JSON"
+          "InputType": "CSV",
+          "CSVHeaderLocation": "FIRST_ROW"
         },
         "Arguments": {
           "Bucket": "{% $BUCKET %}",
@@ -289,9 +291,9 @@
           }
         ]
       },
-      "Output": {
-        "status_code": 500,
-        "description": "Step Function AccountMap failed most or all executions"
+      "Assign": {
+        "ExecutionStatus": 500,
+        "Description": "Step Function AccountMap failed most or all executions"
       },
       "Next": "ExitLog"
     },
@@ -306,23 +308,20 @@
           "crawlers": "{% $CRAWLERS %}"
         }
       },
-      "Output": {
-        "status_code": 200,
-        "description": "Step Function execution completed successfully"
+      "Assign": {
+        "ExecutionStatus": 200,
+        "Description": "Step Function execution completed successfully"
       },
       "Catch": [
         {
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "ExitLog",
-          "Output": {
-            "status_code": 500,
-            "description": "{% 'Step Function AccountMap failed with error: '&$states.errorOutput %}"
-          },
           "Assign": {
-            "ExecutionStatus": 500
-          }
+            "ExecutionStatus": 500,
+            "Description": "{% 'Step Function AccountMap failed with error: '&$states.errorOutput %}"
+          },
+          "Next": "ExitLog"
         }
       ],
       "Next": "ExitLog"
@@ -344,10 +343,10 @@
           "PayerId": "{% $ACCOUNT.payer_id %}",
           "AccountId": "",
           "Region": "",
-          "StatusCode": "{% $states.input.status_code %}",
+          "StatusCode": "{% $ExecutionStatus %}",
           "SubCode": "",
           "RecordCount": 0,
-          "Description": "{% $states.input.description %}",
+          "Description": "{% $Description %}",
           "DataLocation": "",
           "MainExeUuid": "{% $EXE_UUID %}",
           "SubUuid": "{% $SUB_UUID %}",
@@ -366,7 +365,24 @@
           "MaxAttempts": 3
         }
       ],
-      "End": true
+      "Next": "IsError"
+    },
+    "IsError": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $ExecutionStatus >= 500 %}",
+          "Next": "Fail"
+        }
+      ],
+      "QueryLanguage": "JSONata",
+      "Default": "Success"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Fail": {
+      "Type": "Fail"
     }
   },
   "TimeoutSeconds": 10800

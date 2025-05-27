@@ -330,16 +330,18 @@ Resources:
               """
               logger.info(f"Event data: {event}")
               account = event.get('account')
-              batch_input = event.get('BatchInput')
-              items = event.get('Items')
-              if not (account or batch_input):
+              items = event.get('items')
+              params = event.get('params')
+              if not (account and params):
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              is_summary_mode = batch_input == None
-              logger.info(f"Executing in {'summary' if is_summary_mode else 'detail'} mode flow")
-              account = json.loads(account) if is_summary_mode else batch_input.get('account')
+              is_summary_mode = params == "summary"
+              logger.info(f"Executing in {params} mode flow")
+              main_exe_uuid = event.get("main_exe_uuid", "")
+              stack_version = event.get("stack_version", "")
+              account = account if isinstance(account, dict) else json.loads(account)
               account_id = account["account_id"]
               region = get_active_health_region()
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
@@ -390,7 +392,10 @@ Resources:
                               "bucket": BUCKET_NAME,
                               "file": key,
                               "account": account,
-                              "ingestion_time": int(round(ingestion_time.timestamp()))
+                              "ingestion_time": int(round(ingestion_time.timestamp())),
+                              "main_exe_uuid": main_exe_uuid,
+                              "params": "detail",
+                              "stack_version": stack_version
                           }
                           sf_input = json.dumps(sf_input).replace('"', '\"') #need to escape the json for SF
                           sf.start_execution(stateMachineArn=DETAIL_SM_ARN, input=sf_input)
@@ -403,7 +408,7 @@ Resources:
                           logger.error(f"Error: {exc}")
 
               elif items:
-                  ingestion_time = datetime.fromtimestamp(int(batch_input.get('ingestion_time')))
+                  ingestion_time = datetime.fromtimestamp(int(event.get('ingestion_time')))
 
                   with open(TMP_FILE, "w", encoding='utf-8') as f:
                       for item in items:
@@ -477,7 +482,7 @@ Resources:
         ModuleLambdaARN: !GetAtt LambdaFunction.Arn
         Crawlers: '[]'
         CollectionType: "Payers"
-        Params: ''
+        Params: 'summary'
         Module: !Ref CFDataName
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
@@ -501,7 +506,7 @@ Resources:
   StepFunctionDetail:
     Type: AWS::StepFunctions::StateMachine
     Properties:
-      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-detail-StateMachine'
       StateMachineType: STANDARD
       RoleArn: !Ref StepFunctionExecutionRoleARN
       DefinitionS3Location:
