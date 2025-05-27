@@ -331,14 +331,13 @@ Resources:
               logger.info(f"Event data: {event}")
               account = event.get('account')
               items = event.get('items')
-              params = event.get('params')
-              if not (account and params):
+              if not (account):
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              is_summary_mode = params == "summary"
-              logger.info(f"Executing in {params} mode flow")
+              is_summary_mode = not items
+              logger.info(f"Executing in {'summary' if is_summary_mode else 'detail'} mode flow")
               main_exe_uuid = event.get("main_exe_uuid", "")
               stack_version = event.get("stack_version", "")
               account = account if isinstance(account, dict) else json.loads(account)
@@ -482,7 +481,7 @@ Resources:
         ModuleLambdaARN: !GetAtt LambdaFunction.Arn
         Crawlers: '[]'
         CollectionType: "Payers"
-        Params: 'summary'
+        Params: ''
         Module: !Ref CFDataName
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId

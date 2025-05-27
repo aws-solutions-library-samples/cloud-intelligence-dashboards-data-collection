@@ -7,7 +7,7 @@
       "QueryLanguage": "JSONata",
       "Assign": {
         "MODULE": "${Module}",
-        "PARAMS": "detail",
+        "PARAMS": "",
         "DATA_COLLECTION_REGION": "${DeployRegion}",
         "DATA_COLLECTION_ACCOUNT": "${Account}",
         "PREFIX": "${Prefix}",
@@ -48,7 +48,7 @@
           "DataCollectionRegion": "{% $DATA_COLLECTION_REGION %}",
           "DataCollectionAccountId": "{% $DATA_COLLECTION_ACCOUNT %}",
           "Module": "{% $MODULE %}",
-          "ModuleFunction": "sf-entry",
+          "ModuleFunction": "child-sf-entry",
           "Params": "{% $PARAMS %}",
           "PayerId": "",
           "AccountId": "",
@@ -56,7 +56,7 @@
           "StatusCode": 200,
           "SubCode": "",
           "RecordCount": 0,
-          "Description": "Step Function entered",
+          "Description": "Child Step Function entered",
           "DataLocation": "",
           "MainExeUuid": "{% $EXE_UUID %}",
           "SubUuid": "{% $SUB_UUID %}",
@@ -293,7 +293,7 @@
       },
       "Assign": {
         "ExecutionStatus": 500,
-        "Description": "Step Function AccountMap failed most or all executions"
+        "Description": "Child Step Function AccountMap failed most or all executions"
       },
       "Next": "ExitLog"
     },
@@ -310,7 +310,7 @@
       },
       "Assign": {
         "ExecutionStatus": 200,
-        "Description": "Step Function execution completed successfully"
+        "Description": "Child Step Function execution completed successfully"
       },
       "Catch": [
         {
@@ -319,7 +319,7 @@
           ],
           "Assign": {
             "ExecutionStatus": 500,
-            "Description": "{% 'Step Function AccountMap failed with error: '&$states.errorOutput %}"
+            "Description": "{% 'Child Step Function AccountMap failed with error: '&$states.errorOutput %}"
           },
           "Next": "ExitLog"
         }
@@ -338,7 +338,7 @@
           "DataCollectionRegion": "{% $DATA_COLLECTION_REGION %}",
           "DataCollectionAccountId": "{% $DATA_COLLECTION_ACCOUNT %}",
           "Module": "{% $MODULE %}",
-          "ModuleFunction": "sf-exit",
+          "ModuleFunction": "child-sf-exit",
           "Params": "{% $PARAMS %}",
           "PayerId": "{% $ACCOUNT.payer_id %}",
           "AccountId": "",

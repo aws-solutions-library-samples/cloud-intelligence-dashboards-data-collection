@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CID Data Collection - Role for Management Account v3.11.0
+Description: CID Data Collection - Role for Management Account v3.10.0
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
