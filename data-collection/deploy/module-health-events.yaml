@@ -336,7 +336,7 @@ Resources:
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              is_summary_mode = not items
+              is_summary_mode = items is None
               logger.info(f"Executing in {'summary' if is_summary_mode else 'detail'} mode flow")
               main_exe_uuid = event.get("main_exe_uuid", "")
               stack_version = event.get("stack_version", "")
