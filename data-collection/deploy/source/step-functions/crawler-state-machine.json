@@ -1,0 +1,108 @@
+{
+  "Comment": "Orchestrate the Glue Crawlers for the collected data",
+  "StartAt": "SetVariables",
+  "States": {
+    "SetVariables": {
+      "Type": "Pass",
+      "Next": "CrawlerMap",
+      "QueryLanguage": "JSONata",
+      "Output": {
+        "crawlers": "{% $states.input.crawlers %}"
+      },
+      "Assign": {
+        "behavior": "{% $states.input.behavior %}"
+      }
+    },
+    "CrawlerMap": {
+      "Type": "Map",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "GetCrawler",
+        "States": {
+          "GetCrawler": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "BackoffRate": 2,
+                "IntervalSeconds": 1,
+                "MaxAttempts": 8,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Next": "IsReady",
+            "QueryLanguage": "JSONata",
+            "Arguments": {
+              "Name": "{% $states.input %}"
+            },
+            "Output": {
+              "Name": "{% $states.result.Crawler.Name %}",
+              "State": "{% $states.result.Crawler.State %}"
+            }
+          },
+          "IsReady": {
+            "Type": "Choice",
+            "Default": "WaitForCrawler",
+            "Choices": [
+              {
+                "Next": "StartCrawler",
+                "Condition": "{% $states.input.State = 'READY' %}",
+                "Output": {
+                  "Name": "{% $states.input.Name %}"
+                }
+              },
+              {
+                "Next": "NotReadyNoWait",
+                "Condition": "{% $states.input.State != 'READY' and $behavior = 'NOWAIT' %}"
+              }
+            ],
+            "QueryLanguage": "JSONata",
+            "Output": {
+              "Name": "{% $states.input.Name %}"
+            }
+          },
+          "WaitForCrawler": {
+            "Type": "Wait",
+            "Seconds": 30,
+            "Next": "GetCrawler",
+            "QueryLanguage": "JSONata",
+            "Output": "{% $states.input.Name %}"
+          },
+          "StartCrawler": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+            "End": true,
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "BackoffRate": 2,
+                "IntervalSeconds": 1,
+                "MaxAttempts": 8,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "QueryLanguage": "JSONata",
+            "Arguments": {
+              "Name": "{% $states.input.Name %}"
+            }
+          },
+          "NotReadyNoWait": {
+            "Type": "Succeed",
+            "QueryLanguage": "JSONata"
+          }
+        }
+      },
+      "End": true,
+      "QueryLanguage": "JSONata",
+      "Items": "{% $states.input.crawlers %}"
+    }
+  },
+  "TimeoutSeconds": 1200
+}
