@@ -202,6 +202,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeHealthEventsModule',       'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeResiliencyHubModule',      'ParameterValue': "yes"},
        ]
     )
 
@@ -238,6 +239,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeQuickSightModule',         'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeResiliencyHubModule',      'ParameterValue': "yes"},
         ]
     )
 
@@ -403,6 +405,8 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}quicksight-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}service-quotas-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}workspaces-metrics-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}resiliency-hub-StateMachine",
+
     ]
     lambda_arns = []
     lambda_norun_arns = []

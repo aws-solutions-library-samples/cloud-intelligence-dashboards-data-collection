@@ -40,6 +40,7 @@ Metadata:
           - IncludeQuickSightModule
           - IncludeServiceQuotasModule
           - IncludeEUCUtilizationModule
+          - IncludeResilienceHubModule
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -107,6 +108,8 @@ Metadata:
         default: 'Include Service Quota Data Collection'
       IncludeQuickSightModule:
         default: 'Include QuickSight User Collection Module'
+      IncludeResilienceHubModule:
+        default: 'Include Resilience Hub Data Collection Module'
 
 Mappings:
   RegionMap:
@@ -279,7 +282,11 @@ Parameters:
    Description: Collects AWS Service Quotas data
    AllowedValues: ['yes', 'no']
    Default: 'no'
-
+  IncludeResilienceHubModule:
+   Type: String
+   Description: Collects AWS Resilience Hub data
+   AllowedValues: ['yes', 'no']
+   Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -300,6 +307,7 @@ Conditions:
   DeployLicenseManagerModule: !Equals [ !Ref IncludeLicenseManagerModule, "yes"]
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
+  DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -311,11 +319,11 @@ Conditions:
       - !Condition DeployCostAnomalyModule
       - !Condition DeploySupportCasesModule
       - !Condition DeployInventoryCollectorModule
-      - !Condition DeployComputeOptimizerModule
       - !Condition DeployEcsChargebackModule
       - !Condition DeployRDSUtilizationModule
       - !Condition DeployOrgDataModule
       - !Condition DeployBudgetsModule
+      - !Condition DeployResilienceHubModule
     - Fn::Or:
       - !Condition DeployBackupModule
       - !Condition DeployTransitGatewayModule
@@ -324,6 +332,7 @@ Conditions:
       - !Condition DeployQuickSightModule
       - !Condition DeployServiceQuotasModule
       - !Condition DeployEUCUtilizationModule 
+      - !Condition DeployComputeOptimizerModule
   RegionsInScopeIsEmpty: !Equals
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
@@ -1415,6 +1424,31 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
         StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-v1, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+  
+  ResilienceHubModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployResilienceHubModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.10.0/module-resilience-hub.yaml"
+      Parameters:
+        DestinationBucket: !Ref S3Bucket
+        ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
+        ManagementAccountID: !Ref ManagementAccountID
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        Schedule: !Ref ScheduleFrequent
+        ResourcePrefix: !Ref ResourcePrefix
+        BucketPrefix:  !Ref DestinationBucket
+        RegionsInScope:
+          Fn::If:
+            - RegionsInScopeIsEmpty
+            - !Sub "${AWS::Region}"
+            - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-v3, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
