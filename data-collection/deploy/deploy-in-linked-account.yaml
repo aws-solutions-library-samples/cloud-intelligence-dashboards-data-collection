@@ -21,6 +21,7 @@ Metadata:
         - IncludeSupportCasesModule
         - IncludeTransitGatewayModule
         - IncludeServiceQuotasModule
+        - IncludeResilienceHubModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -46,6 +47,8 @@ Metadata:
         default: 'Include Transit Gateway Module'
       IncludeServiceQuotasModule:
         default: 'Include Service Quotas Module'
+      IncludeResilienceHubModule:
+        default: 'Include Resilience Hub Module'
 
 Parameters:
   DataCollectionAccountID:
@@ -104,6 +107,11 @@ Parameters:
     Description: Collects Service Quotas from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeResilienceHubModule:
+    Type: String
+    Description: Collects Resilience Hub data from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -145,6 +153,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}trusted-advisor-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}support-cases-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -420,3 +429,36 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+
+  # Resilience Hub policy
+  ResilienceHubPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeResilienceHubModulePolicy
+    Properties:
+      PolicyName: ResilienceHubPolicy
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - Sid: VisualEditor0
+            Effect: Allow
+            Action:
+              - resiliencehub:ListSopRecommendations
+              - resiliencehub:DescribeAppAssessment
+              - resiliencehub:ListAppComponentRecommendations
+              - resiliencehub:ListAlarmRecommendations
+            Resource: !Sub "arn:${AWS::Partition}:resiliencehub:*:${AWS::AccountId}:app/*"
+          - Sid: VisualEditor1
+            Effect: Allow
+            Action:
+              - resiliencehub:ListApps
+              - resiliencehub:DescribeMetricsExport
+              - resiliencehub:ListAppAssessments
+              - resiliencehub:StartMetricsExport
+            Resource: '*'
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of resources"  
