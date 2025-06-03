@@ -278,32 +278,35 @@ def launch_(state_machine_arns, lambda_arns=None, lambda_norun_arns=None, wait=T
     execution_arns = []
 
     for state_machine_arn in state_machine_arns:
-        executions = stepfunctions.list_executions(
-            stateMachineArn=state_machine_arn,
-        )['executions']
-        for execution in executions:
-            if execution['status'] == 'RUNNING':
-                execution_arns.append(execution['executionArn'])
-            if (started - execution['startDate']).total_seconds() < 1 * 60:
-                logger.info(f"Already started {execution['executionArn']}")
-                break # no need to start execution if there is a recent one
-        else:
-            execution_arn = stepfunctions.start_execution(stateMachineArn=state_machine_arn)['executionArn']
-            logger.info(f'Starting {execution_arn}')
-            execution_arns.append(execution_arn)
+        try:
+            executions = stepfunctions.list_executions(
+                stateMachineArn=state_machine_arn,
+            )['executions']
+            for execution in executions:
+                if execution['status'] == 'RUNNING':
+                    execution_arns.append(execution['executionArn'])
+                if (started - execution['startDate']).total_seconds() < 1 * 60:
+                    logger.info(f"Already started {execution['executionArn']}")
+                    break # no need to start execution if there is a recent one
+            else:
+                execution_arn = stepfunctions.start_execution(stateMachineArn=state_machine_arn)['executionArn']
+                logger.info(f'Starting {execution_arn}')
+                execution_arns.append(execution_arn)
 
-        # Extract Lambda function ARNs from the state machine definition
-        state_machine_definition = json.loads(stepfunctions.describe_state_machine(stateMachineArn=state_machine_arn)['definition'])
-        def _extract_lambda_arns(state):
-            if str(state).startswith('arn:aws:lambda:') or str(state).startswith('arn:aws-cn:lambda:'):
-                lambda_arns.add(state)
-            elif isinstance(state, dict):
-                for value in state.values():
-                    _extract_lambda_arns(value)
-            elif isinstance(state, list):
-                for item in state:
-                    _extract_lambda_arns(item)
-        _extract_lambda_arns(state_machine_definition)
+            # Extract Lambda function ARNs from the state machine definition
+            state_machine_definition = json.loads(stepfunctions.describe_state_machine(stateMachineArn=state_machine_arn)['definition'])
+            def _extract_lambda_arns(state):
+                if str(state).startswith('arn:aws:lambda:') or str(state).startswith('arn:aws-cn:lambda:'):
+                    lambda_arns.add(state)
+                elif isinstance(state, dict):
+                    for value in state.values():
+                        _extract_lambda_arns(value)
+                elif isinstance(state, list):
+                    for item in state:
+                        _extract_lambda_arns(item)
+            _extract_lambda_arns(state_machine_definition)
+        except Exception as exc:
+            print(exc)
 
     if not wait:
         return
