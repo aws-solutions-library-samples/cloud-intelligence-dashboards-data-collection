@@ -257,22 +257,22 @@ Resources:
                 BlockPublicPolicy : true
                 IgnorePublicAcls : true
                 RestrictPublicBuckets : true
-              # LifecycleConfiguration:
-              #   Rules:
-              #     - Id: Cleanup
-              #       Prefix: ''
-              #       Status: Enabled
-              #       ExpirationInDays: 1
-              #     - Id: NoncurrentCleanup
-              #       Prefix: ''
-              #       Status: Enabled
-              #       NoncurrentVersionExpiration:
-              #         NoncurrentDays: 1
-              #     - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
-              #       Status: Enabled
-              #       AbortIncompleteMultipartUpload:
-              #         DaysAfterInitiation: 7
-              #       ExpiredObjectDeleteMarker: true
+              LifecycleConfiguration:
+                Rules:
+                  - Id: Cleanup
+                    Prefix: ''
+                    Status: Enabled
+                    ExpirationInDays: 1
+                  - Id: NoncurrentCleanup
+                    Prefix: ''
+                    Status: Enabled
+                    NoncurrentVersionExpiration:
+                      NoncurrentDays: 1
+                  - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
+                    Status: Enabled
+                    AbortIncompleteMultipartUpload:
+                      DaysAfterInitiation: 7
+                    ExpiredObjectDeleteMarker: true
       Tags: # Hacky way to manage dependencies
         - Key: IgnoreMeIamOnlyWorkaround
           Value: !GetAtt StackSetExecutionRole.Arn
@@ -869,3 +869,399 @@ Resources:
     Properties:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
+
+  ResilienceHubApplicationsTable:
+      Type: AWS::Glue::Table
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseName: !Ref DatabaseName
+        TableInput:
+          Name: 'resiliencehub_applications'
+          TableType: EXTERNAL_TABLE
+          Parameters:
+            EXTERNAL: "TRUE"
+            skip.header.line.count: "1"
+          PartitionKeys: []
+          StorageDescriptor:
+            Location: !Sub "s3://${DestinationBucket}/resiliencehub_applications/"
+            InputFormat: org.apache.hadoop.mapred.TextInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+            Columns:
+              - Name: region
+                Type: string
+              - Name: account_id
+                Type: string
+              - Name: application_id
+                Type: string
+              - Name: application_arn
+                Type: string
+              - Name: application_name
+                Type: string
+              - Name: resiliency_policy_id
+                Type: string
+              - Name: resiliency_policy_arn
+                Type: string
+              - Name: resiliency_policy_name
+                Type: string
+              - Name: last_assessment_time
+                Type: string
+              - Name: last_assessment_arn
+                Type: string
+              - Name: resiliency_status
+                Type: string
+              - Name: resiliency_drift_status
+                Type: string
+              - Name: compliance_total
+                Type: string
+              - Name: fis_tests_total
+                Type: string
+              - Name: alarms_total
+                Type: string
+              - Name: sops_total
+                Type: string
+              - Name: compliance_outstanding
+                Type: string
+              - Name: fis_tests_outstanding
+                Type: string
+              - Name: alarms_outstanding
+                Type: string
+              - Name: sops_outstanding
+                Type: string
+              - Name: compliance_excluded
+                Type: string
+              - Name: fis_tests_excluded
+                Type: string
+              - Name: alarms_excluded
+                Type: string
+              - Name: sops_excluded
+                Type: string
+              - Name: operational_recommendations_total
+                Type: string
+              - Name: operational_recommendations_outstanding
+                Type: string
+              - Name: operational_recommendations_excluded
+                Type: string
+              - Name: infrastructure_recommendations_total
+                Type: string
+              - Name: input_source_drifts
+                Type: string
+              - Name: app_component_drifts
+                Type: string
+              - Name: resiliency_score
+                Type: string
+            SerdeInfo:
+              SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+              Parameters:
+                separatorChar: ","
+                quoteChar: "\""
+                escapeChar: "\\"
+
+  ResilienceDailyAssessmentTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_daily_assessments'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/resiliencehub_daily_assessments/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: DayTime
+              Type: string
+            - Name: Region
+              Type: string
+            - Name: Account_Id
+              Type: string
+            - Name: Application_Id
+              Type: string
+            - Name: Application_Arn
+              Type: string
+            - Name: Application_Name
+              Type: string
+            - Name: Assessment_Time
+              Type: string
+            - Name: Assessment_Arn
+              Type: string
+            - Name: Resiliency_Status
+              Type: string
+            - Name: Resiliency_Drift_Status
+              Type: string
+            - Name: Compliance_Total
+              Type: string
+            - Name: FIS_Tests_Total
+              Type: string
+            - Name: Alarms_Total
+              Type: string
+            - Name: SOPs_Total
+              Type: string
+            - Name: Compliance_Outstanding
+              Type: string
+            - Name: FIS_Tests_Outstanding
+              Type: string
+            - Name: Alarms_Outstanding
+              Type: string
+            - Name: SOPs_Outstanding
+              Type: string
+            - Name: Compliance_Excluded
+              Type: string
+            - Name: FIS_Tests_Excluded
+              Type: string
+            - Name: Alarms_Excluded
+              Type: string
+            - Name: SOPs_Excluded
+              Type: string
+            - Name: Operational_Recommendations_Total
+              Type: string
+            - Name: Operational_Recommendations_Outstanding
+              Type: string
+            - Name: Operational_Recommendations_Excluded
+              Type: string
+            - Name: Input_Source_Drifts
+              Type: string
+            - Name: App_Component_Drifts
+              Type: string
+            - Name: Resiliency_Score
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+
+  ResilienceHubResourceTypesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_resource_types'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/resiliencehub_resource_types/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: region
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: resource_type
+              Type: string
+            - Name: app_component_type
+              Type: string
+            - Name: applications
+              Type: string
+            - Name: recommendations
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+
+  ResilienceHubApplicationRtoRpoTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_application_rto_rpo'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/resiliencehub_application_rto_rpo/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: app_arn
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: assessment_time
+              Type: string
+            - Name: estimated_overall_rto
+              Type: string
+            - Name: estimated_overall_rpo
+              Type: string
+            - Name: target_rto
+              Type: string
+            - Name: target_rpo
+              Type: string
+            - Name: current_rto_az
+              Type: string
+            - Name: current_rto_hardware
+              Type: string
+            - Name: current_rto_software
+              Type: string
+            - Name: current_rpo_az
+              Type: string
+            - Name: current_rpo_hardware
+              Type: string
+            - Name: current_rpo_software
+              Type: string
+            - Name: target_rto_az
+              Type: string
+            - Name: target_rto_hardware
+              Type: string
+            - Name: target_rto_software
+              Type: string
+            - Name: target_rpo_az
+              Type: string
+            - Name: target_rpo_hardware
+              Type: string
+            - Name: target_rpo_software
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+
+  ResilienceHubAppRecommendationsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_app_recommendations'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.er.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/app_recommendations/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: App_ARN
+              Type: string
+            - Name: Assessment_ARN
+              Type: string
+            - Name: App_Component_Name
+              Type: string
+            - Name: Description
+              Type: string
+            - Name: HA_Architecture
+              Type: string
+            - Name: Optimization_Type
+              Type: string
+            - Name: Suggested_Changes
+              Type: string
+            - Name: cost
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+
+  ResilienceHubAlarmRecommendationsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_alarm_recommendations'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/alarm_recommendations/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: App_ARN
+              Type: string
+            - Name: Assessment_ARN
+              Type: string
+            - Name: App_Component_Name
+              Type: string
+            - Name: Description
+              Type: string
+            - Name: alreadyImplemented
+              Type: string
+            - Name: excluded
+              Type: string
+            - Name: resourceID
+              Type: string
+            - Name: targetAccountID
+              Type: string
+            - Name: targetRegion
+              Type: string
+            - Name: name
+              Type: string
+            - Name: recommendationStatus
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+
+  ResilienceHubSopRecommendationsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resiliencehub_sop_recommendations'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          skip.header.line.count: "1"
+        PartitionKeys: []
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/sop_recommendations/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: App_ARN
+              Type: string
+            - Name: Assessment_ARN
+              Type: string
+            - Name: App_Component_Name
+              Type: string
+            - Name: Description
+              Type: string
+            - Name: alreadyImplemented
+              Type: boolean
+            - Name: excluded
+              Type: boolean
+            - Name: resourceID
+              Type: string
+            - Name: targetAccountID
+              Type: string
+            - Name: targetRegion
+              Type: string
+            - Name: name
+              Type: string
+            - Name: recommendationStatus
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
