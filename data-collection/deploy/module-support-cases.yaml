@@ -201,18 +201,23 @@ Resources:
 
           def main(account, role_name, module_name, bucket): #pylint: disable=too-many-locals
               account_id = account["account_id"]
+              logger.debug(f"==> account_id: '{account["account_id"]}'")
               payer_id = account["payer_id"]
+              logger.debug(f"==> payer_id: '{account["payer_id"]}'")
               account_name = account.get("account_name", None)
+              logger.debug(f"==> account_name: '{account.get("account_name", None)}'")
               support = get_client_with_role(role_name, account_id, region="us-east-1", service="support")
               s3 = boto3.client('s3')
 
               default_start_date = (datetime.now().date() - timedelta(days=365)).strftime('%Y-%m-%d') # Case communications are available for 12 months after creation.
-
+              logger.debug(f"==> default_start_date: '{default_start_date}'")
               status = {
                   "last_read": default_start_date,
                   "account_id": account_id,
               }
+              logger.debug(f"==> status: '{status}'")
               status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/{account_id}.json"
+              logger.debug(f"==> status_key: '{status_key}'")
               try:
                   status = json.loads(
                       s3.get_object(
@@ -230,7 +235,7 @@ Resources:
                   .paginate(
                       afterTime=status["last_read"],
                       includeCommunications=False,
-                      includeResolvedCases=True,
+                      includeResolvedCases=True
                   )
                   .search("""cases[].{
                       CaseId: caseId,
@@ -246,10 +251,11 @@ Resources:
                       Language: language
                   }""")
               )
-
               for index, data in enumerate(case_iterator):
                   case_id = data['CaseId']
+                  logger.debug(f"==> case_id: '{data['CaseId']}'")
                   case_date = datetime.strptime(data["TimeCreated"], '%Y-%m-%dT%H:%M:%S.%fZ')
+                  logger.debug(f"==> case_date: '{case_date}'")
                   with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
                       data['AccountAlias'] = account_name
                       data['Summary'] = ''
@@ -311,6 +317,7 @@ Resources:
                       logger.info(f"Support case event for {case_id} successfully sent to Eventbridge default bus and has Event ID: {response['Entries'][0]['EventId']}")
 
               status["last_read"] = datetime.now().strftime('%Y-%m-%d')
+              logger.debug(f"==> last_read: '{status["last_read"]}'")
               s3.put_object(
                   Bucket=bucket,
                   Key=status_key,
@@ -372,6 +379,7 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'
