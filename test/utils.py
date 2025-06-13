@@ -9,6 +9,7 @@ import boto3
 
 
 logger = logging.getLogger(__name__)
+version = json.load(open('data-collection/utils/version.json'))['version']
 
 HEADER = '\033[95m'
 BLUE = '\033[94m'
@@ -156,7 +157,7 @@ def deploy_stack(cloudformation, stack_name: str, url: str, parameters: list[dic
             TimeoutInMinutes=60,
             **options,
         )
-        logger.info(f'{stack_name} started creation strarted {res}')
+        logger.info(f'{stack_name} started creation started {res}')
     except cloudformation.exceptions.AlreadyExistsException:
         try:
             logger.info(f'{stack_name} exists')
@@ -178,7 +179,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
     deploy_stack(
         cloudformation=cloudformation,
         stack_name=f'{PREFIX}OptimizationDataReadPermissionsStack',
-        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/deploy-data-read-permissions.yaml',
+        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/v{version}/deploy-data-read-permissions.yaml',
         parameters=[
             {'ParameterKey': 'CFNSourceBucket',                 'ParameterValue': bucket},
             {'ParameterKey': 'DataCollectionAccountID',         'ParameterValue': account_id},
@@ -207,7 +208,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
     deploy_stack(
         cloudformation=cloudformation,
         stack_name=f'{PREFIX}OptimizationDataCollectionStack',
-        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/deploy-data-collection.yaml',
+        url=f'https://{bucket}.s3.amazonaws.com/cfn/data-collection/v{version}/deploy-data-collection.yaml',
         parameters=[
             {'ParameterKey': 'CFNSourceBucket',                 'ParameterValue': bucket},
             {'ParameterKey': 'RegionsInScope',                  'ParameterValue': REGIONS},
@@ -231,6 +232,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeTAModule',                 'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeBackupModule',             'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeAWSFeedsModule',           'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeISVFeedsModule',           'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeHealthEventsModule',       'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeQuickSightModule',         'ParameterValue': "yes"},
@@ -276,32 +278,35 @@ def launch_(state_machine_arns, lambda_arns=None, lambda_norun_arns=None, wait=T
     execution_arns = []
 
     for state_machine_arn in state_machine_arns:
-        executions = stepfunctions.list_executions(
-            stateMachineArn=state_machine_arn,
-        )['executions']
-        for execution in executions:
-            if execution['status'] == 'RUNNING':
-                execution_arns.append(execution['executionArn'])
-            if (started - execution['startDate']).total_seconds() < 1 * 60:
-                logger.info(f"Already started {execution['executionArn']}")
-                break # no need to start execution if there is a recent one
-        else:
-            execution_arn = stepfunctions.start_execution(stateMachineArn=state_machine_arn)['executionArn']
-            logger.info(f'Starting {execution_arn}')
-            execution_arns.append(execution_arn)
+        try:
+            executions = stepfunctions.list_executions(
+                stateMachineArn=state_machine_arn,
+            )['executions']
+            for execution in executions:
+                if execution['status'] == 'RUNNING':
+                    execution_arns.append(execution['executionArn'])
+                if (started - execution['startDate']).total_seconds() < 1 * 60:
+                    logger.info(f"Already started {execution['executionArn']}")
+                    break # no need to start execution if there is a recent one
+            else:
+                execution_arn = stepfunctions.start_execution(stateMachineArn=state_machine_arn)['executionArn']
+                logger.info(f'Starting {execution_arn}')
+                execution_arns.append(execution_arn)
 
-        # Extract Lambda function ARNs from the state machine definition
-        state_machine_definition = json.loads(stepfunctions.describe_state_machine(stateMachineArn=state_machine_arn)['definition'])
-        def _extract_lambda_arns(state):
-            if str(state).startswith('arn:aws:lambda:') or str(state).startswith('arn:aws-cn:lambda:'):
-                lambda_arns.add(state)
-            elif isinstance(state, dict):
-                for value in state.values():
-                    _extract_lambda_arns(value)
-            elif isinstance(state, list):
-                for item in state:
-                    _extract_lambda_arns(item)
-        _extract_lambda_arns(state_machine_definition)
+            # Extract Lambda function ARNs from the state machine definition
+            state_machine_definition = json.loads(stepfunctions.describe_state_machine(stateMachineArn=state_machine_arn)['definition'])
+            def _extract_lambda_arns(state):
+                if str(state).startswith('arn:aws:lambda:') or str(state).startswith('arn:aws-cn:lambda:'):
+                    lambda_arns.add(state)
+                elif isinstance(state, dict):
+                    for value in state.values():
+                        _extract_lambda_arns(value)
+                elif isinstance(state, list):
+                    for item in state:
+                        _extract_lambda_arns(item)
+            _extract_lambda_arns(state_machine_definition)
+        except Exception as exc:
+            print(exc)
 
     if not wait:
         return
@@ -369,7 +374,8 @@ def trigger_update(account_id):
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-VpcInstances-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-RdsDbSnapshots-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-LambdaFunctions-StateMachine',
-        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-WorkSpaces-StateMachine',       
+        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-NetworkInterfaces-StateMachine',
+        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-WorkSpaces-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}rds-usage-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}transit-gateway-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}trusted-advisor-StateMachine',
@@ -392,6 +398,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}backup-BackupJobs-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}aws-feeds-Blog-Post-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}aws-feeds-Whats-New-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}isv-feeds-Whats-New-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}aws-feeds-Security-Bulletin-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}aws-feeds-YouTube-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}health-events-StateMachine",

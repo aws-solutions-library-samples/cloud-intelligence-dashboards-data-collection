@@ -38,6 +38,7 @@ filenames = [
     'data-collection/deploy/deploy-data-collection.yaml',
     'data-collection/deploy/deploy-in-management-account.yaml',
     'data-collection/deploy/deploy-in-linked-account.yaml',
+    'data-collection/deploy/source/step-functions/main-state-machine.json',
 	"data-collection/utils/version.json",
 ]
 for filename in filenames:

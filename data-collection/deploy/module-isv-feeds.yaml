@@ -1,0 +1,883 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Restrieves ISV Feeds
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold ISVs feed data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold
+      ISVs feed data
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: isv-feeds
+  HistoryToCollectInDays:
+    Type: String
+    Description: 'History of ISV News feeds to collect in days. Some ISVs have this embedded by design in their feeds. This parameter will be in effect only if the ISV feed sends more data than you want.'
+    Default: '90'
+  ISVList:
+    Type: String
+    Description: 'Comma-separated list of ISVs News Feed to gather'
+    Default: 'hashicorp,datadog,orca-security,wiz,crowdstrike,tenable,databricks,gitlab,circle-ci'
+    AllowedPattern: '^(hashicorp|datadog|orca-security|wiz|crowdstrike|tenable|gitlab|circle-ci|databricks)(,(hashicorp|datadog|orca-security|wiz|crowdstrike|tenable|gitlab|circle-ci|databricks))*$'
+    ConstraintDescription: 'Must be a comma-separated list containing only supported ISVs.'
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the ISVs feed data retrieval
+    Default: rate(1 days)
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you
+      may wish to add a dash at the end to make more readable
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ResourcePrefix}${CFDataName}-LambdaRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub lambda.${AWS::URLSuffix}
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub ${DestinationBucketARN}/*
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: Need explicit name to identify role actions
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ResourcePrefix}${CFDataName}-Lambda
+      Description: Lambda function to retrieve ISV Feeds
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import os
+          import json
+          from urllib.request import urlopen, Request, URLError
+          import xml.etree.ElementTree as ET  # nosec
+          from dateutil.parser import parse
+          from datetime import datetime, timedelta, timezone
+          import boto3
+          import logging
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          TODAY = datetime.now(timezone.utc)
+          HISTORY_TO_COLLECT_IN_DAYS = float(os.environ.get('HISTORY_TO_COLLECT_IN_DAYS', '90'))
+          ISV_FEEDS_MAP = {
+              "hashicorp": {
+                  "path": "isv-feeds/hashicorp-feeds-whats-new",
+                  "feed_url": "https://www.hashicorp.com/blog/feed.xml"
+              },
+              "datadog": {
+                  "path": "isv-feeds/datadog-feeds-whats-new",
+                  "feed_url": "https://www.datadoghq.com/release-notes-feed?app=datadoghq.com"
+              },
+              "orca-security": {
+                  "path": "isv-feeds/orca-security-feeds-whats-new",
+                  "feed_url": "https://orca.security/resources/blog/feed/"
+              },
+              "wiz": {
+                  "path": "isv-feeds/wiz-feeds-whats-new",
+                  "feed_url": "https://www.wiz.io/feed/rss.xml"
+              },
+              "crowdstrike": {
+                  "path": "isv-feeds/crowdstrike-feeds-whats-new",
+                  "feed_url": "https://www.crowdstrike.com/en-us/blog/feed"
+              },
+              "tenable": {
+                  "path": "isv-feeds/tenable-feeds-whats-new",
+                  "feed_url": "https://www.tenable.com/blog/feed"
+              },
+              "databricks": {
+                  "path": "isv-feeds/databricks-feeds-whats-new",
+                  "feed_url": "https://www.databricks.com/feed"
+              },
+              "gitlab": {
+                  "path": "isv-feeds/gitlab-feeds-whats-new",
+                  "feed_url": "https://about.gitlab.com/atom.xml"
+              },
+              "circle-ci": {
+                  "path": "isv-feeds/circle-ci-feeds-whats-new",
+                  "feed_url": "https://circleci.com/blog/feed.xml"
+              }
+          }
+
+          def lambda_handler(event, context):
+              bucket_name = os.environ['BUCKET_NAME']
+              isvs = os.environ['ISV_LIST'].split(',')
+              logger.debug(f"ISV Feeds to be collected: {os.environ['ISV_LIST']}")
+              try:
+                  for isv in isvs:
+                      logger.info(f"Fetching News Feed for {isv}")
+                      feed_url = ISV_FEEDS_MAP[isv]['feed_url']
+                      logger.debug(f"{isv} feed URL: {feed_url}")
+                      bucket_path = ISV_FEEDS_MAP[isv]['path']
+                      with urlopen(
+                          Request(
+                              feed_url,
+                              headers={
+                                  'User-Agent': 'Mozilla'
+                              }
+                          ),
+                          timeout=10
+                      ) as response:  # nosec
+                          feed_data = response.read().decode('utf-8')
+                      logger.debug(f"{isv} feed successfully downloaded, now processing ...")
+                      malicious_strings = ['!ENTITY', ':include']
+                      for string in malicious_strings:
+                          if string in feed_data:
+                              logger.debug(f"malicious content detected in {isv} feed... erroring out.")
+                              return {
+                                  'statusCode': 400,
+                                  'body': f'Malicious content detected in the XML feed: {string}'
+                              }
+
+                      s3 = boto3.client('s3')
+                      root = ET.fromstring(feed_data)  # nosec
+                      date_grouped_records = {}
+
+                      if isv == "hashicorp":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = '{http://www.w3.org/2005/Atom}'
+                          items = root.findall(ns+'entry')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall(ns+'entry'):
+                              try:
+                                  pubDate = getattr(item.find(ns+'updated'), 'text', '')
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = getattr(item.find(ns+'id'), 'text', None)
+                                  title = getattr(item.find(ns+'title'), 'text', None)
+                                  author = getattr(item.find(ns+'author').find(ns+'name'), 'text', None)
+                                  pubDate = getattr(item.find(ns+'updated'), 'text', '')
+                                  category = getattr(item.find(ns+'category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+                                  
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                                          
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          
+                          logger.debug(f"parsing of {isv} news feed done.")
+
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+
+                      elif isv == "datadog":
+                          logger.debug(f"parsing {isv} news feed...")
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall('.//item'):
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = getattr(item.find('author'), 'text', isv)
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          
+                          logger.debug(f"parsing of {isv} news feed done.")
+
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+                      elif isv == "orca-security":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall('.//item'):
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = item.find('dc:creator', ns).text
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                                  
+                          logger.debug(f"parsing of {isv} news feed done.")
+
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+                      elif isv == "wiz":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall('.//item'):
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = getattr(item.find('dc:creator', ns), 'text', isv)
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          
+                          logger.debug(f"parsing of {isv} news feed done.")
+
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+                      elif isv == "crowdstrike":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in items:
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = item.find('dc:creator', ns).text
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+
+                          logger.debug(f"parsing of {isv} news feed done.")
+                          
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                              
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+                      elif isv == "tenable":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall('.//item'):
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = getattr(item.find('dc:creator', ns), 'text', isv)
+                                  pubDate = item.find('pubDate').text
+                                  service = getattr(item.find('service'), 'text', 'ISV')
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+
+                          logger.debug(f"parsing of {isv} news feed done.")
+                          
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                              
+                          logger.debug(f"processing of {isv} news feed completed.")
+                              
+                      elif isv == "databricks":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in items:
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = getattr(item.find('dc:creator', ns), 'text', isv)
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+                                  # description_cleaned = clean_html(description)
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+
+                          logger.debug(f"parsing of {isv} news feed done.")
+                          
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+
+                      elif isv == "gitlab":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = '{http://www.w3.org/2005/Atom}'
+                          items = root.findall(ns+'entry')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in root.findall(ns+'entry'):
+                              try:
+                                  pubDate = getattr(item.find(ns+'updated'), 'text', '')
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = getattr(item.find(ns+'id'), 'text', None)
+                                  title = getattr(item.find(ns+'title'), 'text', None)
+                                  author = getattr(item.find(ns+'author').find(ns+'name'), 'text', isv)
+                                  pubDate = getattr(item.find(ns+'updated'), 'text', '')
+                                  category = getattr(item.find(ns+'category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'isv': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                                          
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+
+                          logger.debug(f"parsing of {isv} news feed done.")
+                          
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+                      elif isv == "circle-ci":
+                          logger.debug(f"parsing {isv} news feed...")
+                          ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                          items = root.findall('.//item')
+                          logger.debug(f"filtering out {isv} news that are older than {HISTORY_TO_COLLECT_IN_DAYS} days ...")
+                          for item in items:
+                              try:
+                                  pubDate = item.find('pubDate').text
+                                  pubDate_datetime = parse(pubDate)
+                                  if TODAY - pubDate_datetime > timedelta(HISTORY_TO_COLLECT_IN_DAYS) :
+                                      items.remove(item)
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+                          for item in items:
+                              try:
+                                  link = item.find('guid').text
+                                  title = item.find('title').text
+                                  author = item.find('dc:creator', ns).text
+                                  pubDate = item.find('pubDate').text
+                                  category = getattr(item.find('category'), 'text', isv)
+
+                                  # Parsing and formatting pubDate to ISO 8601 format
+                                  pubDate_datetime = parse(pubDate)
+                                  formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                  
+                                  year, month, day = formatted_date[:10].split('-')
+                                  date_key = f"{year}-{month}-{day}"
+
+                                  json_record = {
+                                      'link': link,
+                                      'title': title,
+                                      'author': author,
+                                      'date': formatted_date,
+                                      'service': isv,
+                                      'category': category
+                                  }
+                                  if date_key not in date_grouped_records:
+                                      date_grouped_records[date_key] = []
+                                  date_grouped_records[date_key].append(json_record)
+                              
+                              except Exception as e:
+                                  print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
+
+                          logger.debug(f"parsing of {isv} news feed done.")
+                          
+                          for date_key, records in date_grouped_records.items():
+                              year, month, day = date_key.split('-')
+                              json_lines = '\n'.join(json.dumps(record) for record in records)
+                              with open("/tmp/tmp.json", "w", encoding='utf-8') as f:
+                                  f.write(json_lines)
+                              s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} ...")
+                              s3.upload_file("/tmp/tmp.json", bucket_name, s3_key)
+                              logger.debug(f"uploading of {isv} news feed to s3: s3://{bucket_name}/{s3_key} done")
+                          
+                          logger.debug(f"processing of {isv} news feed completed.")
+                      
+              except KeyError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Unsupported ISV: {str(e)}'
+                  }
+              except URLError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error downloading feed: {str(e)}'
+                  }
+              except ET.ParseError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error parsing XML: {str(e)}'
+                  }
+              except boto3.exceptions.S3UploadFailedError as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error uploading to S3: {str(e)}'
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': f'Error processing feed: {str(e)}'
+                  }
+      Handler: index.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          ISV_LIST: !Ref ISVList
+          HISTORY_TO_COLLECT_IN_DAYS: !Ref HistoryToCollectInDays
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89 # Lambda functions should be deployed inside a VPC
+            reason: No need for VPC in this case
+          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
+            reason: No need for simultaneous execution
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${LambdaFunction}
+      RetentionInDays: 60
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${ResourcePrefix}${CFDataName}-Crawler
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/hashicorp-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/datadog-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/orca-security-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/wiz-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/crowdstrike-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/tenable-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/databricks-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/gitlab-feeds-whats-new/
+          - Path: !Sub s3://${DestinationBucket}/isv-feeds/circle-ci-feeds-whats-new/
+      Configuration: '{"Version":1.0,"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"}}}'
+
+  StepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub ${ResourcePrefix}${CFDataName}-Whats-New-StateMachine
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawler: !Sub ${ResourcePrefix}${CFDataName}-Crawler
+        CollectionType: LINKED
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+
+  RefreshSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Scheduler for the ISV Feeds Refresh
+      Name: !Sub ${ResourcePrefix}${CFDataName}-Refresh-Schedule
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: FLEXIBLE
+      Target:
+        Arn: !GetAtt StepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AthenaNamedQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Name: !Sub ${ResourcePrefix}${CFDataName}-Athena-Named-Query
+      QueryString:
+        Fn::Sub: |
+          CREATE OR REPLACE VIEW isv_feeds AS
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.hashicorp_feeds_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.datadog_feeds_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.wiz_feeds_whats_new
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.orca-security_feeds_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.crowdstrike_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.tenable_feeds_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.databricks_feeds_whats_new
+          UNION
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.gitlab_feeds_whats_new
+          SELECT
+            date as published,
+            'whats_new' AS feed_type,
+            title,
+            link as url,
+            category
+          FROM ${DatabaseName}.circle_ci_feeds_whats_new
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName

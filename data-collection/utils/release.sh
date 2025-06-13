@@ -7,7 +7,7 @@ export STACK_SET_NAME=LayerBuckets
 export CENTRAL_BUCKET=aws-managed-cost-intelligence-dashboards
 
 code_path=$(git rev-parse --show-toplevel)/data-collection/deploy
-version=$(jq -r '.version' data-collection/utils/version.json)
+version=v$(jq -r '.version' data-collection/utils/version.json)
 
 echo "sync to central bucket"
 aws s3 sync $code_path/       s3://$CENTRAL_BUCKET/cfn/data-collection/

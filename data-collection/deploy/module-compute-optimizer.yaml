@@ -329,6 +329,11 @@ Resources:
                     Status: Enabled
                     NoncurrentVersionExpiration:
                       NoncurrentDays: 1
+                  - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
+                    Status: Enabled
+                    AbortIncompleteMultipartUpload:
+                      DaysAfterInitiation: 7
+                    ExpiredObjectDeleteMarker: true
       Tags: # Hacky way to manage dependencies
         - Key: IgnoreMeIamOnlyWorkaround
           Value: !GetAtt StackSetExecutionRole.Arn
@@ -496,6 +501,7 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'

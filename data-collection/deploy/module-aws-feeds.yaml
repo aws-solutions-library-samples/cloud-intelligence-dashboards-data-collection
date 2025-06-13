@@ -111,6 +111,18 @@ Resources:
           from dateutil.parser import parse
           import boto3
 
+          FEEDS_MAP = {
+              "aws": {
+                  "path": "aws-feeds/aws-feeds-whats-new",
+                  "feed_url": "https://aws.amazon.com/about-aws/whats-new/recent/feed/"
+              },
+              "aws-cid": {
+                  "path": "aws-feeds/aws-cid-feeds-whats-new",
+                  "feed_url": "https://cid.workshops.aws.dev/feed/cloud-intelligence-dashboards.rss",
+                  "default_services": ["aws-cid"],
+              }
+          }
+
           def clean_html(html_content):
               class MyParser(HTMLParser):
                   def __init__(self):
@@ -136,81 +148,82 @@ Resources:
               return parser.text.strip() + '\n\n' + '\n'.join([f"[{index}]: {url}" for index, url in parser.ref.items()])
 
           def lambda_handler(event, context):
-              feed_url = os.environ['FEED_URL']
+              feeds_list = os.environ['FEEDS_LIST'].split(',')
               bucket_name = os.environ['BUCKET_NAME']
-              bucket_path = os.environ.get('BUCKET_PATH', '')
 
               try:
-                  with urllib.request.urlopen(feed_url, timeout=10) as response:  # nosec
-                      feed_data = response.read().decode('utf-8')
+                  for entry in feeds_list:
+                      feed_url = FEEDS_MAP[entry]['feed_url']
+                      bucket_path = FEEDS_MAP[entry]['path']
+                      with urllib.request.urlopen(feed_url, timeout=10) as response:  # nosec
+                          feed_data = response.read().decode('utf-8')
 
-                  malicious_strings = ['!ENTITY', ':include']
-                  for string in malicious_strings:
-                      if string in feed_data:
-                          return {
-                              'statusCode': 400,
-                              'body': f'Malicious content detected in the XML feed: {string}'
-                          }
+                      malicious_strings = ['!ENTITY', ':include']
+                      for string in malicious_strings:
+                          if string in feed_data:
+                              return {
+                                  'statusCode': 400,
+                                  'body': f'Malicious content detected in the XML feed: {string}'
+                              }
 
-                  s3 = boto3.client('s3')
-                  root = ET.fromstring(feed_data)  # nosec
+                      s3 = boto3.client('s3')
+                      root = ET.fromstring(feed_data)  # nosec
 
-                  date_grouped_records = {}
+                      date_grouped_records = {}
 
-                  for item in root.findall('.//item'):
-                      try:
-                          link = item.find('link').text
-                          title = item.find('title').text
-                          description = item.find('description').text or ''
-                          pubDate = item.find('pubDate').text
-                          category = item.find('category').text or ''
+                      for item in root.findall('.//item'):
+                          try:
+                              link = item.find('link').text
+                              title = item.find('title').text
+                              description = item.find('description').text or ''
+                              pubDate = item.find('pubDate').text
+                              category = item.find('category').text or ''
+                              # Parsing and formatting pubDate to ISO 8601 format
+                              pubDate_datetime = parse(pubDate)
+                              formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-                          # Parsing and formatting pubDate to ISO 8601 format
-                          pubDate_datetime = parse(pubDate)
-                          formatted_date = pubDate_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                              year, month, day = formatted_date[:10].split('-')
+                              date_key = f"{year}-{month}-{day}"
+                              description_cleaned = clean_html(description)
 
-                          year, month, day = formatted_date[:10].split('-')
-                          date_key = f"{year}-{month}-{day}"
-                          description_cleaned = clean_html(description)
+                              categories = category.split(',')
+                              services = FEEDS_MAP[entry].get('default_services', [])
+                              category_values = []
 
-                          categories = category.split(',')
-                          services = []
-                          category_values = []
+                              for cat in categories:
+                                  if cat.startswith('general:products/'):
+                                      services.append(cat.replace('general:products/', ''))
+                                  elif cat.startswith('marketing:marchitecture/'):
+                                      category_values.append(cat.replace('marketing:marchitecture/', ''))
+                                  else:
+                                      category_values = categories
+                              for service in services:
+                                  for category_value in category_values:
+                                      json_record = {
+                                          'link': link,
+                                          'title': title,
+                                          'description': description_cleaned,
+                                          'date': formatted_date,
+                                          'service': service,
+                                          'category': category_value
+                                      }
+                                      if date_key not in date_grouped_records:
+                                          date_grouped_records[date_key] = []
+                                      date_grouped_records[date_key].append(json_record)
+                          except Exception as e:
+                              print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
 
-                          for cat in categories:
-                              if cat.startswith('general:products/'):
-                                  services.append(cat.replace('general:products/', ''))
-                              elif cat.startswith('marketing:marchitecture/'):
-                                  category_values.append(cat.replace('marketing:marchitecture/', ''))
-
-                          for service in services:
-                              for category_value in category_values:
-                                  json_record = {
-                                      'link': link,
-                                      'title': title,
-                                      'description': description_cleaned,
-                                      'date': formatted_date,
-                                      'service': service,
-                                      'category': category_value
-                                  }
-                                  if date_key not in date_grouped_records:
-                                      date_grouped_records[date_key] = []
-                                  date_grouped_records[date_key].append(json_record)
-                      
-                      except Exception as e:
-                          print(f"Error processing item: {ET.tostring(item, encoding='unicode')}. Exception: {str(e)}")
-
-                  for date_key, records in date_grouped_records.items():
-                      year, month, day = date_key.split('-')
-                      json_lines = '\n'.join(json.dumps(record) for record in records)
-                      s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
-                      s3.put_object(Body=json_lines, Bucket=bucket_name, Key=s3_key)
+                      for date_key, records in date_grouped_records.items():
+                          year, month, day = date_key.split('-')
+                          json_lines = '\n'.join(json.dumps(record) for record in records)
+                          s3_key = f'{bucket_path}/year={year}/month={month}/day={day}/whats_new.jsonl'
+                          s3.put_object(Body=json_lines, Bucket=bucket_name, Key=s3_key)
 
                   return {
                       'statusCode': 200,
                       'body': f'Feed downloaded and grouped by date then uploaded to S3 bucket {bucket_name}'
                   }
-
+                      
               except urllib.error.URLError as e:
                   return {
                       'statusCode': 500,
@@ -231,6 +244,7 @@ Resources:
                       'statusCode': 500,
                       'body': f'Error processing feed: {str(e)}'
                   }
+
       Handler: 'index.lambda_handler'
       MemorySize: 256
       Timeout: 60
@@ -238,8 +252,7 @@ Resources:
       Environment:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
-          BUCKET_PATH: "aws-feeds/aws-feeds-whats-new"
-          FEED_URL: "https://aws.amazon.com/about-aws/whats-new/recent/feed/"
+          FEEDS_LIST: "aws,aws-cid"
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -702,6 +715,7 @@ Resources:
       Targets:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/aws-feeds/aws-feeds-whats-new/"
+          - Path: !Sub "s3://${DestinationBucket}/aws-feeds/aws-cid-feeds-whats-new/"
       Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"}}}"
 
   CrawlerBlogPost:

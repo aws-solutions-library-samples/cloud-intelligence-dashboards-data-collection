@@ -31,7 +31,7 @@ For customers with additional requirements, an enhanced architecture is availabl
 
 ![Advanced Architecture of Data Exports](/.images/architecture-data-exports-advanced.png  "Advanced Architecture of Data Exports")
 
-1. [AWS Data Exports](https://aws.amazon.com/aws-cost-management/aws-data-exports/) service delivers [Cost & Usage Report (CUR2)](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html) daily to an [Amazon S3](https://aws.amazon.com/s3/) Bucket in your AWS Account (either in Management/Payer Account or a regular Linked Account). In us-east-1 region, the CloudFormation creates native resources; in other regions, CloudFormation uses AWS Lambda and Custom Resource to provision Data Exports in us-east-1.
+1. [AWS Data Exports](https://aws.amazon.com/aws-cost-management/aws-data-exports/) service delivers updated monthly [Cost & Usage Report (CUR2)](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html) up to three times a day to an [Amazon S3](https://aws.amazon.com/s3/) Bucket in your AWS Account (either in Management/Payer Account or a regular Linked Account). In us-east-1 region, the CloudFormation creates native resources; in other regions, CloudFormation uses AWS Lambda and Custom Resource to provision Data Exports in us-east-1.
 
 2. [Amazon S3 replication](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html) rules copy Export data to a dedicated Data Collection Account automatically. This replication filters out all metadata and makes the file structure on the S3 bucket compatible with [Amazon Athena](https://aws.amazon.com/athena/) and [AWS Glue](https://aws.amazon.com/glue/) requirements.
 
@@ -41,20 +41,28 @@ For customers with additional requirements, an enhanced architecture is availabl
 
 5. [Amazon QuickSight](https://aws.amazon.com/quicksight/) pulls data from Amazon Athena to its SPICE (Super-fast, Parallel, In-memory Calculation Engine).
 
-6. When collecting data exports for Linked accounts (not for Management Accounts), you may also want to collect data exports for the Data Collection account itself. In this case, specify the Data Collection account as the first in the list of Source Accounts. Replication is still required to remove metadata.
+6. Updated QuickSight dashboards are available for the users.
 
-7. Athena's reading process can be affected by writing operations. When replication arrives, it might fail to update datasets, especially with high volumes of data. In such cases, consider scheduling temporary disabling and re-enabling of the Amazon S3 bucket policy that allows replication. Since exports typically arrive three times daily, this temporary deactivation has minimal side effects.
+7. When collecting data exports for Linked accounts (not for Management Accounts), you may also want to collect data exports for the Data Collection account itself. In this case, specify the Data Collection account as the first in the list of Source Accounts. Replication is still required to remove metadata.
 
-8. Some customers might need to store data exports to secondary destinations for archiving or reporting at a higher organizational level or to staging environment. You can specify a secondary bucket to receive the data in these cases.
+8. Athena's reading process can be affected by writing operations. When replication arrives, it might fail to update datasets, especially with high volumes of data. In such cases, consider scheduling temporary disabling and re-enabling of the Amazon S3 bucket policy that allows replication. Since exports typically arrive up to three times a day, this temporary deactivation has minimal side effects and the updated data will be available with the next data delivery.
+
+9. (Optional) Secondary bucket replication enables customers to archive data exports, consolidating data exports from multiple AWS Organisations or deploying staging environments (as described below ). 
 
 ### Using Secondary Replication Bucket
-There can be various situations where customers need to replicate data exports to multiple destinations. One common scenario involves a Business Unit requiring exports for one or more AWS Organizations data while simultaneously allowing Headquarters to access these same exports data for a consolidated view across all business units. 
+There can be various situations where customers need to replicate data exports to multiple destinations. One common scenario is a large enterprise with multiple business units, each with one or more AWS organisations. For this large enterprise, the Headquarters requires a consolidated view across all Business Units while simultaneously enabling individual Business Units to have visibility into their own data. 
 
-To accomplish this, both the Headquarters and Business Unit can implement separate data export destination stacks. Business Unit administrators, working from their management account, can specify a target bucket located within the Headquarters stack, enabling seamless data replication to both locations. 
+To accomplish this, both the Headquarters and Business Unit can implement separate data export destination stacks. Business Unit administrators, working from their management account, can specify a target bucket located within the Headquarters stack, enabling seamless data replication to both S3 buckets.
 
-Other scenario can be a replicating data to a staging environment. 
+Other scenario can be a replicating data to a staging environment for testing purposes.
 
 ![Secondary Replication Bucket](/.images/architecture-data-export-replication-to-secondary.png)
+
+1. [AWS Data Exports](https://aws.amazon.com/aws-cost-management/aws-data-exports/) service delivers updated monthly [Cost & Usage Report (CUR2)](https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html) up to three times a day to an [Amazon S3](https://aws.amazon.com/s3/) Bucket in the Business Unit AWS Account (either in Management/Payer Account or a regular Linked Account). In us-east-1 region, the CloudFormation creates native resources; in other regions, CloudFormation uses AWS Lambda and Custom Resource to provision Data Exports in us-east-1.
+
+2. [Amazon S3 replication](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html) rules copy Export data to a dedicated Data Collection Account automatically. This replication filters out all metadata and makes the file structure on the S3 bucket compatible with [Amazon Athena](https://aws.amazon.com/athena/) and [AWS Glue](https://aws.amazon.com/glue/) requirements.
+
+3. Using the Secondary Replication rule, the Export data is replicated from Business Unit to the S3 bucket in the Headquarters AWS account. Each Business unit should create Secondary Replication rule to replicate the data to the S3 bucket in the Headquarters AWS account. This provides the Headquarter a consolidated data of all the Business Units. 
 
 ## Legacy Cost and Usage Report
 Legacy AWS Cost and Usage Reports (Legacy CUR) can still be used for Cloud Intelligence Dashboards and other use cases.
@@ -73,3 +81,15 @@ Cross-account access is possible but can be difficult to maintain, considering t
 
 ### We only have one AWS Organization. Do we still need this?
 Yes. Throughout an organization's lifecycle, mergers and acquisitions may occur, so this approach prepares you for potential future scenarios.
+
+### Can I use S3 Intelligent Tiering or S3 Infrequent Access (IA) for my CUR data connected to Athena?
+We strongly recommend **against** using S3 IA for CUR data that is connected to Athena, especially if you have active FinOps users querying this data. Here's why:
+- CUDOS typically only retrieves data for the last 7 months, so theoretically older data could be moved to S3 IA or managed with Intelligent Tiering.
+- Moving older CUR parquet files to IA could potentially reduce storage costs by up to 45%.
+- **However**, this only saves money if the data isn't frequently accessed. With S3 IA, you're charged $0.01 per GB retrieved.
+- Athena uses multiple computational nodes in parallel, and complex queries can multiply data reads dramatically. For every 1GB of data you want to scan, Athena might perform up to 75GB of S3 reads.
+- If someone runs a query without properly limiting it to specific billing periods, the retrieval costs can be astronomical. For example:
+  * Scanning a full CUR of 600GB: `600GB × 75 × $0.01/GB` = `$450.00` for just one query!
+- Due to this risk of human error, we do not use storage tiering as a default and strongly advise against it for CUR data connected to Athena.
+We also advise agains Intelligent Tiering by default.
+- KPI Dashboard - one of our foundational dashboards - scans the entire CUR (Cost and Usage Report) data to detect the first snapshot and determine its age. This prevents AWS Intelligent Tiering from functioning effectively, as it forces all data to remain in frequent access tiers and result is unnecessary additional monitoring costs with no cost-saving benefits.

@@ -198,46 +198,59 @@ Resources:
               session = get_session_with_role(role_name, account_id)
 
               for region in regions:
-                  quotas_client = session.client("service-quotas", region_name=region)
-                  logger.debug(f"Start looping through services in {region}")
-                  quota_history = list(
-                      quotas_client
-                          .get_paginator('list_requested_service_quota_change_history')
-                          .paginate()
-                          .search("RequestedQuotas")
-                  )
-                  if not quota_history:
-                      logger.debug(f"No change history in {region}")
+                  logger.info(f"Processing region {region} for account {account_id}")
+                  try:
+                      quotas_client = session.client("service-quotas", region_name=region) 
+                      logger.debug(f"Start looping through services in {region}")
+                      quota_history = list(
+                          quotas_client
+                              .get_paginator('list_requested_service_quota_change_history')
+                              .paginate()
+                              .search("RequestedQuotas")
+                      )
+                      if not quota_history:
+                          logger.debug(f"No change history in {region}")
+                          continue 
+                      # Store history
+                      history_key = f'{module_name}/{module_name}-history/payer_id={payer_id}/account_id={account_id}/region={region}/history.json'
+                      s3_client.put_object(
+                          Bucket=bucket,
+                          Key=history_key,
+                          Body="\n".join([to_json(item) for item in quota_history]),
+                          ContentType='application/json'
+                      )
+                      logger.info(f"Uploaded {len(quota_history)} history records for {region} to s3://{BUCKET}/{history_key}")
+
+                      # Store current quotas
+                      json_lines_quota = []
+                      for item in quota_history:
+                          try:
+                              quota_result = quotas_client.get_service_quota(
+                                  ServiceCode=item['ServiceCode'],
+                                  QuotaCode=item['QuotaCode']
+                              )['Quota']
+                              quota_result['DefaultValue'] = quotas_client.get_aws_default_service_quota(
+                                  ServiceCode=item['ServiceCode'],
+                                  QuotaCode=item['QuotaCode']
+                              )['Quota']['Value']
+                              json_lines_quota.append(to_json(quota_result))
+                          except Exception as e:
+                              logger.error(f"Error getting quota for {item['ServiceCode']}/{item['QuotaCode']}: {e}")
+                              continue
+
+                      if json_lines_quota:
+                          quota_key = f'{MODULE_NAME}/{MODULE_NAME}-data/payer_id={payer_id}/account_id={account_id}/region={region}/quotas.json'
+                          s3_client.put_object(
+                              Bucket=BUCKET,
+                              Key=quota_key,
+                              Body="\n".join(json_lines_quota),
+                              ContentType='application/json'
+                          )
+                          logger.info(f"Uploaded {len(json_lines_quota)} quota records for {region} to s3://{BUCKET}/{quota_key}")
+                  except Exception as e:
+                      logger.error(f"Error processing region {region} for account {account_id}: {e}")
                       continue
-                  key = f'{module_name}/{module_name}-history/payer_id={payer_id}/account_id={account_id}/region={region}/history.json'
-                  s3_client.put_object(
-                      Bucket=bucket,
-                      Key=key,
-                      Body="\n".join([to_json(item) for item in quota_history]),
-                      ContentType='application/json'
-                  )
-                  logger.info(f"Uploaded {len(quota_history)} records for {region} to s3://{BUCKET}/{key}")
 
-                  json_lines_quota = []
-                  for item in quota_history:
-                      quota_result = quotas_client.get_service_quota(
-                          ServiceCode=item['ServiceCode'],
-                          QuotaCode=item['QuotaCode']
-                      )['Quota']
-                      quota_result['DefaultValue'] = quotas_client.get_aws_default_service_quota(
-                          ServiceCode=item['ServiceCode'],
-                          QuotaCode=item['QuotaCode']
-                      )['Quota']['Value']
-                      json_lines_quota.append(to_json(quota_result))
-
-                  key = f'{MODULE_NAME}/{MODULE_NAME}-data/payer_id={payer_id}/account_id={account_id}/region={region}/quotas.json'
-                  s3_client.put_object(
-                      Bucket=BUCKET,
-                      Key=key,
-                      Body="\n".join(json_lines_quota),
-                      ContentType='application/json'
-                  )
-                  logger.info(f"Uploaded {len(json_lines_quota)} records for {region} to s3://{BUCKET}/{key}")
       Handler: 'index.lambda_handler'
       MemorySize: 2688
       Timeout: 300
@@ -308,6 +321,7 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'

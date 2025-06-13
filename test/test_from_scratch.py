@@ -45,6 +45,7 @@ from utils import create_case, trigger_collection, get_case_data, clean_bucket
 logger = logging.getLogger(__name__)
 region = boto3.session.Session().region_name
 account_id = boto3.client('sts').get_caller_identity()['Account']
+version = json.load(open('data-collection/utils/version.json'))['version']
 
 COLLECTION_BUCKET =  f'cid-data-{account_id}'
 
@@ -112,6 +113,10 @@ def test_inventory_rds_snapshot_data(athena):
 def test_inventory_lambda_functions_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_lambda_functions_data" LIMIT 10;')
     assert len(data) > 0, 'inventory_lambda_functions_data is empty'
+
+def test_inventory_network_interfaces_functions_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_network_interfaces_data" LIMIT 10;')
+    assert len(data) > 0, 'inventory-network-interfaces-data'
 
 def test_rds_usage_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_usage_data" LIMIT 10;')
@@ -216,6 +221,46 @@ def test_servicequotas_data(athena):
 def test_servicequotas_history(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."service_quotas_history" LIMIT 10;')
     assert len(data) > 0, 'service_quotas_history is empty'
+
+def test_aws_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."aws_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'aws_feeds_data is empty'
+
+def test_hashicorp_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."hashicorp_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'hashicorp_feeds_data is empty'
+
+def test_datadog_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."datadog_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'datadog_feeds_data is empty'
+
+def test_orca_security_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."orca_security_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'orca_security_feeds_data is empty'
+
+def test_wiz_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."wiz_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'wiz_feeds_data is empty'
+
+def test_crowdstrike_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."crowdstrike_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'crowdstrike_feeds_data is empty'
+
+def test_tenable_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."tenable_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'tenable_feeds_data is empty'
+
+def test_databricks_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."databricks_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'databricks_feeds_data is empty'
+
+def test_gitlab_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."gitlab_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'gitlab_feeds_data is empty'
+
+def test_circle_ci_feeds_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."circle_ci_feeds_whats_new" LIMIT 10;')
+    assert len(data) > 0, 'circle_ci_feeds_data is empty'
 
 def test_content_of_summary_not_empty(s3):
     s3_client = boto3.client('s3')

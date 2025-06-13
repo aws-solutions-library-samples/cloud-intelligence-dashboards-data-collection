@@ -132,6 +132,11 @@ Resources:
           - Id: Object&Version Expiration
             Status: Enabled
             NoncurrentVersionExpirationInDays: 7
+          - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            ExpiredObjectDeleteMarker: true
       ReplicationConfiguration:
         Fn::If:
           - SendData

@@ -6,12 +6,12 @@
 if [ -n "$1" ]; then
   bucket=$1
 else
-  echo "ERROR: First parameter not supplied. Provide a bucket name. aws-well-architected-labs for prod aws-wa-labs-staging for stage "
-  echo " prod  aws-well-architected-labs "
+  echo "ERROR: First parameter not supplied. Provide a bucket name."
   exit 1
 fi
 code_path=$(git rev-parse --show-toplevel)/data-collection/deploy
+version=$(jq -r '.version' data-collection/utils/version.json)
 
 echo "Sync to $bucket"
-aws s3 sync $code_path/       s3://$bucket/cfn/data-collection/
+aws s3 sync $code_path/       s3://$bucket/cfn/data-collection/v$version/ --delete
 echo 'Done'

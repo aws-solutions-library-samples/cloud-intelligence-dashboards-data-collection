@@ -264,6 +264,11 @@ Resources:
           - Id: Object&Version Expiration
             Status: Enabled
             NoncurrentVersionExpirationInDays: 1
+          - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            ExpiredObjectDeleteMarker: true
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -465,6 +470,11 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpirationInDays: 1
             ExpirationInDays: 7
+          - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            ExpiredObjectDeleteMarker: true
       Tags: # Hacky way to manage conditional dependencies
         - Key: IgnoreConditionalDependency
           Value: !If [IsDestinationAccount, !Ref DestinationS3, '']

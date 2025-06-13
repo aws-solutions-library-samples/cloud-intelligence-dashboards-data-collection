@@ -56,13 +56,12 @@ Parameters:
     Description: ARN of a Lambda for Managing GlueTable
   AwsObjects:
     Type: CommaDelimitedList
-    Default: OpensearchDomains, ElasticacheClusters, RdsDbInstances, EBS, AMI, Snapshot, Ec2Instances, VpcInstances, RdsDbSnapshots, EKSClusters, LambdaFunctions, RdsDbClusters, WorkSpaces
+    Default: OpensearchDomains, ElasticacheClusters, RdsDbInstances, EBS, AMI, Snapshot, Ec2Instances, VpcInstances, RdsDbSnapshots, EKSClusters, LambdaFunctions, RdsDbClusters, WorkSpaces, NetworkInterfaces
     Description: Services for pulling price data
   DataBucketsKmsKeysArns:
     Type: String
     Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
     Default: ""
-
 Conditions:
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
 
@@ -1023,6 +1022,77 @@ Mappings:
                 paths: functionname, functionarn, runtime, role, handler, codesize, dedscription, timeout, memorysize, lastmodified, codesha256, version, tracingconfig, revisionid, packagetype, architectures, ephemeralstorage, snapstart, loggingconfig, accountid, collection_date, region, layers, vpcconfig
               SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
           TableType: EXTERNAL_TABLE
+    NetworkInterfaces:
+      path: network-interfaces
+      collection: LINKED
+      table:
+        - Name: inventory_network_interfaces_data
+          Parameters: { "classification" : "json", "compressionType": "none" }
+          PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          StorageDescriptor:
+            Columns:
+            - Name: networkinterfaceid
+              Type: string
+            - Name: subnetid
+              Type: string
+            - Name: vpcid
+              Type: string
+            - Name: availabilityzone
+              Type: string
+            - Name: description
+              Type: string
+            - Name: ownerid
+              Type: string
+            - Name: requesterId
+              Type: string
+            - Name: requesterManaged
+              Type: boolean
+            - Name: status
+              Type: string
+            - Name: macaddress
+              Type: string
+            - Name: privateipaddress
+              Type: string
+            - Name: privatednsname
+              Type: string
+            - Name: sourcedestcheck
+              Type: boolean
+            - Name: groups
+              Type: array<struct<GroupName:string,GroupId:string>>
+            - Name: attachment
+              Type: struct<AttachTime:string,AttachmentId:string,DeleteOnTermination:boolean,DeviceIndex:int,Status:string,InstanceId:string,InstanceOwnerId:string>
+            - Name: association
+              Type: struct<PublicIp:string,PublicDnsName:string,IpOwnerId:string,AssociationId:string>
+            - Name: tagset
+              Type: array<struct<Key:string,Value:string>>
+            - Name: privateipaddresses
+              Type: array<struct<PrivateIpAddress:string,PrivateDnsName:string,Primary:boolean,Association:struct<PublicIp:string,PublicDnsName:string,IpOwnerId:string,AssociationId:string>>>
+            - Name: ipv6addresses
+              Type: array<struct<Ipv6Address:string>>
+            - Name: interfacetype
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: region
+              Type: string
+            InputFormat: org.apache.hadoop.mapred.TextInputFormat
+            Location: !Sub s3://${DestinationBucket}/inventory/inventory-network-interfaces-data/
+            OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+            SerdeInfo:
+              Parameters:
+                paths: NetworkInterfaceId,SubnetId,VpcId,AvailabilityZone,Description,OwnerId,RequesterId,RequesterManaged,Status,MacAddress,PrivateIpAddress,PrivateDnsName,SourceDestCheck,Groups,Attachment,Association,TagSet,PrivateIpAddresses,Ipv6Addresses,InterfaceType,accountid,collection_date,region
+              SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          TableType: EXTERNAL_TABLE
 
     WorkSpaces:
       path: workspaces
@@ -1418,7 +1488,13 @@ Resources:
                     obj_name='Functions[*]'
                   ),
                   'eks': eks_clusters_scan,
-                  'workspaces': workspaces_scan
+                  'workspaces': workspaces_scan,
+                  'network-interfaces': partial(
+                    paginated_scan,
+                    service='ec2',
+                    function_name='describe_network_interfaces',
+                    obj_name='NetworkInterfaces[*]'
+                  ),
               }
               account = json.loads(event["account"])
               account_id = account["account_id"]
@@ -1536,6 +1612,7 @@ Resources:
             DeployRegion: !Ref AWS::Region
             Account: !Ref AWS::AccountId
             Prefix: !Ref ResourcePrefix
+            Bucket: !Ref DestinationBucket
 
       'RefreshSchedule${AwsObject}':
         Type: AWS::Scheduler::Schedule

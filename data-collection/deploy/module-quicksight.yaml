@@ -131,6 +131,7 @@ Resources:
           import datetime
           from json import JSONEncoder
           import boto3
+          from botocore.config import Config
 
           BUCKET = os.environ["BUCKET_NAME"]
           PREFIX = os.environ["PREFIX"]
@@ -138,6 +139,13 @@ Resources:
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            }
+          )
 
           class DateTimeEncoder(JSONEncoder):
               """encoder for json with time object"""
@@ -151,7 +159,7 @@ Resources:
               """Starting Point for Lambda"""
               account_id = context.invoked_function_arn.split(":")[4]
               logger.debug("Collecting data for account: %s", account_id)
-              quicksight_client = boto3.client("quicksight")
+              quicksight_client = boto3.client("quicksight", config=config)
               namespaces = list_namespaces(account_id=account_id, quicksight=quicksight_client)
 
               users = []
@@ -272,7 +280,7 @@ Resources:
               logger.info("Quicksight data for %s stored at s3://%s/%s", account_id, BUCKET, key)
       Handler: 'index.lambda_handler'
       MemorySize: 2688
-      Timeout: 300
+      Timeout: 900
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
@@ -322,6 +330,7 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'
