@@ -191,6 +191,7 @@ Parameters:
     Description: Collects Resilience Hub information
     AllowedValues: ['yes', 'no']
     Default: 'no'
+
 Conditions:
   DeployModuleReadInMgmt: !Equals [!Ref AllowModuleReadInMgmt, "yes"]
 
