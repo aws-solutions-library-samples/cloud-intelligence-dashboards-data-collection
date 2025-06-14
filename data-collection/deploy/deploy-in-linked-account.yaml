@@ -123,6 +123,7 @@ Conditions:
   IncludeBudgetsModulePolicy:            !Equals [!Ref IncludeBudgetsModule, "yes"]
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
+  IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"] 
 
 Outputs:
   LambdaRole:
