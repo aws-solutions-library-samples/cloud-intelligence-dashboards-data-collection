@@ -248,7 +248,7 @@ Resources:
             Type: AWS::S3::Bucket
             DeletionPolicy: Delete
             Properties:
-              BucketName: !Sub ${Name}.${AWS::Region}
+              BucketName: !Sub cid-data-${AWS::AccountId}.rh.${AWS::Region}
               BucketEncryption:
                 ServerSideEncryptionConfiguration:
                   - ServerSideEncryptionByDefault:
