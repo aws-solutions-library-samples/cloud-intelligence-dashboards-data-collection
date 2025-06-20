@@ -32,6 +32,7 @@ Metadata:
           - IncludeTransitGatewayModule
           - IncludeLicenseManagerModule
           - IncludeServiceQuotasModule
+          - IncludeResilienceHubModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -77,6 +78,9 @@ Metadata:
         default: "Include Marketplace Licensing Module"
       IncludeServiceQuotasModule:
         default: "Include Service Quotas Module"
+      IncludeResilienceHubModule:
+        default: "Include ResilienceHub Module"
+        
 Parameters:
   ManagementAccountRole:
     Type: String
@@ -182,7 +186,11 @@ Parameters:
     Description: Collects Service Quotas information
     AllowedValues: ['yes', 'no']
     Default: 'no'
-
+  IncludeResilienceHubModule:
+    Type: String
+    Description: Collects Resilience Hub information
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployModuleReadInMgmt: !Equals [!Ref AllowModuleReadInMgmt, "yes"]
 
@@ -202,6 +210,7 @@ Resources:
         IncludeHealthEventsModule: !Ref IncludeHealthEventsModule
         IncludeLicenseManagerModule: !Ref IncludeLicenseManagerModule
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
+
   DataCollectorMgmtAccountModulesReadStack:
     Type: AWS::CloudFormation::Stack
     Condition: DeployModuleReadInMgmt
@@ -220,6 +229,8 @@ Resources:
         IncludeBudgetsModule: !Ref IncludeBudgetsModule
         IncludeTransitGatewayModule: !Ref IncludeTransitGatewayModule
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
+        IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
+        
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
     Properties:
@@ -259,6 +270,8 @@ Resources:
           ParameterValue: !Ref IncludeTransitGatewayModule
         - ParameterKey: IncludeServiceQuotasModule
           ParameterValue: !Ref IncludeServiceQuotasModule
+        - ParameterKey: IncludeResilienceHubModule
+          ParameterValue: !Ref IncludeResilienceHubModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]
