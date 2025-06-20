@@ -179,7 +179,7 @@ Resources:
         - DeploymentTargets:
             Accounts:
               - !Ref "AWS::AccountId"
-          Regions: !Split [ ',', !Ref RegionsInScope]
+          Regions: 'us-east-1' ## for rhub we need only one AWS Linked Account bucket irespective of regions; in here we have selected us-east-1. 
       Capabilities:
         - CAPABILITY_IAM
         - CAPABILITY_NAMED_IAM
@@ -248,7 +248,7 @@ Resources:
             Type: AWS::S3::Bucket
             DeletionPolicy: Delete
             Properties:
-              BucketName: !Sub cid-data-${AWS::AccountId}.rh.${AWS::Region}
+              BucketName: !Ref Name
               BucketEncryption:
                 ServerSideEncryptionConfiguration:
                   - ServerSideEncryptionByDefault:
@@ -394,16 +394,21 @@ Resources:
                   logger.info(f"Collecting data for account: {account_id}")
 
                   # Get environment variables
+                  acc=account_id
                   local_bucket = os.environ['BUCKET_PREFIX']
                   export_bucket = f'{local_bucket}{acc}'   
+
+                  #Using the Destination Bucket from the parameter section and creating the prefix for rhub data 
                   aggregation_bucket = os.environ['DESTINATION_BUCKET']
+                  aggregation_bucket_prefix = 'ResilienceHub-Data'
+                
                   acc_list= os.environ['MANAGEMENT_ACCOUNT_IDS'] 
                   acc_ids = acc_list.split(',')
                       
                   # Get current date and account ID
                   current_date = datetime.now().strftime('%Y-%m-%d')
                                 
-                  acc=account_id
+                  
                   ## Initialize sts client
                   sts = boto3.client('sts')
                   role_arn = f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}"
@@ -643,28 +648,28 @@ Resources:
                   #REGION-END
                           
                   # write RPO-RTO, app-component recs, alarm recs, and SOP recs reports to aggregation bucket
-                  destination_key = f"resiliencehub_application_rto_rpo/{acc}-RpoRtos.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/resiliencehub_application_rto_rpo/{acc}-RpoRtos.csv"
                   write_response = s3_client.upload_file('/tmp/resilience-report.csv', aggregation_bucket, destination_key)
                   
-                  destination_key = f"app_recommendations/{acc}-app-recs.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/app_recommendations/{acc}-app-recs.csv"
                   write_response = s3_client.upload_file('/tmp/app-recs.csv', aggregation_bucket, destination_key)
                   
-                  destination_key = f"alarm_recommendations/{acc}-alarm-recs.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/alarm_recommendations/{acc}-alarm-recs.csv"
                   write_response = s3_client.upload_file('/tmp/alarm-recs.csv', aggregation_bucket, destination_key)
                   
-                  destination_key = f"sop_recommendations/{acc}-sop-recs.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/sop_recommendations/{acc}-sop-recs.csv"
                   write_response = s3_client.upload_file('/tmp/sop-recs.csv', aggregation_bucket, destination_key)
                   
                   # resiliencehub_applications/Applications.csv
-                  destination_key = f"resiliencehub_applications/{acc}-Applications.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/resiliencehub_applications/{acc}-Applications.csv"
                   write_response = s3_client.upload_file('/tmp/me-Apps-aggregated.csv', aggregation_bucket, destination_key)
                   
                   # resiliencehub_daily_assessments/Assessments Daily.csv
-                  destination_key = f"resiliencehub_daily_assessments/{acc}-Assessments Daily.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/resiliencehub_daily_assessments/{acc}-Assessments Daily.csv"
                   write_response = s3_client.upload_file('/tmp/me-Assessments-aggregated.csv', aggregation_bucket, destination_key)
 
                   # resiliencehub_resource_types/Resource Types.csv
-                  destination_key = f"resiliencehub_resource_types/{acc}-Resource Types.csv"
+                  destination_key = f"{aggregation_bucket_prefix}/resiliencehub_resource_types/{acc}-Resource Types.csv"
                   write_response = s3_client.upload_file('/tmp/me-ResourceTypes-aggregated.csv', aggregation_bucket, destination_key)
                           
                   return_message = {
@@ -888,7 +893,7 @@ Resources:
             skip.header.line.count: "1"
           PartitionKeys: []
           StorageDescriptor:
-            Location: !Sub "s3://${DestinationBucket}/resiliencehub_applications/"
+            Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/resiliencehub_applications/"
             InputFormat: org.apache.hadoop.mapred.TextInputFormat
             OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
             Columns:
@@ -974,7 +979,7 @@ Resources:
           skip.header.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_daily_assessments/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/resiliencehub_daily_assessments/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
@@ -1054,7 +1059,7 @@ Resources:
           skip.header.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_resource_types/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/resiliencehub_resource_types/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
@@ -1090,7 +1095,7 @@ Resources:
           skip.header.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_application_rto_rpo/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/resiliencehub_application_rto_rpo/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
@@ -1152,7 +1157,7 @@ Resources:
           skip.header.er.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/app_recommendations/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/app_recommendations/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
@@ -1192,7 +1197,7 @@ Resources:
           skip.header.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/alarm_recommendations/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/alarm_recommendations/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
@@ -1238,7 +1243,7 @@ Resources:
           skip.header.line.count: "1"
         PartitionKeys: []
         StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/sop_recommendations/"
+          Location: !Sub "s3://${DestinationBucket}/ResilienceHub-Data/sop_recommendations/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           Columns:
