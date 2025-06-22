@@ -453,7 +453,7 @@ Resources:
               - "resiliencehub:ListApps"
               - "resiliencehub:DescribeApp"
               - "resiliencehub:ListAppAssessments"
-              - "resiliencehub:ListAppAssessmentComplianceDrift"
+              - "resiliencehub:ListAppAssessmentComplianceDrifts"
               - "resiliencehub:ListTestRecommendations"
               - "resiliencehub:DescribeResiliencyPolicy"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
