@@ -4,17 +4,17 @@ Parameters:
   DatabaseName:
     Type: String
     Description: Name of the Athena database to be created to hold lambda information
+  BucketPrefix:
+    Type: String
+    Description: A prefix for S3 Bucket
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$) #FIXME
   DestinationBucket:
     Type: String
     Description: Name of the S3 Bucket to be created to hold data information.
     AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
-  ManagementRoleName:
+  MultiAccountRoleName:
     Type: String
-    Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
-  ManagementAccountID:
-    Type: String
-    AllowedPattern: ([a-z0-9\-, ]*?$)
-    Description: "(Ex: 123456789,098654321,789054312) List of Payer IDs you wish to collect data for. Can just be one Accounts"
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Support Cases Data.
   CFDataName:
     Type: String
     Description: The name of what this cf is doing.
@@ -26,23 +26,12 @@ Parameters:
   ResourcePrefix:
     Type: String
     Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
-  BucketPrefix:
-    Type: String
-    Default: "aws-resilience-hub-reports-"
-    # This stack will create other buckets with {DestinationBucket}.{region} so we need to keep the space for region prefix
-    Description: This prefix will be used for buckets creation. Must be less shorter then 50 characters.
-    AllowedPattern: (?=^.{3,49}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9\-])$)
   RegionsInScope:
     Type: String
     Description: "Comma Delimited list of AWS regions from which data about resources will be collected. Example: us-east-1,eu-west-1,ap-northeast-1"
   LambdaAnalyticsARN:
     Type: String
     Description: Arn of lambda for Analytics
-  IncludeMemberAccounts:
-    Type: String
-    AllowedValues: ["yes", "no"]
-    Default: 'yes'
-    Description: Include Member Accounts or not. Set to 'yes' when working with payer
   AccountCollectorLambdaARN:
     Type: String
     Description: Arn of the Account Collector Lambda
@@ -69,216 +58,6 @@ Outputs:
     Value: !GetAtt ModuleStepFunction.Arn
 
 Resources:
-  StackSetAdminRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName:  !Sub '${ResourcePrefix}StackSetAdminRole'
-      Description: "This role is used by cloudformation to create StackSets in different regions. See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs.html"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: !Sub "cloudformation.${AWS::URLSuffix}"
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: StackSetAdminRolePolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: sts:AssumeRole
-                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}ResilienceHub-StackSetExecutionRole"
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
-            reason: "Need explicit name to identify role actions"
-
-  StackSetExecutionRole:  #see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs.html
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${ResourcePrefix}ResilienceHub-StackSetExecutionRole"
-      Description: "This role is used by cloudformation to create StackSets in different regions. See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-prereqs.html"
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              AWS: !GetAtt StackSetAdminRole.Arn
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: StackSetParameterExecutionPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - cloudformation:CreateStack
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DeleteStack
-                  - cloudformation:UpdateStack
-                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/StackSet-${ResourcePrefix}ResilienceHubBuckets*'
-        - PolicyName: ResourcesPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:CreateBucket
-                  - s3:DeleteBucket
-                  - s3:ListBucket
-                  - s3:Put*
-                  - s3:Get*
-                  - s3:Replicate*
-                  - s3:DeleteBucketPolicy
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:s3:::${BucketPrefix}${AWS::AccountId}.*'
-              - Effect: Allow
-                Action:
-                  - iam:GetRole
-                  - iam:CreateRole
-                  - iam:DeleteRole
-                  - iam:PassRole
-                  - iam:DeleteRolePolicy
-                  - iam:GetRolePolicy
-                  - iam:PutRolePolicy
-                  - iam:TagRole
-                  - iam:UntagRole
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}Resilience-Hub-Replication-*'
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/StackSet-${ResourcePrefix}ResilienceHub*' # For Compatibility with older versions: Shorter version of StackSetName
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
-            reason: "Need explicit name to identify role actions"
-
-  RegionalBucketsStackSet:
-    Type: AWS::CloudFormation::StackSet
-    # DependsOn: # managed via tags. DependsOn does not work in this case and Role can be deleted before StackSet
-    #  - StackSetExecutionRole
-    Properties:
-      Description: !Sub "S3 buckets in multiple regions to export rhub data to s3://${DestinationBucket}."
-      PermissionModel: SELF_MANAGED
-      ManagedExecution:
-        Active: true
-      Parameters:
-        - ParameterKey: Name
-          ParameterValue: !Sub "${BucketPrefix}${AWS::AccountId}"
-        - ParameterKey: DestinationBucket
-          ParameterValue: !Ref DestinationBucket
-        - ParameterKey: ManagementAccountID
-          ParameterValue: !Ref ManagementAccountID
-        - ParameterKey: ResourcePrefix
-          ParameterValue: !Ref ResourcePrefix
-        # - ParameterKey: DataBucketsKmsKeysArns
-        #   ParameterValue: !Ref DataBucketsKmsKeysArns
-      StackInstancesGroup:
-        - DeploymentTargets:
-            Accounts:
-              - !Ref "AWS::AccountId"
-          Regions: !Split [ ',', !Ref RegionsInScope]
-      Capabilities:
-        - CAPABILITY_IAM
-        - CAPABILITY_NAMED_IAM
-      StackSetName: !Sub "${ResourcePrefix}ResilienceHubBuckets"
-      AdministrationRoleARN: !GetAtt StackSetAdminRole.Arn
-      ExecutionRoleName: !Sub "${ResourcePrefix}ResilienceHub-StackSetExecutionRole"
-      TemplateBody: |
-        AWSTemplateFormatVersion: '2010-09-09'
-        Description: This template creates a bucket in a given region and configure a replication to the main bucket
-        Parameters:
-          Name:
-            Type: String
-            Description: Prefix of regional bucket name
-          ManagementAccountID:
-            Type: String
-            Description: Comma separated IDs of Management Accounts that will send data to the bucket
-          ResourcePrefix:
-            Type: String
-            Description: Resource Prefix
-          # DestinationBucket:
-          #   Type: String
-          #   Description: A name of the main bucket where all data will be stored
-          # DataBucketsKmsKeysArns:
-          #   Type: String
-          #   Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
-          #   Default: ""
-        # Conditions:
-        #   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
-        Resources:
-          BucketPolicy:
-            Type: AWS::S3::BucketPolicy
-            Properties:
-              Bucket: !Ref S3Bucket
-              PolicyDocument:
-                Version: 2012-10-17
-                Statement:
-                - Effect: Allow
-                  Principal:
-                    AWS: !Sub !Sub "arn:aws:iam::${ManagementAccountID}:root"
-                  Action:
-                  - s3:GetBucketAcl
-                  - s3:GetBucketPolicyStatus
-                  - s3:PutObject
-                  - s3:PutObjectAcl
-                  Resource: !Sub "arn:${AWS::Partition}:s3:::${Name}.${AWS::Region}"
-                - Effect: Deny
-                  Principal: "*"
-                  Action: s3:*
-                  Condition:
-                    Bool:
-                      aws:SecureTransport: 'false'
-                  Resource:
-                    - !Sub "arn:${AWS::Partition}:s3:::${Name}.${AWS::Region}"
-                    - !Sub "arn:${AWS::Partition}:s3:::${Name}.${AWS::Region}/*"
-                - Sid: AllowTLS12Only
-                  Effect: Deny
-                  Principal: "*"
-                  Action: s3:*
-                  Resource:
-                    - !Sub "arn:${AWS::Partition}:s3:::${Name}.${AWS::Region}"
-                    - !Sub "arn:${AWS::Partition}:s3:::${Name}.${AWS::Region}/*"
-                  Condition:
-                    NumericLessThan:
-                      s3:TlsVersion: 1.2
-          S3Bucket:
-            Type: AWS::S3::Bucket
-            DeletionPolicy: Delete
-            Properties:
-              BucketName: !Sub cid-data-${AWS::AccountId}.rh.${AWS::Region}
-              BucketEncryption:
-                ServerSideEncryptionConfiguration:
-                  - ServerSideEncryptionByDefault:
-                      SSEAlgorithm: AES256
-              VersioningConfiguration:
-                Status: Enabled
-              PublicAccessBlockConfiguration:
-                BlockPublicAcls : true
-                BlockPublicPolicy : true
-                IgnorePublicAcls : true
-                RestrictPublicBuckets : true
-              LifecycleConfiguration:
-                Rules:
-                  - Id: Cleanup
-                    Prefix: ''
-                    Status: Enabled
-                    ExpirationInDays: 1
-                  - Id: NoncurrentCleanup
-                    Prefix: ''
-                    Status: Enabled
-                    NoncurrentVersionExpiration:
-                      NoncurrentDays: 1
-                  - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
-                    Status: Enabled
-                    AbortIncompleteMultipartUpload:
-                      DaysAfterInitiation: 7
-                    ExpiredObjectDeleteMarker: true
-      Tags: # Hacky way to manage dependencies
-        - Key: IgnoreMeIamOnlyWorkaround
-          Value: !GetAtt StackSetExecutionRole.Arn
 
   LambdaFunctionRole:
     Type: AWS::IAM::Role
@@ -297,13 +76,13 @@ Resources:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
       Path: /
       Policies:
-        - PolicyName: !Sub "${CFDataName}-ManagementAccount-LambdaRole"
+        - PolicyName: !Sub "${CFDataName}-MultiAccountRoleAssume-LambdaRole"
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: "Allow"
                 Action: "sts:AssumeRole"
-                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${ManagementRoleName}" # Need to assume a Read role in all Management Accounts
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}" # Need to assume a Read role in all Accounts
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -323,371 +102,268 @@ Resources:
         Variables:
           REGIONS: !Ref RegionsInScope
           BUCKET_PREFIX: !Sub "${BucketPrefix}${AWS::AccountId}"
-          INCLUDE_MEMBER_ACCOUNTS: !Ref IncludeMemberAccounts
-          ROLE_NAME: !Ref ManagementRoleName
-          MANAGEMENT_ACCOUNT_IDS: !Ref ManagementAccountID
+          ROLE_NAME: !Ref MultiAccountRoleName
           DESTINATION_BUCKET: !Ref DestinationBucket
       Code:
         ZipFile: |
           import os
           import json
           import logging
-          from datetime import date
+          import tempfile
+          from datetime import datetime, timedelta
+          from contextlib import contextmanager
           from functools import partial
 
-          BUCKET_PREFIX = os.environ["BUCKET_PREFIX"]
-          INCLUDE_MEMBER_ACCOUNTS = os.environ.get("INCLUDE_MEMBER_ACCOUNTS", 'yes').lower() == 'yes'
+          import boto3
+
           REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
           ROLE_NAME = os.environ['ROLE_NAME']
-          ARCH = os.environ.get('ARCH', 'AWS_ARM64,CURRENT').split(',')
-         
+          bucket = os.environ['DESTINATION_BUCKET']
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
 
-          #ensure we get latest boto3
-          from pip._internal.cli.main import main, sys
-          logging.getLogger('pip').setLevel(logging.ERROR) # Silence pip's logger
-          main(['install', '-I', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
-          sys.path.insert(0,'/tmp/')
-          import boto3 #pylint: disable=wrong-import-position
 
-          def get_latest_assessment_arn(resilience_client, app_arn):
-              # Get all assessments for the app
-              assessment_summaries = resilience_client.list_app_assessments(
-                  appArn=app_arn
-              )['assessmentSummaries']
-              
-              # Filter for successful assessments only
-              successful_assessments = [
-                  assessment for assessment in assessment_summaries 
-                  if assessment['assessmentStatus'] == 'Success'
-              ]
-              
-              if not successful_assessments:
-                  return None
-                  
-              # Sort by endTime to get the latest assessment
-              latest_assessment = sorted(
-                  successful_assessments,
-                  key=lambda x: x['endTime'],
-                  reverse=True
-              )[0]
-              #print (latest_assessment['assessmentArn'])
-              return latest_assessment['assessmentArn']
+          def paginate(operation_func, result_key: str, next_token: str=None, **params):
+              """ paginate non paginated boto3 functions"""
+              while True:
+                  if next_token:
+                      params['NextToken'] = next_token
+                  response = operation_func(**params)
+                  yield from response.get(result_key, [])
+                  next_token = response.get('NextToken') or response.get('nextToken')
+                  if not next_token:
+                    break
 
+          def json_converter(obj):
+              """ Help json encode date"""
+              if isinstance(obj, datetime):
+                  return obj.strftime("%Y-%m-%d %H:%M:%S")
+              return obj
+
+          @contextmanager
+          def s3_json_file(s3_client: boto3.client, bucket: str, s3_path: str):
+              """
+              Example:
+                  with s3_json_file(s3, 'my-bucket', 'data/output.json') as write_line:
+                      write_line({"key": "value", "list": [1, 2, 3]})
+                  # file will be uploaded to s3 at the end
+              """
+              temp_file = None
+              try:
+                  # Create temporary file
+                  temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
+                  def write_json(data) -> None:
+                      temp_file.write(json.dumps(data, default=json_converter) + '\n')
+                  yield write_json
+                  if not temp_file.closed:
+                      temp_file.close()
+                  print(f"Uploading JSON file to s3://{bucket}/{s3_path}")
+                  s3_client.upload_file(temp_file.name, bucket, s3_path)
+                  print(f"Successfully uploaded JSON to s3://{bucket}/{s3_path}")
+
+              except Exception as e:
+                  print(f"Error during S3 JSON upload: {str(e)}")
+                  raise
+
+              finally:
+                  if temp_file and not temp_file.closed:
+                      temp_file.close()
+                  if temp_file and os.path.exists(temp_file.name):
+                      try:
+                          os.unlink(temp_file.name)
+                      except OSError as e:
+                          print(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
 
           def lambda_handler(event, context):
               logger.info(f"Event: {event}")
-              collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
               if 'account' not in event:
                   raise ValueError(
                       "Please do not trigger this Lambda manually. "
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
+              module_name = 'resilience-hub'
+              account = json.loads(event["account"])
+              account_id = account["account_id"]
+              payer_id = account["payer_id"]
+              logger.info(f"Collecting data for account: {account_id}")
 
-              try:
-                  account = json.loads(event["account"])
-                  account_id = account["account_id"]
-                  account_name = account["account_name"]
-                  payer_id = account["payer_id"]
-                  logger.info(f"Collecting data for account: {account_id}")
+              creds = boto3.client('sts').assume_role(
+                  RoleArn=f"arn:aws:iam::{account_id}:role/{ROLE_NAME}",
+                  RoleSessionName="ResHub_CID_Lambda"
+              )['Credentials']
+              assumed_session = boto3.session(
+                  aws_access_key_id=creds["AccessKeyId"],
+                  aws_secret_access_key=creds["SecretAccessKey"],
+                  aws_session_token=creds["SessionToken"]
+              )
+              s3 = boto3.client('s3') # local s3
+              s3_uploader = partial(s3_json_file, s3, bucket)
 
-                  # Get environment variables
-                  local_bucket = os.environ['BUCKET_PREFIX']
-                  export_bucket = f'{local_bucket}{acc}'   
-                  aggregation_bucket = os.environ['DESTINATION_BUCKET']
-                  acc_list= os.environ['MANAGEMENT_ACCOUNT_IDS'] 
-                  acc_ids = acc_list.split(',')
-                      
-                  # Get current date and account ID
-                  current_date = datetime.now().strftime('%Y-%m-%d')
-                                
-                  acc=account_id
-                  ## Initialize sts client
-                  sts = boto3.client('sts')
-                  role_arn = f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}"
-                  assumed_role_object = sts.assume_role(
-                      RoleArn=role_arn,
-                      RoleSessionName="ResHub_CID_Lambda"
-                  )
-                  # Get the temporary credentials
-                  temp_credentials = assumed_role_object['Credentials']
+              for region in REGIONS:
+                  try:
+                      resilience_client = assumed_session.client('resiliencehub', region_name=region)
 
-
-                  # Initialize S3 client
-                  s3_client = boto3.client('s3')
-                  
-                  # RPO-RTO resilience report temp file headers
-                  with open('/tmp/resilience-report.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["app_arn","assessment_arn","assessment_time","estimated_overall_rto", "estimated_overall_rpo", "target_rto", "target_rpo", "current_rto_az", "current_rto_hardware", "current_rto_software", "current_rpo_az", "current_rpo_hardware", "current_rpo_software", "target_rto_az", "target_rto_hardware", "target_rto_software", "target_rpo_az", "target_rpo_hardware", "target_rpo_software"])
-                  
-                  with open('/tmp/app-recs.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["app_arn","assessment_arn", "app_component_name","description","ha_architecture","optimization_type","suggested_changes","cost","rec_status"])
-
-                  with open('/tmp/alarm-recs.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["app_arn","assessment_arn", "app_component_name","description","alreadyimplemented","excluded","resourceid","targetAccountid","targetregion","name","recommendationstatus"])
-
-                  with open('/tmp/sop-recs.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["app_arn","assessment_arn", "app_component_name","description","alreadyimplemented","excluded","resourceid","targetAccountid","targetregion","name","recommendationstatus"])
-
-                  #   /tmp/me-Apps-aggregated.csv
-                  with open('/tmp/me-Apps-aggregated.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["Region","Account Id","Application Id","Application Arn","Application Name","Resiliency Policy Id","Resiliency Policy Arn","Resiliency Policy Name","Last Assessment Time","Last Assessment Arn","Resiliency Status","Resiliency Drift Status","Compliance Total","FIS Tests Total","Alarms Total","SOPs Total","Compliance Outstanding","FIS Tests Outstanding","Alarms Outstanding","SOPs Outstanding","Compliance Excluded","FIS Tests Excluded","Alarms Excluded","SOPs Excluded","Operational Recommendations Total","Operational Recommendations Outstanding","Operational Recommendations Excluded","Infrastructure Recommendations Total","Input Source Drifts","App Component Drifts","Resiliency Score"])
-
-                  #   /tmp/me-Assessments-aggregated.csv
-                  with open('/tmp/me-Assessments-aggregated.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["DayTime","Region","Account Id","Application Id","Application Arn","Application Name","Assessment Time","Assessment Arn","Resiliency Status","Resiliency Drift Status","Compliance Total","FIS Tests Total","Alarms Total","SOPs Total","Compliance Outstanding","FIS Tests Outstanding","Alarms Outstanding","SOPs Outstanding","Compliance Excluded","FIS Tests Excluded","Alarms Excluded","SOPs Excluded","Operational Recommendations Total","Operational Recommendations Outstanding","Operational Recommendations Excluded","Input Source Drifts","App Component Drifts","Resiliency Score"])
-                                      
-                  #   /tmp/me-ResourceTypes-aggregated.csv 
-                  with open('/tmp/me-ResourceTypes-aggregated.csv', 'w', newline='') as file:
-                      writer = csv.writer(file)
-                      writer.writerow(["Region","Account Id","Resource Type","App Component Type","Applications","Recommendations"])
-                                      
-                  for region in REGIONS:
+                      # Read the latest read date (if any)
+                      status = {
+                          "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
+                          "account_id": account_id,
+                      }
+                      status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
-                          # Create a new client for each region
-                          resilience_client = boto3.client('resiliencehub',
-                              region_name=region,
-                              aws_access_key_id=temp_credentials["AccessKeyId"],
-                              aws_secret_access_key=temp_credentials["SecretAccessKey"],
-                              aws_session_token=temp_credentials["SessionToken"])
-              
-                          apps = resilience_client.list_apps()
-                          if apps['appSummaries'] == []: 
-                              continue
-                      except Exception as e:
-                          print(f"Error accessing region {region}: {str(e)}")
-                          continue
-
-                      #start metric export
-                      response = resilience_client.start_metrics_export(
-                      bucketName=export_bucket)
-                  
-                      export_id = response['metricsExportId']
-                      source_prefix = f'resiliencehub-metrics/{current_date}/{export_id}'
-
-                      app_arns = []
-                      for app in apps['appSummaries']:
-                          app_arns.append(app['appArn'])
-                      while 'NextToken' in apps:
-                          apps = resilience_client.list_apps(NextToken = apps['NextToken'])
-                          for app in apps['appSummaries']:
-                              app_arns.append(app['appArn'])
+                          status = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
+                      except s3.exceptions.NoSuchKey as exc:
+                          pass # this is fine if there no status file
+                      last_collection_time =  datetime.strptime(status["last_read"], "%Y-%m-%d %H:%M:%S")
+                      collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                       # Loop over list of apps to retrieve details
-                      for app in app_arns:
-                          assessment_summaries = resilience_client.list_app_assessments(appArn=app)['assessmentSummaries']
-                          while 'NextToken' in assessment_summaries:
-                              assessment_summaries.append(resilience_client.list_app_assessments(appArn=app, NextToken = assessment_summaries['NextToken'])['assessmentSummaries'])
-                      
-                          # Loop over list of assessments to get details
-                          for assessment in assessment_summaries:
-                              assessment_arn = assessment['assessmentArn']
-                              assessment_status = assessment['assessmentStatus']
-                              # Get assessment details if it is a successful assessment
-                              if assessment_status == 'Success':
-                                  assessment_details = resilience_client.describe_app_assessment(assessmentArn=assessment_arn)
-                                  if assessment_details['assessment']['compliance'] == {}:
-                                      continue
-                                  assessment_name = assessment_details['assessment']['assessmentName']
-                                  assessment_compliance_status = assessment_details['assessment']['complianceStatus']
-                                  end_time = assessment_details['assessment']['endTime']
-                                  current_rto_az = assessment_details['assessment']['compliance']['AZ']['currentRtoInSecs']
-                                  current_rto_hardware = assessment_details['assessment']['compliance']['Hardware']['currentRtoInSecs']
-                                  current_rto_software = assessment_details['assessment']['compliance']['Software']['currentRtoInSecs']
-                                  current_rpo_az = assessment_details['assessment']['compliance']['AZ']['currentRpoInSecs']
-                                  current_rpo_hardware = assessment_details['assessment']['compliance']['Hardware']['currentRpoInSecs']
-                                  current_rpo_software = assessment_details['assessment']['compliance']['Software']['currentRpoInSecs']
-                                  target_rto_az = assessment_details['assessment']['policy']['policy']['AZ']['rtoInSecs']
-                                  target_rto_hardware = assessment_details['assessment']['policy']['policy']['Hardware']['rtoInSecs']
-                                  target_rto_software = assessment_details['assessment']['policy']['policy']['Software']['rtoInSecs']
-                                  target_rpo_az = assessment_details['assessment']['policy']['policy']['AZ']['rpoInSecs']
-                                  target_rpo_hardware = assessment_details['assessment']['policy']['policy']['Hardware']['rpoInSecs']
-                                  target_rpo_software = assessment_details['assessment']['policy']['policy']['Software']['rpoInSecs']
-                                  # Aggregate RTO and RPO values for current and target
-                                  current_rto = max(current_rto_az, current_rto_hardware, current_rto_software)
-                                  current_rpo = max(current_rpo_az, current_rpo_hardware, current_rpo_software)
-                                  target_rto = min(target_rto_az, target_rto_hardware, target_rto_software)
-                                  target_rpo = min(target_rpo_az, target_rpo_hardware, target_rpo_software)
-                                  assessment_time = assessment_details['assessment']['endTime'].strftime('%Y-%m-%d %H:%M:%S')
-                                  #assessment_time = datetime.strptime(end_time, '%Y-%m-%dT%H:%M:%SZ').strftime('%Y-%m-%d %H:%M:%S')
-                                  # Populate data into the CSV file
-                                  with open('/tmp/resilience-report.csv', 'a', newline='') as file:
-                                      writer = csv.writer(file)
-                                      writer.writerow([app,assessment_arn, assessment_time, current_rto, current_rpo, target_rto, target_rpo, current_rto_az, current_rto_hardware, current_rto_software, current_rpo_az, current_rpo_hardware, current_rpo_software, target_rto_az, target_rto_hardware, target_rto_software, target_rpo_az, target_rpo_hardware, target_rpo_software])
+                      for app_summary in paginate(resilience_client.list_apps, 'appSummaries', fromLastAssessmentTime=last_collection_time):
+                          app_arn = app_summary['appArn']
+                          app_id = app_arn.split('/')[-1]
+                          app = resilience_client.describe_app(appArn=app_arn)['app']
 
-                          # Get latest assessment ARN first
-                          latest_assessment_arn = get_latest_assessment_arn(resilience_client, app)
-                          if latest_assessment_arn:
-                              # App Component Recs
-                              print(f"latest Assessment: {latest_assessment_arn}")
-                              acRecs = resilience_client.list_app_component_recommendations(assessmentArn=latest_assessment_arn)['componentRecommendations']
-                              while 'NextToken' in acRecs:
-                                  acRecs.append(resilience_client.list_app_component_recommendations(assessmentArn=latest_assessment_arn, NextToken = acRecs['NextToken'])['componentRecommendations'])
-                              for acRec in acRecs:
-                                  recStatus = acRec['recommendationStatus']
-                                  recs = acRec['configRecommendations']
-                                  for rec in recs:
-                                      changes = ""
-                                      cost = rec['cost']['amount']
-                                      for change in rec['suggestedChanges']:
-                                          changes = f"{changes}, {change}"
-                                      changes = changes[2:]
-                                      with open('/tmp/app-recs.csv', 'a', newline='') as file:
-                                          writer = csv.writer(file)
-                                          writer.writerow([app, latest_assessment_arn, rec['appComponentName'], rec['description'], rec['haArchitecture'], rec['optimizationType'], changes, cost, recStatus])
-                              
+                          # Initialize data structure
+                          app_data = {
+                              'region': region,
+                              'account_id': account_id,
+                              'application_id': app_id,
+                              'application_arn': app_arn,
+                              'application_name': app.get('name', ''),
+                              'resiliency_policy_id': '',
+                              'resiliency_policy_arn': '',
+                              'resiliency_policy_name': '',
+                              'last_assessment_time': '',
+                              'last_assessment_arn': '',
+                              'resiliency_status': app.get('status', ''),
+                              'resiliency_drift_status': app.get('driftStatus', ''),
+                              'compliance_total': '0',
+                              'fis_tests_total': '0',
+                              'alarms_total': '0',
+                              'sops_total': '0',
+                              'compliance_outstanding': '0',
+                              'fis_tests_outstanding': '0',
+                              'alarms_outstanding': '0',
+                              'sops_outstanding': '0',
+                              'compliance_excluded': '0',
+                              'fis_tests_excluded': '0',
+                              'alarms_excluded': '0',
+                              'sops_excluded': '0',
+                              'operational_recommendations_total': '0',           # FIXME
+                              'operational_recommendations_outstanding': '0',     # FIXME
+                              'operational_recommendations_excluded': '0',        # FIXME
+                              'infrastructure_recommendations_total': '0',        # FIXME
+                              'input_source_drifts': '0',                         # FIXME
+                              'app_component_drifts': '0',                        # FIXME
+                              'resiliency_score': '0' #from latest assessment
+                          }
 
-                              #Alarm Recs
-                              alarmRecs = resilience_client.list_alarm_recommendations(assessmentArn=latest_assessment_arn)['alarmRecommendations']
-                              while 'NextToken' in alarmRecs:
-                                  alarmRecs.append(resilience_client.list_alarm_recommendations(assessmentArn=latest_assessment_arn, NextToken = alarmRecs['NextToken'])['alarmRecommendations'])
-                              for alarmRec in alarmRecs:
-                                  implemented = alarmRec['items'][0]['alreadyImplemented']
-                                  excluded = alarmRec['items'][0]['excluded']
-                                  resourceID = alarmRec['items'][0]['resourceId']
-                                  tgtAcctID = alarmRec['items'][0]['targetAccountId']
-                                  targetRegion = alarmRec['items'][0]['targetRegion']
-                                  #print (f"implemented: {implemented}, excluded: {excluded}, Res ID: {resourceID}, Tgt Acct: {tgtAcctID}, Tgt Region: {targetRegion}")
-                                  with open('/tmp/alarm-recs.csv', 'a', newline='') as file:
-                                      writer = csv.writer(file)
-                                      writer.writerow([app, latest_assessment_arn, alarmRec['appComponentName'], alarmRec['description'], implemented, excluded, resourceID, tgtAcctID, targetRegion, alarmRec['name'], alarmRec['recommendationStatus']])
-                      
-                              #SOP Recs
-                              sopRecs = resilience_client.list_sop_recommendations(assessmentArn=latest_assessment_arn)['sopRecommendations']
-                              while 'NextToken' in sopRecs:
-                                  sopRecs.append(resilience_client.list_sop_recommendations(assessmentArn=latest_assessment_arn, NextToken = sopRecs['NextToken'])['sopRecommendations'])
-                              for sopRec in sopRecs:
-                                  implemented = sopRec['items'][0]['alreadyImplemented']
-                                  excluded = sopRec['items'][0]['excluded']
-                                  resourceID = sopRec['items'][0]['resourceId']
-                                  tgtAcctID = sopRec['items'][0]['targetAccountId']
-                                  targetRegion = sopRec['items'][0]['targetRegion']
-                                  #print (f"implemented: {implemented}, excluded: {excluded}, Res ID: {resourceID}, Tgt Acct: {tgtAcctID}, Tgt Region: {targetRegion}")
-                                  with open('/tmp/sop-recs.csv', 'a', newline='') as file:
-                                      writer = csv.writer(file)
-                                      writer.writerow([app, latest_assessment_arn, sopRec['appComponentName'], sopRec['description'], implemented, excluded, resourceID, tgtAcctID, targetRegion, sopRec['name'], sopRec['recommendationStatus']])
+                          # Get policy information
+                          policy_arn = app['policyArn']
+                          policy_id = policy_arn.split('/')[-1]
+                          app_data['resiliency_policy_arn'] = policy_arn
+                          app_data['resiliency_policy_id'] = policy_arn.split('/')[-1]
+                          try:
+                              policy_response = resilience_client.describe_resiliency_policy(policyArn=policy_arn)
+                              app_data['resiliency_policy_name'] = policy_response['policy'].get('policyName', '')
+                              with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer={payer_id}/account={account_id}/region_code={region}/{policy_id}.json') as write_policy:
+                                  write_policy(policy_response['policy'])
+
+                          except Exception as e:
+                              print(f"Error getting policy details: {str(e)}")
+
+                          # Loop over list of assessments to get the latest successful
+                          latest_assessment = None
+                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/all.json') as write_assessment:
+                              for assessment in paginate(resilience_client.list_app_assessments, 'assessmentSummaries', appArn=app_arn):
+                                  if assessment['assessmentStatus'] == 'Success':
+                                      if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']:
+                                          latest_assessment = assessment
+                                  write_assessment(assessment)
+
+                          # Get info from the latest successful assessment
+                          if latest_assessment:
+
+                              app_data['last_assessment_time'] = latest_assessment['endTime']
+                              app_data['last_assessment_arn'] = latest_assessment['assessmentArn']
+                              app_data['resiliency_score'] = latest_assessment.get('resiliencyScore')
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      write(rec)
 
 
+                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                                  total = outstanding = excluded = 0
+                                  for rec in paginate(resilience_client.list_alarm_recommendations, 'alarmRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      status = rec.get('recommendationStatus', '') #            'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
+                                      total += 1
+                                      if status == 'NotImplemented':
+                                          outstanding += 1
+                                      elif status == 'Excluded':
+                                          excluded += 1
+                                      write(rec)
+                                  app_data['alarms_total'] = str(total)
+                                  app_data['alarms_outstanding'] = str(outstanding)
+                                  app_data['alarms_excluded'] = str(excluded)
 
-                      #download metrics export files for the region into local temp files and add to acct aggregation files
-                      # Wait for export to complete (with timeout)
-                      max_attempts = 30
-                      attempts = 0
-                      while attempts < max_attempts:
-                          export_status = resilience_client.describe_metrics_export(
-                              metricsExportId=export_id
-                          )
+                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                                  total = outstanding = excluded = 0
+                                  for rec in paginate(resilience_client.list_sop_recommendations, 'sopRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      status = rec.get('recommendationStatus', '')  #           'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
+                                      total += 1
+                                      if status == 'NotImplemented':
+                                          outstanding += 1
+                                      elif status == 'Excluded':
+                                          excluded += 1
+                                      write(rec)
+                                  app_data['sops_total'] = str(total)
+                                  app_data['sops_outstanding'] = str(outstanding)
+                                  app_data['sops_excluded'] = str(excluded)
 
-                          if export_status['status'] == 'Success':
-                              break
-                          elif export_status['status'] == 'Failed':
-                              raise Exception(f"Export failed: {export_status.get('errorMessage', 'No error message provided')}")
+                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                                  total = outstanding = excluded = 0
+                                  for rec in paginate(resilience_client.list_test_recommendations, 'testRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      test_type = rec.get('type', '')              #             'type': 'Software'|'Hardware'|'AZ'|'Region'
+                                      status = rec.get('recommendationStatus', '') #             'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
+                                      if test_type == 'Software':  # FIS tests
+                                          total += 1
+                                          if status == 'NotImplemented':
+                                              outstanding += 1
+                                          elif status == 'Excluded':
+                                              excluded += 1
+                                      write(rec)
+                                  app_data['fis_tests_total'] = str(total)
+                                  app_data['fis_tests_outstanding'] = str(outstanding)
+                                  app_data['fis_tests_excluded'] = str(excluded)
 
-                          time.sleep(5)  # Wait 5 seconds before checking again
-                          attempts += 1
-                      
-                      if attempts >= max_attempts:
-                          raise Exception("Export timed out")
-                      
-                      #Aggregate the Metrics Export files across regions
-                      source_key = f"{source_prefix}/Applications.csv"
-                      s3_client.download_file(export_bucket, source_key, '/tmp/me-Apps.csv')
-                      # Read the downloaded file, skip header, and append data rows to me-Apps.csv
-                      with open('/tmp/me-Apps.csv', 'r', newline='') as input_file:
-                          reader = csv.reader(input_file)
-                          next(reader)  # Skip the header row
-          
-                          # Open the destination file in append mode
-                          with open('/tmp/me-Apps-aggregated.csv', 'a', newline='') as output_file:
-                              writer = csv.writer(output_file)
-                              # Write all remaining rows from the input file
-                              for row in reader:
-                                  writer.writerow(row)
+                              with s3_uploader(f'{module_name}/{module_name}-compliance_drift/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                                  app_component_drifts = 0
+                                  for rec in paginate(resilience_client.list_app_assessment_compliance_drift, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
+                                      drift_type = rec.get('driftType', '') #            'driftType': 'ApplicationCompliance'|'AppComponentResiliencyComplianceStatus',
+                                      if drift_type == 'ApplicationCompliance':
+                                          app_component_drifts += 1
+                                      write(rec)
+                                  app_data['app_component_drifts'] = str(app_component_drifts)
 
-                      source_key = f"{source_prefix}/Assessments Daily.csv"
-                      s3_client.download_file(export_bucket, source_key, '/tmp/me-Assessments.csv')
-                      # Read the downloaded file, skip header, and append data rows to me-Apps.csv
-                      with open('/tmp/me-Assessments.csv', 'r', newline='') as input_file:
-                          reader = csv.reader(input_file)
-                          next(reader)  # Skip the header row
-          
-                          # Open the destination file in append mode
-                          with open('/tmp/me-Assessments-aggregated.csv', 'a', newline='') as output_file:
-                              writer = csv.writer(output_file)
-                              # Write all remaining rows from the input file
-                              for row in reader:
-                                  writer.writerow(row)
+                          with s3_uploader(f'{module_name}/{module_name}-applications/payer={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
+                              write_app(app_data)
 
-                      source_key = f"{source_prefix}/Resource Types.csv"
-                      s3_client.download_file(export_bucket, source_key, '/tmp/me-ResourceTypes.csv')
-                      # Read the downloaded file, skip header, and append data rows to me-Apps.csv
-                      with open('/tmp/me-ResourceTypes.csv', 'r', newline='') as input_file:
-                          reader = csv.reader(input_file)
-                          next(reader)  # Skip the header row
-          
-                          # Open the destination file in append mode
-                          with open('/tmp/me-ResourceTypes-aggregated.csv', 'a', newline='') as output_file:
-                              writer = csv.writer(output_file)
-                              # Write all remaining rows from the input file
-                              for row in reader:
-                                  writer.writerow(row)
-                      
-                  #REGION-END
-                          
-                  # write RPO-RTO, app-component recs, alarm recs, and SOP recs reports to aggregation bucket
-                  destination_key = f"resiliencehub_application_rto_rpo/{acc}-RpoRtos.csv"
-                  write_response = s3_client.upload_file('/tmp/resilience-report.csv', aggregation_bucket, destination_key)
-                  
-                  destination_key = f"app_recommendations/{acc}-app-recs.csv"
-                  write_response = s3_client.upload_file('/tmp/app-recs.csv', aggregation_bucket, destination_key)
-                  
-                  destination_key = f"alarm_recommendations/{acc}-alarm-recs.csv"
-                  write_response = s3_client.upload_file('/tmp/alarm-recs.csv', aggregation_bucket, destination_key)
-                  
-                  destination_key = f"sop_recommendations/{acc}-sop-recs.csv"
-                  write_response = s3_client.upload_file('/tmp/sop-recs.csv', aggregation_bucket, destination_key)
-                  
-                  # resiliencehub_applications/Applications.csv
-                  destination_key = f"resiliencehub_applications/{acc}-Applications.csv"
-                  write_response = s3_client.upload_file('/tmp/me-Apps-aggregated.csv', aggregation_bucket, destination_key)
-                  
-                  # resiliencehub_daily_assessments/Assessments Daily.csv
-                  destination_key = f"resiliencehub_daily_assessments/{acc}-Assessments Daily.csv"
-                  write_response = s3_client.upload_file('/tmp/me-Assessments-aggregated.csv', aggregation_bucket, destination_key)
+                      # Write the time to s3
+                      status["last_read"] = collection_time
+                      s3.put_object(Bucket=bucket, Key=status_key, Body=json.dumps(status), ContentType='application/json')
 
-                  # resiliencehub_resource_types/Resource Types.csv
-                  destination_key = f"resiliencehub_resource_types/{acc}-Resource Types.csv"
-                  write_response = s3_client.upload_file('/tmp/me-ResourceTypes-aggregated.csv', aggregation_bucket, destination_key)
-                          
-                  return_message = {
-                      'statusCode': 200,
-                      'body': {
-                      'message': 'Exports and copy completed successfully',
-                      'Account': f"{acc_id}",
-                      'destinationLocation': f"{aggregation_bucket}"
-                      }
+                  except Exception as e:
+                      print(f"Error pulling data in region {region}: {str(e)}")
+
+              return {
+                  'statusCode': 200,
+                  'body': {
+                    'message': 'Exports and copy completed successfully',
+                    'account': account_id,
+                    'bucket': bucket,
                   }
-                  
-                  # Log the return message
-                  print(f"Success Response: {return_message}")
-                  return return_message
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)} in region {region}")
-                  return {
-                      'statusCode': 500,
-                      'body': {
-                          'message': f"Error occurred: {str(e)}"
-                      }
-                  }
+              }
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -729,544 +405,21 @@ Resources:
         Arn: !GetAtt ModuleStepFunction.Arn
         RoleArn: !Ref SchedulerExecutionRoleARN
 
-  CustomResourceFunctionFinalize:
-    Type: AWS::Lambda::Function
-    Properties:
-      Role: !GetAtt 'FinalizeLambdaExecutionRole.Arn'
-      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda-FinalizeSetup-DoNotRun'
-      Description: "Lambda to Finalize Setup (call trigger lambda) or Start teardown (Cleanup buckets)"
-      Runtime: python3.12
-      Architectures: [ arm64 ]
-      Code:
-        ZipFile: |
-          import os
-          import uuid
-          import json
-          import boto3
-          import botocore
-          import urllib3
-          import logging
-
-          REGIONS = os.environ['REGIONS'].replace(' ', '').split(',')
-          BUCKET_PREFIX = os.environ['BUCKET_PREFIX']
-          LAMBDA_ARN = os.environ['TRIGGER_LAMBDA']
-
-          logger = logging.getLogger(__name__)
-          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
-
-          def lambda_handler(event, context):
-              logger.info(event)
-              type_ = event.get('RequestType', 'Undef')
-              if type_ == 'Create': res = on_create()
-              elif type_ == 'Delete': res = on_delete()
-              else: res = (True, f"Not supported operation: {type_}")
-              response_data = {'Reason': res[1], 'uuid': str(uuid.uuid1()) }
-
-              url = event.get('ResponseURL')
-              body = {}
-              body['Status'] = 'SUCCESS' if res[0] else 'FAILED'
-              body['Reason'] = str(res[1]) + '\nSee the details in CloudWatch Log Stream: ' + context.log_stream_name
-              body['PhysicalResourceId'] = context.log_stream_name
-              body['StackId'] = event.get('StackId')
-              body['RequestId'] = event.get('RequestId')
-              body['LogicalResourceId'] = event.get('LogicalResourceId')
-              body['NoEcho'] = False
-              body['Data'] = response_data
-              logger.info(body)
-              if not url: return
-              json_body=json.dumps(body)
-              try:
-                  http = urllib3.PoolManager()
-                  response = http.request('PUT', url, body=json_body, headers={'content-type' : '', 'content-length' : str(len(json_body))}, retries=False)
-                  logger.info(f"Status code: {response}" )
-              except Exception as exc:
-                  logger.info("send(..) failed executing requests.put(..): " + str(exc))
-
-          def on_create():
-              return (True, f'nothing to do')
-
-          def on_delete():
-              # Delete all buckets (CF cannot delete if they are non-empty)
-              s3 = boto3.resource('s3')
-              log = []
-              for region in REGIONS:
-                  name = BUCKET_PREFIX + "." + region
-                  try:
-                      bucket = s3.Bucket(name)
-                      bucket.object_versions.delete()
-                      log.append(f'INFO:  {name} is empty now')
-                      bucket.delete()
-                      log.append(f'INFO:  {name} deleted')
-                  except botocore.exceptions.ClientError as exc:
-                      status = exc.response["ResponseMetadata"]["HTTPStatusCode"]
-                      errcode = exc.response["Error"]["Code"]
-                      if status == 404:
-                          log.append(f'INFO:  {name} - {errcode}')
-                      else:
-                          log.append(f'ERROR: {name} - {errcode}')
-                  except Exception as exc:
-                      log.append(f'ERROR: {name} Error: {exc}')
-              logger.info('\n'.join(log))
-              return (True, '\n'.join(log))
-      Handler: 'index.lambda_handler'
-      MemorySize: 2688
-      Timeout: 300
-      Environment:
-        Variables:
-          REGIONS: !Ref RegionsInScope
-          BUCKET_PREFIX: !Sub "${BucketPrefix}${AWS::AccountId}"
-          TRIGGER_LAMBDA:  !GetAtt LambdaFunction.Arn
-    Metadata:
-      cfn_nag:
-        rules_to_suppress:
-          - id: W89 # Lambda functions should be deployed inside a VPC
-            reason: "No need for VPC in this case"
-          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
-            reason: "No need for simultaneous execution"
-
-  FinalizeLambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - !Sub "lambda.${AWS::URLSuffix}"
-            Action:
-              - sts:AssumeRole
-      Path: /
-      Policies:
-        - PolicyName: root
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - lambda:InvokeAsync
-                  - lambda:InvokeFunction
-                Resource: !GetAtt LambdaFunction.Arn
-              - Effect: Allow
-                Action:
-                  - s3:DeleteObject
-                  - s3:DeleteObjectVersion
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${BucketPrefix}${AWS::AccountId}.*/*'
-              - Effect: Allow
-                Action:
-                  - s3:ListBucketVersions
-                  - s3:DeleteBucket
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${BucketPrefix}${AWS::AccountId}.*'
-      ManagedPolicyArns:
-        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-
-  FinalizeBucketsSetup:
-    DependsOn:
-      - LambdaFunction
-      - RegionalBucketsStackSet
-      - FinalizeLambdaExecutionRole
-    Type: Custom::CustomResource
-    Properties:
-      ServiceToken: !GetAtt CustomResourceFunctionFinalize.Arn
-
   AnalyticsExecutor:
     Type: Custom::LambdaAnalyticsExecutor
     Properties:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
 
-  ResilienceHubApplicationsTable:
-      Type: AWS::Glue::Table
-      Properties:
-        CatalogId: !Ref AWS::AccountId
-        DatabaseName: !Ref DatabaseName
-        TableInput:
-          Name: 'resiliencehub_applications'
-          TableType: EXTERNAL_TABLE
-          Parameters:
-            EXTERNAL: "TRUE"
-            skip.header.line.count: "1"
-          PartitionKeys: []
-          StorageDescriptor:
-            Location: !Sub "s3://${DestinationBucket}/resiliencehub_applications/"
-            InputFormat: org.apache.hadoop.mapred.TextInputFormat
-            OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-            Columns:
-              - Name: region
-                Type: string
-              - Name: account_id
-                Type: string
-              - Name: application_id
-                Type: string
-              - Name: application_arn
-                Type: string
-              - Name: application_name
-                Type: string
-              - Name: resiliency_policy_id
-                Type: string
-              - Name: resiliency_policy_arn
-                Type: string
-              - Name: resiliency_policy_name
-                Type: string
-              - Name: last_assessment_time
-                Type: string
-              - Name: last_assessment_arn
-                Type: string
-              - Name: resiliency_status
-                Type: string
-              - Name: resiliency_drift_status
-                Type: string
-              - Name: compliance_total
-                Type: string
-              - Name: fis_tests_total
-                Type: string
-              - Name: alarms_total
-                Type: string
-              - Name: sops_total
-                Type: string
-              - Name: compliance_outstanding
-                Type: string
-              - Name: fis_tests_outstanding
-                Type: string
-              - Name: alarms_outstanding
-                Type: string
-              - Name: sops_outstanding
-                Type: string
-              - Name: compliance_excluded
-                Type: string
-              - Name: fis_tests_excluded
-                Type: string
-              - Name: alarms_excluded
-                Type: string
-              - Name: sops_excluded
-                Type: string
-              - Name: operational_recommendations_total
-                Type: string
-              - Name: operational_recommendations_outstanding
-                Type: string
-              - Name: operational_recommendations_excluded
-                Type: string
-              - Name: infrastructure_recommendations_total
-                Type: string
-              - Name: input_source_drifts
-                Type: string
-              - Name: app_component_drifts
-                Type: string
-              - Name: resiliency_score
-                Type: string
-            SerdeInfo:
-              SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-              Parameters:
-                separatorChar: ","
-                quoteChar: "\""
-                escapeChar: "\\"
-
-  ResilienceDailyAssessmentTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_daily_assessments'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_daily_assessments/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: DayTime
-              Type: string
-            - Name: Region
-              Type: string
-            - Name: Account_Id
-              Type: string
-            - Name: Application_Id
-              Type: string
-            - Name: Application_Arn
-              Type: string
-            - Name: Application_Name
-              Type: string
-            - Name: Assessment_Time
-              Type: string
-            - Name: Assessment_Arn
-              Type: string
-            - Name: Resiliency_Status
-              Type: string
-            - Name: Resiliency_Drift_Status
-              Type: string
-            - Name: Compliance_Total
-              Type: string
-            - Name: FIS_Tests_Total
-              Type: string
-            - Name: Alarms_Total
-              Type: string
-            - Name: SOPs_Total
-              Type: string
-            - Name: Compliance_Outstanding
-              Type: string
-            - Name: FIS_Tests_Outstanding
-              Type: string
-            - Name: Alarms_Outstanding
-              Type: string
-            - Name: SOPs_Outstanding
-              Type: string
-            - Name: Compliance_Excluded
-              Type: string
-            - Name: FIS_Tests_Excluded
-              Type: string
-            - Name: Alarms_Excluded
-              Type: string
-            - Name: SOPs_Excluded
-              Type: string
-            - Name: Operational_Recommendations_Total
-              Type: string
-            - Name: Operational_Recommendations_Outstanding
-              Type: string
-            - Name: Operational_Recommendations_Excluded
-              Type: string
-            - Name: Input_Source_Drifts
-              Type: string
-            - Name: App_Component_Drifts
-              Type: string
-            - Name: Resiliency_Score
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
-
-  ResilienceHubResourceTypesTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_resource_types'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_resource_types/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: region
-              Type: string
-            - Name: account_id
-              Type: string
-            - Name: resource_type
-              Type: string
-            - Name: app_component_type
-              Type: string
-            - Name: applications
-              Type: string
-            - Name: recommendations
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
-
-  ResilienceHubApplicationRtoRpoTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_application_rto_rpo'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/resiliencehub_application_rto_rpo/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: app_arn
-              Type: string
-            - Name: assessment_arn
-              Type: string
-            - Name: assessment_time
-              Type: string
-            - Name: estimated_overall_rto
-              Type: string
-            - Name: estimated_overall_rpo
-              Type: string
-            - Name: target_rto
-              Type: string
-            - Name: target_rpo
-              Type: string
-            - Name: current_rto_az
-              Type: string
-            - Name: current_rto_hardware
-              Type: string
-            - Name: current_rto_software
-              Type: string
-            - Name: current_rpo_az
-              Type: string
-            - Name: current_rpo_hardware
-              Type: string
-            - Name: current_rpo_software
-              Type: string
-            - Name: target_rto_az
-              Type: string
-            - Name: target_rto_hardware
-              Type: string
-            - Name: target_rto_software
-              Type: string
-            - Name: target_rpo_az
-              Type: string
-            - Name: target_rpo_hardware
-              Type: string
-            - Name: target_rpo_software
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
-
-  ResilienceHubAppRecommendationsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_app_recommendations'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.er.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/app_recommendations/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: App_ARN
-              Type: string
-            - Name: Assessment_ARN
-              Type: string
-            - Name: App_Component_Name
-              Type: string
-            - Name: Description
-              Type: string
-            - Name: HA_Architecture
-              Type: string
-            - Name: Optimization_Type
-              Type: string
-            - Name: Suggested_Changes
-              Type: string
-            - Name: cost
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
-
-  ResilienceHubAlarmRecommendationsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_alarm_recommendations'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/alarm_recommendations/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: App_ARN
-              Type: string
-            - Name: Assessment_ARN
-              Type: string
-            - Name: App_Component_Name
-              Type: string
-            - Name: Description
-              Type: string
-            - Name: alreadyImplemented
-              Type: string
-            - Name: excluded
-              Type: string
-            - Name: resourceID
-              Type: string
-            - Name: targetAccountID
-              Type: string
-            - Name: targetRegion
-              Type: string
-            - Name: name
-              Type: string
-            - Name: recommendationStatus
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
-
-  ResilienceHubSopRecommendationsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resiliencehub_sop_recommendations'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          skip.header.line.count: "1"
-        PartitionKeys: []
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/sop_recommendations/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Columns:
-            - Name: App_ARN
-              Type: string
-            - Name: Assessment_ARN
-              Type: string
-            - Name: App_Component_Name
-              Type: string
-            - Name: Description
-              Type: string
-            - Name: alreadyImplemented
-              Type: boolean
-            - Name: excluded
-              Type: boolean
-            - Name: resourceID
-              Type: string
-            - Name: targetAccountID
-              Type: string
-            - Name: targetRegion
-              Type: string
-            - Name: name
-              Type: string
-            - Name: recommendationStatus
-              Type: string
-          SerdeInfo:
-            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
-            Parameters:
-              separatorChar: ","
-              quoteChar: "\""
-              escapeChar: "\\"
+#  ResilienceHubApplicationsTable:
+#      Type: AWS::Glue::Table
+#      Properties:
+#        CatalogId: !Ref AWS::AccountId
+#        DatabaseName: !Ref DatabaseName
+#        TableInput:
+#          Name: 'resiliencehub_applications'
+#          TableType: EXTERNAL_TABLE
+#          Parameters:
+ #           EXTERNAL: "TRUE"
+ #           skip.header.line.count: "1"
+ 

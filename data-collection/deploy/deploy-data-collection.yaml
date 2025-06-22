@@ -1472,7 +1472,7 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
-  
+
   ResilienceHubModule:
     Type: AWS::CloudFormation::Stack
     Condition: DeployResilienceHubModule
@@ -1480,8 +1480,7 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.10.0/module-resilience-hub.yaml"
       Parameters:
         DestinationBucket: !Ref S3Bucket
-        ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
-        ManagementAccountID: !Ref ManagementAccountID
+        MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         Schedule: !Ref ScheduleFrequent
         ResourcePrefix: !Ref ResourcePrefix

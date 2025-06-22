@@ -123,7 +123,7 @@ Conditions:
   IncludeBudgetsModulePolicy:            !Equals [!Ref IncludeBudgetsModule, "yes"]
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
-  IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"] 
+  IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -430,36 +430,37 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
-
   # Resilience Hub policy
   ResilienceHubPolicy:
     Type: 'AWS::IAM::Policy'
     Condition: IncludeResilienceHubModulePolicy
     Properties:
       PolicyName: ResilienceHubPolicy
-      PolicyDocument: 
+      PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: VisualEditor0
+          - Sid: ResilienceHubRestricted
             Effect: Allow
             Action:
-              - resiliencehub:ListSopRecommendations
-              - resiliencehub:DescribeAppAssessment
-              - resiliencehub:ListAppComponentRecommendations
-              - resiliencehub:ListAlarmRecommendations
+              - "resiliencehub:DescribeAppAssessment"
+              - "resiliencehub:ListSopRecommendations"
+              - "resiliencehub:ListAppComponentRecommendations"
+              - "resiliencehub:ListAlarmRecommendations"
             Resource: !Sub "arn:${AWS::Partition}:resiliencehub:*:${AWS::AccountId}:app/*"
-          - Sid: VisualEditor1
+          - Sid: ResilienceHubNonRestricted
             Effect: Allow
             Action:
-              - resiliencehub:ListApps
-              - resiliencehub:DescribeMetricsExport
-              - resiliencehub:ListAppAssessments
-              - resiliencehub:StartMetricsExport
-            Resource: '*'
+              - "resiliencehub:ListApps"
+              - "resiliencehub:DescribeApp"
+              - "resiliencehub:ListAppAssessments"
+              - "resiliencehub:ListAppAssessmentComplianceDrift"
+              - "resiliencehub:ListTestRecommendations"
+              - "resiliencehub:DescribeResiliencyPolicy"
+            Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: W12
-            reason: "Policy is used for scanning of a wide range of resources"  
+            reason: "Policy is used for scanning of a wide range of resources"
