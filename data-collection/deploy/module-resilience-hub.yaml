@@ -4,10 +4,6 @@ Parameters:
   DatabaseName:
     Type: String
     Description: Name of the Athena database to be created to hold lambda information
-  BucketPrefix:
-    Type: String
-    Description: A prefix for S3 Bucket
-    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$) #FIXME
   DestinationBucket:
     Type: String
     Description: Name of the S3 Bucket to be created to hold data information.
@@ -19,6 +15,9 @@ Parameters:
     Type: String
     Description: The name of what this cf is doing.
     Default: resilience-hub
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
   Schedule:
     Type: String
     Description: EventBridge Schedule to trigger the data collection
@@ -47,10 +46,13 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
-  # DataBucketsKmsKeysArns:
-  #   Type: String
-  #   Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
-  #   Default: ""
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
 
 Outputs:
   StepFunctionARN:
@@ -83,6 +85,33 @@ Resources:
               - Effect: "Allow"
                 Action: "sts:AssumeRole"
                 Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}" # Need to assume a Read role in all Accounts
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:PutObjectAcl"
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}/*'
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}'
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -101,11 +130,13 @@ Resources:
       Environment:
         Variables:
           REGIONS: !Ref RegionsInScope
-          BUCKET_PREFIX: !Sub "${BucketPrefix}${AWS::AccountId}"
           ROLE_NAME: !Ref MultiAccountRoleName
           DESTINATION_BUCKET: !Ref DestinationBucket
       Code:
         ZipFile: |
+          ''' This code will go through all regions in given linked account and pull data from Resilience Hub (only applications with assessment updated since last pull)
+          to preform full pull remove 'resilience-hub' folder on s3 and rerun StepFunction
+          '''
           import os
           import json
           import logging
@@ -133,7 +164,7 @@ Resources:
                   yield from response.get(result_key, [])
                   next_token = response.get('NextToken') or response.get('nextToken')
                   if not next_token:
-                    break
+                      break
 
           def json_converter(obj):
               """ Help json encode date"""
@@ -192,7 +223,7 @@ Resources:
                   RoleArn=f"arn:aws:iam::{account_id}:role/{ROLE_NAME}",
                   RoleSessionName="ResHub_CID_Lambda"
               )['Credentials']
-              assumed_session = boto3.session(
+              assumed_session = boto3.session.Session(
                   aws_access_key_id=creds["AccessKeyId"],
                   aws_secret_access_key=creds["SecretAccessKey"],
                   aws_session_token=creds["SessionToken"]
@@ -266,7 +297,7 @@ Resources:
                           try:
                               policy_response = resilience_client.describe_resiliency_policy(policyArn=policy_arn)
                               app_data['resiliency_policy_name'] = policy_response['policy'].get('policyName', '')
-                              with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer={payer_id}/account={account_id}/region_code={region}/{policy_id}.json') as write_policy:
+                              with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer_id={payer_id}/account_id={account_id}/region_code={region}/{policy_id}.json') as write_policy:
                                   write_policy(policy_response['policy'])
 
                           except Exception as e:
@@ -274,7 +305,7 @@ Resources:
 
                           # Loop over list of assessments to get the latest successful
                           latest_assessment = None
-                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/all.json') as write_assessment:
+                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/all.json') as write_assessment:
                               for assessment in paginate(resilience_client.list_app_assessments, 'assessmentSummaries', appArn=app_arn):
                                   if assessment['assessmentStatus'] == 'Success':
                                       if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']:
@@ -288,12 +319,11 @@ Resources:
                               app_data['last_assessment_arn'] = latest_assessment['assessmentArn']
                               app_data['resiliency_score'] = latest_assessment.get('resiliencyScore')
 
-                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       write(rec)
 
-
-                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_alarm_recommendations, 'alarmRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       status = rec.get('recommendationStatus', '') #            'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
@@ -307,7 +337,7 @@ Resources:
                                   app_data['alarms_outstanding'] = str(outstanding)
                                   app_data['alarms_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_sop_recommendations, 'sopRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       status = rec.get('recommendationStatus', '')  #           'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
@@ -321,7 +351,7 @@ Resources:
                                   app_data['sops_outstanding'] = str(outstanding)
                                   app_data['sops_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_test_recommendations, 'testRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       test_type = rec.get('type', '')              #             'type': 'Software'|'Hardware'|'AZ'|'Region'
@@ -337,7 +367,7 @@ Resources:
                                   app_data['fis_tests_outstanding'] = str(outstanding)
                                   app_data['fis_tests_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-compliance_drift/payer={payer_id}/account={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-compliance_drift/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   app_component_drifts = 0
                                   for rec in paginate(resilience_client.list_app_assessment_compliance_drift, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
                                       drift_type = rec.get('driftType', '') #            'driftType': 'ApplicationCompliance'|'AppComponentResiliencyComplianceStatus',
@@ -346,8 +376,10 @@ Resources:
                                       write(rec)
                                   app_data['app_component_drifts'] = str(app_component_drifts)
 
-                          with s3_uploader(f'{module_name}/{module_name}-applications/payer={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
+                          with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app_data)
+                          with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
+                              write_app(app)
 
                       # Write the time to s3
                       status["last_read"] = collection_time
@@ -383,13 +415,14 @@ Resources:
       DefinitionSubstitutions:
         AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
         ModuleLambdaARN: !GetAtt LambdaFunction.Arn
-        Crawlers: '[]'
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
         CollectionType: "LINKED"
         Params: ''
         Module: !Ref CFDataName
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'
@@ -410,6 +443,24 @@ Resources:
     Properties:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-applications/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drift/"
 
 #  ResilienceHubApplicationsTable:
 #      Type: AWS::Glue::Table

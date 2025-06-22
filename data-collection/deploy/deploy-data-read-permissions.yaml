@@ -80,7 +80,7 @@ Metadata:
         default: "Include Service Quotas Module"
       IncludeResilienceHubModule:
         default: "Include ResilienceHub Module"
-        
+
 Parameters:
   ManagementAccountRole:
     Type: String

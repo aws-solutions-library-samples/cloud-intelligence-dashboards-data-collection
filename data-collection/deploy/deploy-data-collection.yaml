@@ -1479,10 +1479,11 @@ Resources:
     Properties:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-resilience-hub.yaml"
       Parameters:
-        DestinationBucket: !Ref S3Bucket # this includes account id
-        BucketPrefix:  !Ref DestinationBucket # this is just a prefix
+        DatabaseName: !Ref DatabaseName
+        DestinationBucket: !Ref S3Bucket
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        GlueRoleARN: !GetAtt GlueRole.Arn
         Schedule: !Ref ScheduleFrequent
         ResourcePrefix: !Ref ResourcePrefix
         RegionsInScope:
