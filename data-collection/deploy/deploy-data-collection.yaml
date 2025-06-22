@@ -1477,14 +1477,14 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployResilienceHubModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.10.0/module-resilience-hub.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-resilience-hub.yaml"
       Parameters:
-        DestinationBucket: !Ref S3Bucket
+        DestinationBucket: !Ref S3Bucket # this includes account id
+        BucketPrefix:  !Ref DestinationBucket # this is just a prefix
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         Schedule: !Ref ScheduleFrequent
         ResourcePrefix: !Ref ResourcePrefix
-        BucketPrefix:  !Ref DestinationBucket
         RegionsInScope:
           Fn::If:
             - RegionsInScopeIsEmpty
