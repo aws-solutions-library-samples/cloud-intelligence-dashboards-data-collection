@@ -174,6 +174,15 @@ Resources:
                   return obj.strftime("%Y-%m-%d %H:%M:%S")
               return obj
 
+          def sort_dict(d):
+              """ Sort dicts and lists recursively """
+              if isinstance(d, dict):
+                  return {k: sort_dict(v) for k, v in sorted(d.items())}
+              elif isinstance(d, list):
+                  return [sort_dict(v) for v in d]
+              else:
+                  return d
+
           @contextmanager
           def s3_json_file(s3_client: boto3.client, bucket: str, s3_path: str):
               """
@@ -187,7 +196,7 @@ Resources:
                   # Create temporary file
                   temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
                   def write_json(data) -> None:
-                      temp_file.write(json.dumps(data, default=json_converter) + '\n')
+                      temp_file.write(json.dumps(sort_dict(data), default=json_converter) + '\n')
                   yield write_json
                   if not temp_file.closed:
                       temp_file.close()
@@ -239,13 +248,16 @@ Resources:
 
                       # Read the latest read date (if any)
                       status_obj = {
+                      status_obj = {
                           "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
                       }
                       status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
                           status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
+                          status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
                       except s3.exceptions.NoSuchKey as exc:
                           pass # this is fine if there no status file
+                      last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -322,6 +334,7 @@ Resources:
 
                               with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      print(f'Record Value Test {rec}')
                                       write(rec)
 
                               with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
@@ -462,6 +475,18 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drift/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            }
+          }
+        }
 
 #  ResilienceHubApplicationsTable:
 #      Type: AWS::Glue::Table
