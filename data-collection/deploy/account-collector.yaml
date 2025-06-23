@@ -128,7 +128,9 @@ Resources:
           ZipFile: |
             import os
             import json
+            import uuid
             import logging
+            from datetime import datetime
             from functools import partial
 
             import boto3
@@ -141,6 +143,9 @@ Resources:
             EXCLUDED_ACCOUNT_LIST_KEY = os.environ.get('EXCLUDED_ACCOUNT_LIST_KEY')
             EUC_ACCOUNTS = os.environ.get('EUC_ACCOUNT_IDS', '').strip()
             TMP_FILE = "/tmp/data.json"
+            START_TIME = str(datetime.now().isoformat())
+            LINKED_ACCOUNT_LIST_KEY = os.environ.get('LINKED_ACCOUNT_LIST_KEY', 'linked-account-list.json')
+            PAYER_ACCOUNT_LIST_KEY = os.environ.get('PAYER_ACCOUNT_LIST_KEY', 'payer-account-list.json')
 
             logger = logging.getLogger(__name__)
             logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
@@ -156,6 +161,8 @@ Resources:
                     logger.error(message)
                     raise Exception(message) #pylint: disable=broad-exception-raised
 
+                module = event.get("module", '').lower()
+                params = event.get("params", '')
                 functions = { # keep keys same as boto3 services
                     'linked': iterate_linked_accounts,
                     'euc': partial(iterate_accounts_with_filter, EUC_ACCOUNTS),
@@ -164,7 +171,7 @@ Resources:
                     'compute-optimizer': partial(iterate_admins_accounts, 'compute-optimizer'),
                     'backup': partial(iterate_admins_accounts, 'backup'),
                 }
-                account_type = event.get("Type", '').lower()
+                account_type = event.get("type", '').lower()
                 if account_type not in functions:
                     raise Exception(f"Lambda event must have 'Type' parameter with value = ({list(functions.keys())})") #pylint: disable=broad-exception-raised
 
@@ -173,6 +180,14 @@ Resources:
                     count = 0
                     f.write("[\n")
                     for account in account_iterator():
+                        account['main_exe_uuid'] = event.get("main_exe_uuid", str(uuid.uuid4()))
+                        account['module'] = module
+                        account['bucket'] = BUCKET
+                        account['dc_account'] = boto3.client('sts').get_caller_identity()['Account']
+                        account['dc_region'] = boto3.session.Session().region_name
+                        account['params'] = params
+                        account['prefix'] = RESOURCE_PREFIX
+                        account['stack_version'] = event.get("stack_version", '')
                         if count > 0:
                             f.write(",\n")
                         f.write(json.dumps(account))
@@ -183,6 +198,7 @@ Resources:
                     raise Exception('No accounts found. Check the log.') #pylint: disable=broad-exception-raised
 
                 key = f"account-list/{account_type}-account-list.json"
+                key = f"account-collector/{module+'-'+(params+'-' if params else '')+(LINKED_ACCOUNT_LIST_KEY if account_type == 'linked' else PAYER_ACCOUNT_LIST_KEY)}"
                 s3 = boto3.client('s3')
                 s3.upload_file(TMP_FILE, Bucket=BUCKET, Key=key)
 
@@ -285,6 +301,7 @@ Resources:
                     aws_secret_access_key=credentials['SecretAccessKey'],
                     aws_session_token=credentials['SessionToken'],
                 )
+
       Handler: 'index.lambda_handler'
       MemorySize: 2688
       Timeout: 600
@@ -298,6 +315,7 @@ Resources:
           PREDEF_ACCOUNT_LIST_KEY: "account-list/account-list"
           EXCLUDED_ACCOUNT_LIST_KEY: "account-list/excluded-linked-account-list.csv"
           EUC_ACCOUNT_IDS: !Ref EUCAccountIDs
+
     Metadata:
       cfn_nag:
         rules_to_suppress:

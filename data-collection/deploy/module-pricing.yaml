@@ -740,6 +740,7 @@ Resources:
                   "Parameters": {
                     "StateMachineArn": "arn:${Partition}:states:${DeployRegion}:${Account}:stateMachine:${Prefix}CrawlerExecution-StateMachine",
                     "Input": {
+                      "behavior": "WAIT",
                       "crawlers": ${Crawlers}
                     }
                   },
