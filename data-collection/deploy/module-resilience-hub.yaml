@@ -238,15 +238,15 @@ Resources:
                       resilience_client = assumed_session.client('resiliencehub', region_name=region)
 
                       # Read the latest read date (if any)
-                      status = {
+                      status_obj = {
                           "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
                       }
                       status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
-                          status = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
+                          status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
                       except s3.exceptions.NoSuchKey as exc:
                           pass # this is fine if there no status file
-                      last_collection_time =  datetime.strptime(status["last_read"], "%Y-%m-%d %H:%M:%S")
+                      last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                       # Loop over list of apps to retrieve details
@@ -370,21 +370,21 @@ Resources:
 
                               with s3_uploader(f'{module_name}/{module_name}-compliance_drift/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
                                   app_component_drifts = 0
-                                  for rec in paginate(resilience_client.list_app_assessment_compliance_drift, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
+                                  for rec in paginate(resilience_client.list_app_assessment_compliance_drifts, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
                                       drift_type = rec.get('driftType', '') #            'driftType': 'ApplicationCompliance'|'AppComponentResiliencyComplianceStatus',
                                       if drift_type == 'ApplicationCompliance':
                                           app_component_drifts += 1
                                       write(rec)
                                   app_data['app_component_drifts'] = str(app_component_drifts)
 
-                          with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
+                          with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app_data)
                           with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app)
 
                       # Write the time to s3
-                      status["last_read"] = collection_time
-                      s3.put_object(Bucket=bucket, Key=status_key, Body=json.dumps(status), ContentType='application/json')
+                      status_obj["last_read"] = collection_time
+                      s3.put_object(Bucket=bucket, Key=status_key, Body=json.dumps(status_obj), ContentType='application/json')
 
                   except Exception as e:
                       print(f"Error pulling data in region {region}: {str(e)}")
