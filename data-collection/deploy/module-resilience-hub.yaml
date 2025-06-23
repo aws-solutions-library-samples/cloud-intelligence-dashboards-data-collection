@@ -127,6 +127,8 @@ Resources:
       Handler: index.lambda_handler
       Runtime: python3.12
       Architectures: [x86_64]
+      MemorySize: 2688
+      Timeout: 900
       Environment:
         Variables:
           REGIONS: !Ref RegionsInScope
@@ -272,7 +274,7 @@ Resources:
                               'fis_tests_total': '0',
                               'alarms_total': '0',
                               'sops_total': '0',
-                              'compliance_outstanding': '0',
+                              'compliance_outstanding': '0',                   # FIXME
                               'fis_tests_outstanding': '0',
                               'alarms_outstanding': '0',
                               'sops_outstanding': '0',
