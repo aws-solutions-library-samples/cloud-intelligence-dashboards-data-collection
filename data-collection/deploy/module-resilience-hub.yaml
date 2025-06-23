@@ -240,7 +240,6 @@ Resources:
                       # Read the latest read date (if any)
                       status = {
                           "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
-                          "account_id": account_id,
                       }
                       status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
