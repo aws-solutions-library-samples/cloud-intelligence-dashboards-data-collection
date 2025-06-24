@@ -192,20 +192,21 @@ Resources:
                   # file will be uploaded to s3 at the end
               """
               temp_file = None
+              records = 0
               try:
                   # Create temporary file
                   temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
                   def write_json(data) -> None:
+                      records += 1
                       temp_file.write(json.dumps(sort_dict(data), default=json_converter) + '\n')
                   yield write_json
                   if not temp_file.closed:
                       temp_file.close()
-                  print(f"Uploading JSON file to s3://{bucket}/{s3_path}")
                   s3_client.upload_file(temp_file.name, bucket, s3_path)
-                  print(f"Successfully uploaded JSON to s3://{bucket}/{s3_path}")
+                  print(f"Uploaded {records} records to s3://{bucket}/{s3_path}")
 
               except Exception as e:
-                  print(f"Error during S3 JSON upload: {str(e)}")
+                  print(f"Error during S3 upload s3://{bucket}/{s3_path}: {str(e)}")
                   raise
 
               finally:
@@ -248,16 +249,13 @@ Resources:
 
                       # Read the latest read date (if any)
                       status_obj = {
-                      status_obj = {
                           "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
                       }
                       status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
                           status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
-                          status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
                       except s3.exceptions.NoSuchKey as exc:
                           pass # this is fine if there no status file
-                      last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -318,7 +316,7 @@ Resources:
 
                           # Loop over list of assessments to get the latest successful
                           latest_assessment = None
-                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/all.json') as write_assessment:
+                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/all.json') as write_assessment:
                               for assessment in paginate(resilience_client.list_app_assessments, 'assessmentSummaries', appArn=app_arn):
                                   if assessment['assessmentStatus'] == 'Success':
                                       if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']:
@@ -329,15 +327,16 @@ Resources:
                           if latest_assessment:
 
                               app_data['last_assessment_time'] = latest_assessment['endTime']
-                              app_data['last_assessment_arn'] = latest_assessment['assessmentArn']
+                              app_data['last_assessment_arn'] = assessment_arn = latest_assessment['assessmentArn']
                               app_data['resiliency_score'] = latest_assessment.get('resiliencyScore')
 
-                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       print(f'Record Value Test {rec}')
+                                      rec['assessment_arn'] = assessment_arn
                                       write(rec)
 
-                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_alarm_recommendations, 'alarmRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       status = rec.get('recommendationStatus', '') #            'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
@@ -346,12 +345,13 @@ Resources:
                                           outstanding += 1
                                       elif status == 'Excluded':
                                           excluded += 1
+                                      rec['assessment_arn'] = assessment_arn
                                       write(rec)
                                   app_data['alarms_total'] = str(total)
                                   app_data['alarms_outstanding'] = str(outstanding)
                                   app_data['alarms_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_sop_recommendations, 'sopRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       status = rec.get('recommendationStatus', '')  #           'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
@@ -360,12 +360,13 @@ Resources:
                                           outstanding += 1
                                       elif status == 'Excluded':
                                           excluded += 1
+                                      rec['assessment_arn'] = assessment_arn
                                       write(rec)
                                   app_data['sops_total'] = str(total)
                                   app_data['sops_outstanding'] = str(outstanding)
                                   app_data['sops_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_test_recommendations, 'testRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       test_type = rec.get('type', '')              #             'type': 'Software'|'Hardware'|'AZ'|'Region'
@@ -376,17 +377,19 @@ Resources:
                                               outstanding += 1
                                           elif status == 'Excluded':
                                               excluded += 1
+                                      rec['assessment_arn'] = assessment_arn
                                       write(rec)
                                   app_data['fis_tests_total'] = str(total)
                                   app_data['fis_tests_outstanding'] = str(outstanding)
                                   app_data['fis_tests_excluded'] = str(excluded)
 
-                              with s3_uploader(f'{module_name}/{module_name}-compliance_drift/payer_id={payer_id}/account_id={account_id}/region_code={region}/app={app_id}/latest.json') as write:
+                              with s3_uploader(f'{module_name}/{module_name}-compliance_drifts_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   app_component_drifts = 0
                                   for rec in paginate(resilience_client.list_app_assessment_compliance_drifts, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
                                       drift_type = rec.get('driftType', '') #            'driftType': 'ApplicationCompliance'|'AppComponentResiliencyComplianceStatus',
                                       if drift_type == 'ApplicationCompliance':
                                           app_component_drifts += 1
+                                      rec['assessment_arn'] = assessment_arn
                                       write(rec)
                                   app_data['app_component_drifts'] = str(app_component_drifts)
 
@@ -471,10 +474,10 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drift/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drifts_latest/"
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: DEPRECATE_IN_DATABASE
