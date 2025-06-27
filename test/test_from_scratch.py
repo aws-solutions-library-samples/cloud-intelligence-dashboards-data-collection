@@ -341,7 +341,6 @@ def test_rds_db_major_engine_versions_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_db_major_engine_versions" LIMIT 10;')
     assert len(data) > 0, 'rds_db_major_engine_versions is empty'
 
-
 if __name__ == '__main__':
     pytest.params = {}
     if '--no-teardown' in sys.argv:
