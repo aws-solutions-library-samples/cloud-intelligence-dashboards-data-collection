@@ -51,6 +51,9 @@ Parameters:
     Type: String
     Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
     Default: ""
+  DetailStepFunctionTemplate:
+    Type: String
+    Description: JSON representation of the detail retrieval StepFunction template
 
 Conditions:
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
@@ -327,16 +330,17 @@ Resources:
               """
               logger.info(f"Event data: {event}")
               account = event.get('account')
-              batch_input = event.get('BatchInput')
-              items = event.get('Items')
-              if not (account or batch_input):
+              items = event.get('items')
+              if not (account):
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              is_summary_mode = batch_input == None
+              is_summary_mode = items is None
               logger.info(f"Executing in {'summary' if is_summary_mode else 'detail'} mode flow")
-              account = json.loads(account) if is_summary_mode else batch_input.get('account')
+              main_exe_uuid = event.get("main_exe_uuid", "")
+              stack_version = event.get("stack_version", "")
+              account = account if isinstance(account, dict) else json.loads(account)
               account_id = account["account_id"]
               region = get_active_health_region()
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
@@ -387,7 +391,10 @@ Resources:
                               "bucket": BUCKET_NAME,
                               "file": key,
                               "account": account,
-                              "ingestion_time": int(round(ingestion_time.timestamp()))
+                              "ingestion_time": int(round(ingestion_time.timestamp())),
+                              "main_exe_uuid": main_exe_uuid,
+                              "params": "detail",
+                              "stack_version": stack_version
                           }
                           sf_input = json.dumps(sf_input).replace('"', '\"') #need to escape the json for SF
                           sf.start_execution(stateMachineArn=DETAIL_SM_ARN, input=sf_input)
@@ -400,7 +407,7 @@ Resources:
                           logger.error(f"Error: {exc}")
 
               elif items:
-                  ingestion_time = datetime.fromtimestamp(int(batch_input.get('ingestion_time')))
+                  ingestion_time = datetime.fromtimestamp(int(event.get('ingestion_time')))
 
                   with open(TMP_FILE, "w", encoding='utf-8') as f:
                       for item in items:
@@ -479,6 +486,7 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
 
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'
@@ -500,81 +508,9 @@ Resources:
       StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-detail-StateMachine'
       StateMachineType: STANDARD
       RoleArn: !Ref StepFunctionExecutionRoleARN
-      DefinitionString: |
-        {
-          "Comment": "Collects Health Events",
-          "StartAt": "DetailProcessor Map",
-          "States": {
-            "DetailProcessor Map": {
-              "Type": "Map",
-              "ItemProcessor": {
-                "ProcessorConfig": {
-                  "Mode": "DISTRIBUTED",
-                  "ExecutionType": "STANDARD"
-                },
-                "StartAt": "DetailLambda Invoke",
-                "States": {
-                  "DetailLambda Invoke": {
-                    "Type": "Task",
-                    "Resource": "arn:${Partition}:states:::lambda:invoke",
-                    "OutputPath": "$.Payload",
-                    "Parameters": {
-                      "Payload.$": "$",
-                      "FunctionName": "${ModuleLambdaARN}"
-                    },
-                    "Retry": [
-                      {
-                        "ErrorEquals": [
-                          "Lambda.ServiceException",
-                          "Lambda.AWSLambdaException",
-                          "Lambda.SdkClientException",
-                          "Lambda.TooManyRequestsException"
-                        ],
-                        "IntervalSeconds": 1,
-                        "MaxAttempts": 3,
-                        "BackoffRate": 2
-                      }
-                    ],
-                    "End": true
-                  }
-                }
-              },
-              "Label": "DetailProcessorMap",
-              "MaxConcurrency": ${MaxConcurrentBatches},
-              "ItemReader": {
-                "Resource": "arn:${Partition}:states:::s3:getObject",
-                "ReaderConfig": {
-                  "InputType": "CSV",
-                  "CSVHeaderLocation": "FIRST_ROW"
-                },
-                "Parameters": {
-                  "Bucket.$": "$.bucket",
-                  "Key.$": "$.file"
-                }
-              },
-              "ItemBatcher": {
-                "MaxItemsPerBatch": ${ItemsPerBatch},
-                "BatchInput": {
-                  "account.$": "$.account",
-                  "ingestion_time.$": "$.ingestion_time"
-                }
-              },
-              "Next": "CrawlerStepFunctionStartExecution"
-            },
-            "CrawlerStepFunctionStartExecution": {
-              "Type": "Task",
-              "Resource": "arn:${Partition}:states:::states:startExecution.sync:2",
-              "Parameters": {
-                "StateMachineArn": "arn:${Partition}:states:${DeployRegion}:${Account}:stateMachine:${Prefix}CrawlerExecution-StateMachine",
-                "Input": {
-                  "crawlers": ${Crawlers}
-                }
-              },
-              "End": true
-            }
-          },
-          "TimeoutSeconds": 14400
-        }
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref DetailStepFunctionTemplate
       DefinitionSubstitutions:
         ModuleLambdaARN: !GetAtt LambdaFunction.Arn
         Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-detail-Crawler"]'
@@ -587,6 +523,7 @@ Resources:
         ItemsPerBatch: 50
         MaxConcurrentBatches: 1
         Partition: !Ref AWS::Partition
+        Bucket: !Ref DestinationBucket
     Metadata:
       cfn-lint:
         config:

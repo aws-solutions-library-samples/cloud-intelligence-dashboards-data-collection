@@ -1,0 +1,127 @@
+{
+  "Comment": "Execute Lambda and Crawler in standalone mode",
+  "StartAt": "Lambda Invoke",
+  "States": {
+    "Lambda Invoke": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${ModuleLambdaARN}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "GetCrawler1"
+    },
+    "GetCrawler1": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "${Crawler}"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Next": "Choice1",
+      "OutputPath": "$.Crawler",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ThrottlingException"
+          ],
+          "BackoffRate": 2,
+          "IntervalSeconds": 5,
+          "MaxAttempts": 5,
+          "JitterStrategy": "FULL"
+        }
+      ]
+    },
+    "Choice1": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.State",
+            "StringEquals": "READY"
+          },
+          "Next": "Wait for Crawler to be ready"
+        }
+      ],
+      "Default": "StartCrawler"
+    },
+    "Wait for Crawler to be ready": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "GetCrawler1"
+    },
+    "StartCrawler": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "${Crawler}"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Next": "Wait for Crawler Execution",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ThrottlingException"
+          ],
+          "BackoffRate": 2,
+          "IntervalSeconds": 5,
+          "MaxAttempts": 5,
+          "JitterStrategy": "FULL"
+        }
+      ]
+    },
+    "Wait for Crawler Execution": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "GetCrawler2"
+    },
+    "GetCrawler2": {
+      "Type": "Task",
+      "Parameters": {
+        "Name": "${Crawler}"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Next": "Choice2",
+      "OutputPath": "$.Crawler",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ThrottlingException"
+          ],
+          "BackoffRate": 2,
+          "IntervalSeconds": 5,
+          "MaxAttempts": 5,
+          "JitterStrategy": "FULL"
+        }
+      ]
+    },
+    "Choice2": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.State",
+            "StringEquals": "READY"
+          },
+          "Next": "Wait for Crawler Execution"
+        }
+      ],
+      "Default": "Completed"
+    },
+    "Completed": {
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}
