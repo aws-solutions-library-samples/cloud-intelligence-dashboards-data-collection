@@ -192,18 +192,16 @@ Resources:
                   # file will be uploaded to s3 at the end
               """
               temp_file = None
-              records = 0
               try:
                   # Create temporary file
                   temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
                   def write_json(data) -> None:
-                      records += 1
                       temp_file.write(json.dumps(sort_dict(data), default=json_converter) + '\n')
                   yield write_json
                   if not temp_file.closed:
                       temp_file.close()
                   s3_client.upload_file(temp_file.name, bucket, s3_path)
-                  print(f"Uploaded {records} records to s3://{bucket}/{s3_path}")
+                  print(f"Uploaded records to s3://{bucket}/{s3_path}")
 
               except Exception as e:
                   print(f"Error during S3 upload s3://{bucket}/{s3_path}: {str(e)}")
@@ -264,7 +262,7 @@ Resources:
                           app_arn = app_summary['appArn']
                           app_id = app_arn.split('/')[-1]
                           app = resilience_client.describe_app(appArn=app_arn)['app']
-
+                                
                           # Initialize data structure
                           app_data = {
                               'region': region,
@@ -332,8 +330,8 @@ Resources:
 
                               with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
-                                      print(f'Record Value Test {rec}')
                                       rec['assessment_arn'] = assessment_arn
+                                      print(f'Record Value Test {rec}')
                                       write(rec)
 
                               with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
@@ -393,6 +391,19 @@ Resources:
                                       write(rec)
                                   app_data['app_component_drifts'] = str(app_component_drifts)
 
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_assessment_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  rec = resilience_client.describe_app_assessment(assessmentArn=latest_assessment['assessmentArn'])['assessment']
+                                  version = rec.get('appVersion', '')
+                                  write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_version_resources_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_app_version_resources, 'physicalResources', appArn=app_arn, appVersion=version):
+                                      rec['app_version'] = version
+                                      rec['app_arn'] = app_arn
+                                      write(rec)
+
+                                                    
                           with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app_data)
                           with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
@@ -473,11 +484,14 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drifts_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
+          
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: DEPRECATE_IN_DATABASE

@@ -456,7 +456,8 @@ Resources:
               - "resiliencehub:ListAppAssessmentComplianceDrifts"
               - "resiliencehub:ListTestRecommendations"
               - "resiliencehub:DescribeResiliencyPolicy"
-            Resource: "*" # Wildcard required as actions do not support resource-level permissions
+              - "resiliencehub:ListAppVersionResources"
+            Resource: "*" # Wildcard required as actions do not support   resource-level permissions
       Roles:
         - Ref: LambdaRole
     Metadata:
