@@ -295,7 +295,6 @@ Resources:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
 
-
   RDSEngineVersionsTable:
     Type: AWS::Glue::Table
     Properties:
