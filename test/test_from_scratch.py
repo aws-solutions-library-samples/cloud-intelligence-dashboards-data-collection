@@ -334,11 +334,11 @@ def test_content_of_summary_not_empty(s3):
         raise Exception('no Summary produced in 30s')
 
 def test_rds_db_engine_versions_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_db_engine_versions" LIMIT 10;')
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_rds_db_engine_versions" LIMIT 10;')
     assert len(data) > 0, 'rds_db_engine_versions is empty'
 
 def test_rds_db_major_engine_versions_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_db_major_engine_versions" LIMIT 10;')
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_rds_db_major_engine_versions" LIMIT 10;')
     assert len(data) > 0, 'rds_db_major_engine_versions is empty'
 
 if __name__ == '__main__':

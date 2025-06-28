@@ -222,12 +222,12 @@ Resources:
               s3 = boto3.client('s3') # local s3
               s3_uploader = partial(s3_json_file, s3, bucket)
 
-              with s3_uploader(f'{prefix}/{module_name_major_versions}/{module_name_major_versions}.json') as write:
+              with s3_uploader(f'{prefix}/{prefix}_rds_db_major_engine_versions/rds_db_major_engine_versions.json') as write:
                   for major_engine_version in major_engine_versions_paginator.paginate().search('DBMajorEngineVersions'):        
                       logger.debug(major_engine_version)
                       write(major_engine_version)
 
-              with s3_uploader(f'{prefix}/{module_name_engine_versions}/{module_name_engine_versions}.json') as write:
+              with s3_uploader(f'{prefix}/{prefix}_rds_db_engine_versions/rds_db_engine_versions.json') as write:
                   for engine_version in engine_versions_paginator.paginate().search('DBEngineVersions'):        
                       logger.debug(engine_version)
                       write(engine_version)
@@ -254,8 +254,8 @@ Resources:
       DatabaseName: !Ref DatabaseName
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/rds_db_major_engine_versions/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/rds_db_engine_versions/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_major_engine_versions/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_engine_versions/"
 
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
@@ -295,114 +295,6 @@ Resources:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
 
-  RDSEngineVersionsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: rds_db_engine_versions
-        StorageDescriptor:
-          Columns:
-            - Name: engine
-              Type: string
-            - Name: engineversion
-              Type: string
-            - Name: dbparametergroupfamily
-              Type: string
-            - Name: dbenginedescription
-              Type: string
-            - Name: dbengineversiondescription
-              Type: string
-            - Name: defaultcharacterset
-              Type: struct<charactersetname:string,charactersetdescription:string>
-            - Name: image
-              Type: struct<imageid:string,status:string>
-            - Name: dbenginemediatype
-              Type: string
-            - Name: supportedcharactersets
-              Type: array<struct<charactersetname:string,charactersetdescription:string>>
-            - Name: supportedncharcharactersets
-              Type: array<struct<charactersetname:string,charactersetdescription:string>>
-            - Name: validupgradetarget
-              Type: array<struct<engine:string,engineversion:string,description:string,autoupgrade:boolean,ismajorversionupgrade:boolean,supportedenginemodes:array<string>,supportsparallelquery:boolean,supportsglobaldatabases:boolean,supportsbabelfish:boolean,supportslimitlessdatabase:boolean,supportslocalwriteforwarding:boolean,supportsintegrations:boolean>>
-            - Name: supportedtimezones
-              Type: array<struct<timezonename:string>>
-            - Name: exportablelogtypes
-              Type: array<string>
-            - Name: supportslogexportstocloudwatchlogs
-              Type: boolean
-            - Name: supportsreadreplica
-              Type: boolean
-            - Name: supportedenginemodes
-              Type: array<string>
-            - Name: supportedfeaturenames
-              Type: array<string>
-            - Name: status
-              Type: string
-            - Name: supportsparallelquery
-              Type: boolean
-            - Name: supportsglobaldatabases
-              Type: boolean
-            - Name: majorengineversion
-              Type: string
-            - Name: databaseinstallationfiless3bucketname
-              Type: string
-            - Name: databaseinstallationfiless3prefix
-              Type: string
-            - Name: dbengineversionarn
-              Type: string
-            - Name: kmskeyid
-              Type: string
-            - Name: createtime
-              Type: timestamp
-            - Name: taglist
-              Type: array<struct<key:string,value:string>>
-            - Name: supportsbabelfish
-              Type: boolean
-            - Name: customdbengineversionmanifest
-              Type: string
-            - Name: supportslimitlessdatabase
-              Type: boolean
-            - Name: supportscertificaterotationwithoutrestart
-              Type: boolean
-            - Name: supportedcacertificateidentifiers
-              Type: array<string>
-            - Name: supportslocalwriteforwarding
-              Type: boolean
-            - Name: supportsintegrations
-              Type: boolean
-            - Name: serverlessv2featuressupport
-              Type: struct<mincapacity:double,maxcapacity:double>
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/rds_db_engine_versions/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          SerdeInfo:
-            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
-        TableType: EXTERNAL_TABLE
-
-  RDSMajorEngineVersionsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: rds_db_major_engine_versions
-        StorageDescriptor:
-          Columns:
-            - Name: engine
-              Type: string
-            - Name: majorengineversion
-              Type: string
-            - Name: supportedenginelifecycles
-              Type: array<struct<lifecyclesupportname:string,lifecyclesupportstartdate:timestamp,lifecyclesupportenddate:timestamp>>
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/rds_db_major_engine_versions/"
-          InputFormat: org.apache.hadoop.mapred.TextInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          SerdeInfo:
-            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
-        TableType: EXTERNAL_TABLE
-
   RDSMajorEngineVersionsView:
     Type: AWS::Athena::NamedQuery
     Properties:
@@ -410,14 +302,14 @@ Resources:
       Description: "Flattened view of RDS major engine versions with lifecycle support"
       Name: !Sub "${CFDataName}_rds_db_major_engine_versions_view"
       QueryString: |
-        CREATE OR REPLACE VIEW _rds_db_major_engine_versions_view AS
+        CREATE OR REPLACE VIEW reference_rds_db_major_engine_versions_view AS
         SELECT 
           engine,
           majorengineversion,
           lifecycle.lifecyclesupportname,
           lifecycle.lifecyclesupportstartdate,
           lifecycle.lifecyclesupportenddate
-        FROM rds_db_major_engine_versions_view
+        FROM reference_rds_db_major_engine_versions_view
         CROSS JOIN UNNEST(supportedenginelifecycles) AS t(lifecycle)
 
   RDSEngineVersionsView:
@@ -427,7 +319,7 @@ Resources:
       Description: "Flattened view of RDS engine versions with upgrade targets"
       Name: !Sub "${CFDataName}_rds_db_engine_versions_view"
       QueryString: |
-        CREATE OR REPLACE VIEW rds_db_engine_versions_view AS
+        CREATE OR REPLACE VIEW reference_rds_db_engine_versions_view AS
         SELECT 
           engine,
           engineversion,
@@ -449,10 +341,7 @@ Resources:
           upgrade.ismajorversionupgrade,
           log_type,
           ca_cert
-        FROM rds_db_engine_versions
+        FROM reference_rds_db_engine_versions
         CROSS JOIN UNNEST(validupgradetarget) AS t(upgrade)
         CROSS JOIN UNNEST(exportablelogtypes) AS t2(log_type)
         CROSS JOIN UNNEST(supportedcacertificateidentifiers) AS t3(ca_cert)
-
-
-

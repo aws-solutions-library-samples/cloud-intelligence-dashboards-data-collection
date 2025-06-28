@@ -1476,7 +1476,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployIncludeReferenceModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.10.0/module-reference.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-reference.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1487,7 +1487,7 @@ Resources:
         ResourcePrefix: !Ref ResourcePrefix
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
-        StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-v1, TemplatePath]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
