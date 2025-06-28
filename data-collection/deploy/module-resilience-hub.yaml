@@ -192,10 +192,10 @@ Resources:
                   if not temp_file.closed:
                       temp_file.close()
                   s3_client.upload_file(temp_file.name, bucket, s3_path)
-                  print(f"Uploaded records to s3://{bucket}/{s3_path}")
+                  logger.info(f"Uploaded records to s3://{bucket}/{s3_path}")
 
               except Exception as e:
-                  print(f"Error during S3 upload s3://{bucket}/{s3_path}: {str(e)}")
+                  logger.error(f"Error during S3 upload s3://{bucket}/{s3_path}: {str(e)}")
                   raise
 
               finally:
@@ -205,7 +205,7 @@ Resources:
                       try:
                           os.unlink(temp_file.name)
                       except OSError as e:
-                          print(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+                          logger.info(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
 
           def lambda_handler(event, context): #pylint: disable=unused-argument,too-many-branches,too-many-locals,too-many-statements
               logger.info(f"Event: {event}")
@@ -254,54 +254,16 @@ Resources:
                           app_id = app_arn.split('/')[-1]
                           app = resilience_client.describe_app(appArn=app_arn)['app']
 
-                          # Initialize data structure
-                          app_data = {
-                              'region': region,
-                              'account_id': account_id,
-                              'application_id': app_id,
-                              'application_arn': app_arn,
-                              'application_name': app.get('name', ''),
-                              'resiliency_policy_id': '',
-                              'resiliency_policy_arn': '',
-                              'resiliency_policy_name': '',
-                              'last_assessment_time': '',
-                              'last_assessment_arn': '',
-                              'resiliency_status': app.get('status', ''),
-                              'resiliency_drift_status': app.get('driftStatus', ''),
-                              'compliance_total': '0',
-                              'fis_tests_total': '0',
-                              'alarms_total': '0',
-                              'sops_total': '0',
-                              'compliance_outstanding': '0',                   # FIXME
-                              'fis_tests_outstanding': '0',
-                              'alarms_outstanding': '0',
-                              'sops_outstanding': '0',
-                              'compliance_excluded': '0',
-                              'fis_tests_excluded': '0',
-                              'alarms_excluded': '0',
-                              'sops_excluded': '0',
-                              'operational_recommendations_total': '0',           # FIXME
-                              'operational_recommendations_outstanding': '0',     # FIXME
-                              'operational_recommendations_excluded': '0',        # FIXME
-                              'infrastructure_recommendations_total': '0',        # FIXME
-                              'input_source_drifts': '0',                         # FIXME
-                              'app_component_drifts': '0',                        # FIXME
-                              'resiliency_score': '0' #from latest assessment
-                          }
-
                           # Get policy information
                           policy_arn = app['policyArn']
                           policy_id = policy_arn.split('/')[-1]
-                          app_data['resiliency_policy_arn'] = policy_arn
-                          app_data['resiliency_policy_id'] = policy_arn.split('/')[-1]
                           try:
                               policy_response = resilience_client.describe_resiliency_policy(policyArn=policy_arn)
-                              app_data['resiliency_policy_name'] = policy_response['policy'].get('policyName', '')
                               with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer_id={payer_id}/account_id={account_id}/region_code={region}/{policy_id}.json') as write_policy:
                                   write_policy(policy_response['policy'])
 
                           except Exception as e: #pylint: disable=broad-exception-caught
-                              print(f"Error getting policy details: {str(e)}")
+                              logger.warning(f"Error getting policy details: {str(e)}")
 
                           # Loop over list of assessments to get the latest successful
                           latest_assessment = None
@@ -314,73 +276,32 @@ Resources:
 
                           # Get info from the latest successful assessment
                           if latest_assessment:
-
-                              app_data['last_assessment_time'] = latest_assessment['endTime']
-                              app_data['last_assessment_arn'] = assessment_arn = latest_assessment['assessmentArn']
-                              app_data['resiliency_score'] = latest_assessment.get('resiliencyScore')
+                              assessment_arn = latest_assessment['assessmentArn']
 
                               with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
                                   for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
                                       rec['assessment_arn'] = assessment_arn
-                                      print(f'Record Value Test {rec}')
                                       write(rec)
 
                               with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
-                                  total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_alarm_recommendations, 'alarmRecommendations', assessmentArn=latest_assessment['assessmentArn']):
-                                      status = rec.get('recommendationStatus', '') #            'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
-                                      total += 1
-                                      if status == 'NotImplemented':
-                                          outstanding += 1
-                                      elif status == 'Excluded':
-                                          excluded += 1
                                       rec['assessment_arn'] = assessment_arn
                                       write(rec)
-                                  app_data['alarms_total'] = str(total)
-                                  app_data['alarms_outstanding'] = str(outstanding)
-                                  app_data['alarms_excluded'] = str(excluded)
 
                               with s3_uploader(f'{module_name}/{module_name}-sop_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
-                                  total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_sop_recommendations, 'sopRecommendations', assessmentArn=latest_assessment['assessmentArn']):
-                                      status = rec.get('recommendationStatus', '')  #           'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
-                                      total += 1
-                                      if status == 'NotImplemented':
-                                          outstanding += 1
-                                      elif status == 'Excluded':
-                                          excluded += 1
                                       rec['assessment_arn'] = assessment_arn
                                       write(rec)
-                                  app_data['sops_total'] = str(total)
-                                  app_data['sops_outstanding'] = str(outstanding)
-                                  app_data['sops_excluded'] = str(excluded)
 
                               with s3_uploader(f'{module_name}/{module_name}-test_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
-                                  total = outstanding = excluded = 0
                                   for rec in paginate(resilience_client.list_test_recommendations, 'testRecommendations', assessmentArn=latest_assessment['assessmentArn']):
-                                      test_type = rec.get('type', '')              #             'type': 'Software'|'Hardware'|'AZ'|'Region'
-                                      status = rec.get('recommendationStatus', '') #             'recommendationStatus': 'Implemented'|'Inactive'|'NotImplemented'|'Excluded',
-                                      if test_type == 'Software':  # FIS tests
-                                          total += 1
-                                          if status == 'NotImplemented':
-                                              outstanding += 1
-                                          elif status == 'Excluded':
-                                              excluded += 1
                                       rec['assessment_arn'] = assessment_arn
                                       write(rec)
-                                  app_data['fis_tests_total'] = str(total)
-                                  app_data['fis_tests_outstanding'] = str(outstanding)
-                                  app_data['fis_tests_excluded'] = str(excluded)
 
                               with s3_uploader(f'{module_name}/{module_name}-compliance_drifts_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
-                                  app_component_drifts = 0
                                   for rec in paginate(resilience_client.list_app_assessment_compliance_drifts, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
-                                      drift_type = rec.get('driftType', '') #            'driftType': 'ApplicationCompliance'|'AppComponentResiliencyComplianceStatus',
-                                      if drift_type == 'ApplicationCompliance':
-                                          app_component_drifts += 1
                                       rec['assessment_arn'] = assessment_arn
                                       write(rec)
-                                  app_data['app_component_drifts'] = str(app_component_drifts)
 
 
                               with s3_uploader(f'{module_name}/{module_name}-app_assessment_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
@@ -394,9 +315,6 @@ Resources:
                                       rec['app_arn'] = app_arn
                                       write(rec)
 
-
-                          with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
-                              write_app(app_data)
                           with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app)
 
@@ -405,12 +323,12 @@ Resources:
                       s3.put_object(Bucket=BUCKET, Key=status_key, Body=json.dumps(status_obj), ContentType='application/json')
 
                   except Exception as e: #pylint: disable=broad-exception-caught
-                      print(f"Error pulling data in region {region}: {str(e)}")
+                      logger.error(f"Error pulling data in {account_id} {region}: {str(e)}")
 
               return {
                   'statusCode': 200,
                   'body': {
-                    'message': 'Exports and copy completed successfully',
+                    'message': 'Completed successfully',
                     'account': account_id,
                     'bucket': BUCKET,
                   }
@@ -471,7 +389,6 @@ Resources:
       DatabaseName: !Ref DatabaseName
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-applications/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
@@ -482,7 +399,7 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drifts_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
-          
+
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: DEPRECATE_IN_DATABASE
@@ -497,96 +414,6 @@ Resources:
         }
 
   # Resilience Hub Table Definitions
-  ResilienceHubApplicationsTable:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref DatabaseName
-      TableInput:
-        Name: 'resilience_hub_applications'
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          EXTERNAL: "TRUE"
-          classification: "json"
-          typeOfData: "file"
-          UPDATED_BY_CRAWLER: !Ref Crawler
-        StorageDescriptor:
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-applications/"
-          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
-          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
-          SerdeInfo:
-            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
-            Parameters:
-              paths: "account_id,alarms_excluded,alarms_outstanding,alarms_total,app_component_drifts,application_arn,application_id,application_name,compliance_excluded,compliance_outstanding,compliance_total,fis_tests_excluded,fis_tests_outstanding,fis_tests_total,infrastructure_recommendations_total,input_source_drifts,last_assessment_arn,last_assessment_time,operational_recommendations_excluded,operational_recommendations_outstanding,operational_recommendations_total,region,resiliency_drift_status,resiliency_policy_arn,resiliency_policy_id,resiliency_policy_name,resiliency_score,resiliency_status,sops_excluded,sops_outstanding,sops_total"
-          Columns:
-            - Name: account_id
-              Type: string
-            - Name: alarms_excluded
-              Type: string
-            - Name: alarms_outstanding
-              Type: string
-            - Name: alarms_total
-              Type: string
-            - Name: app_component_drifts
-              Type: string
-            - Name: application_arn
-              Type: string
-            - Name: application_id
-              Type: string
-            - Name: application_name
-              Type: string
-            - Name: compliance_excluded
-              Type: string
-            - Name: compliance_outstanding
-              Type: string
-            - Name: compliance_total
-              Type: string
-            - Name: fis_tests_excluded
-              Type: string
-            - Name: fis_tests_outstanding
-              Type: string
-            - Name: fis_tests_total
-              Type: string
-            - Name: infrastructure_recommendations_total
-              Type: string
-            - Name: input_source_drifts
-              Type: string
-            - Name: last_assessment_arn
-              Type: string
-            - Name: last_assessment_time
-              Type: string
-            - Name: operational_recommendations_excluded
-              Type: string
-            - Name: operational_recommendations_outstanding
-              Type: string
-            - Name: operational_recommendations_total
-              Type: string
-            - Name: region
-              Type: string
-            - Name: resiliency_drift_status
-              Type: string
-            - Name: resiliency_policy_arn
-              Type: string
-            - Name: resiliency_policy_id
-              Type: string
-            - Name: resiliency_policy_name
-              Type: string
-            - Name: resiliency_score
-              Type: double
-            - Name: resiliency_status
-              Type: string
-            - Name: sops_excluded
-              Type: string
-            - Name: sops_outstanding
-              Type: string
-            - Name: sops_total
-              Type: string
-        PartitionKeys:
-          - Name: payer_id
-            Type: string
-          - Name: account
-            Type: string
-
   ResilienceHubApplicationDetailsTable:
     Type: AWS::Glue::Table
     Properties:

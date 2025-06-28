@@ -262,8 +262,8 @@ def test_circle_ci_feeds_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."circle_ci_feeds_whats_new" LIMIT 10;')
     assert len(data) > 0, 'circle_ci_feeds_data is empty'
 
-def test_resiliencehub_daily_assessment_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."resiliencehub_daily_assessments" LIMIT 10;')
+def test_resilience_hub_application_details(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."resilience_hub_application_details" LIMIT 10;')
     assert len(data) > 0, 'resiliencehub_daily_assessments is empty'
 
 def test_content_of_summary_not_empty(s3):
