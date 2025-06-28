@@ -505,14 +505,577 @@ Resources:
           }
         }
 
-#  ResilienceHubApplicationsTable:
-#      Type: AWS::Glue::Table
-#      Properties:
-#        CatalogId: !Ref AWS::AccountId
-#        DatabaseName: !Ref DatabaseName
-#        TableInput:
-#          Name: 'resiliencehub_applications'
-#          TableType: EXTERNAL_TABLE
-#          Parameters:
- #           EXTERNAL: "TRUE"
- #           skip.header.line.count: "1"
+  # Resilience Hub Table Definitions
+  ResilienceHubApplicationsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_applications'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-applications/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "account_id,alarms_excluded,alarms_outstanding,alarms_total,app_component_drifts,application_arn,application_id,application_name,compliance_excluded,compliance_outstanding,compliance_total,fis_tests_excluded,fis_tests_outstanding,fis_tests_total,infrastructure_recommendations_total,input_source_drifts,last_assessment_arn,last_assessment_time,operational_recommendations_excluded,operational_recommendations_outstanding,operational_recommendations_total,region,resiliency_drift_status,resiliency_policy_arn,resiliency_policy_id,resiliency_policy_name,resiliency_score,resiliency_status,sops_excluded,sops_outstanding,sops_total"
+          Columns:
+            - Name: account_id
+              Type: string
+            - Name: alarms_excluded
+              Type: string
+            - Name: alarms_outstanding
+              Type: string
+            - Name: alarms_total
+              Type: string
+            - Name: app_component_drifts
+              Type: string
+            - Name: application_arn
+              Type: string
+            - Name: application_id
+              Type: string
+            - Name: application_name
+              Type: string
+            - Name: compliance_excluded
+              Type: string
+            - Name: compliance_outstanding
+              Type: string
+            - Name: compliance_total
+              Type: string
+            - Name: fis_tests_excluded
+              Type: string
+            - Name: fis_tests_outstanding
+              Type: string
+            - Name: fis_tests_total
+              Type: string
+            - Name: infrastructure_recommendations_total
+              Type: string
+            - Name: input_source_drifts
+              Type: string
+            - Name: last_assessment_arn
+              Type: string
+            - Name: last_assessment_time
+              Type: string
+            - Name: operational_recommendations_excluded
+              Type: string
+            - Name: operational_recommendations_outstanding
+              Type: string
+            - Name: operational_recommendations_total
+              Type: string
+            - Name: region
+              Type: string
+            - Name: resiliency_drift_status
+              Type: string
+            - Name: resiliency_policy_arn
+              Type: string
+            - Name: resiliency_policy_id
+              Type: string
+            - Name: resiliency_policy_name
+              Type: string
+            - Name: resiliency_score
+              Type: double
+            - Name: resiliency_status
+              Type: string
+            - Name: sops_excluded
+              Type: string
+            - Name: sops_outstanding
+              Type: string
+            - Name: sops_total
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account
+            Type: string
+
+  ResilienceHubApplicationDetailsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_application_details'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,assessmentSchedule,complianceStatus,creationTime,description,driftStatus,eventSubscriptions,lastAppComplianceEvaluationTime,lastDriftEvaluationTime,lastResiliencyScoreEvaluationTime,name,permissionModel,policyArn,resiliencyScore,rpoInSecs,rtoInSecs,status,tags"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: assessmentschedule
+              Type: string
+            - Name: compliancestatus
+              Type: string
+            - Name: creationtime
+              Type: string
+            - Name: description
+              Type: string
+            - Name: driftstatus
+              Type: string
+            - Name: eventsubscriptions
+              Type: array<string>
+            - Name: lastappcomplianceevaluationtime
+              Type: string
+            - Name: lastdriftevaluationtime
+              Type: string
+            - Name: lastresiliencyscoreevaluationtime
+              Type: string
+            - Name: name
+              Type: string
+            - Name: permissionmodel
+              Type: struct<type:string,crossAccountRoleArns:array<string>,invokerRoleName:string>
+            - Name: policyarn
+              Type: string
+            - Name: resiliencyscore
+              Type: double
+            - Name: rpoinsecs
+              Type: int
+            - Name: rtoinsecs
+              Type: int
+            - Name: status
+              Type: string
+            - Name: tags
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+
+  ResilienceHubResiliencyPolicyTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_resiliency_policy'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "creationTime,dataLocationConstraint,estimatedCostTier,policy,policyArn,policyDescription,policyName,tags,tier"
+          Columns:
+            - Name: creationtime
+              Type: string
+            - Name: datalocationconstraint
+              Type: string
+            - Name: estimatedcosttier
+              Type: string
+            - Name: policy
+              Type: struct<AZ:struct<rpoInSecs:int,rtoInSecs:int>,Hardware:struct<rpoInSecs:int,rtoInSecs:int>,Software:struct<rpoInSecs:int,rtoInSecs:int>,Region:struct<rpoInSecs:int,rtoInSecs:int>>
+            - Name: policyarn
+              Type: string
+            - Name: policyname
+              Type: string
+            - Name: tags
+              Type: string
+            - Name: tier
+              Type: string
+            - Name: policydescription
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+
+  ResilienceHubAssessmentsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_assessments'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,appVersion,assessmentArn,assessmentName,assessmentStatus,complianceStatus,cost,driftStatus,endTime,invoker,resiliencyScore,startTime,versionName"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: appversion
+              Type: string
+            - Name: assessmentarn
+              Type: string
+            - Name: assessmentname
+              Type: string
+            - Name: assessmentstatus
+              Type: string
+            - Name: compliancestatus
+              Type: string
+            - Name: cost
+              Type: struct<amount:double,currency:string,frequency:string>
+            - Name: driftstatus
+              Type: string
+            - Name: endtime
+              Type: string
+            - Name: invoker
+              Type: string
+            - Name: resiliencyscore
+              Type: double
+            - Name: starttime
+              Type: string
+            - Name: versionname
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppAssessmentLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_assessment_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,appVersion,assessmentArn,assessmentName,assessmentStatus,compliance,complianceStatus,cost,driftStatus,endTime,invoker,policy,resiliencyScore,startTime,summary,tags,versionName"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: appversion
+              Type: string
+            - Name: assessmentarn
+              Type: string
+            - Name: assessmentname
+              Type: string
+            - Name: assessmentstatus
+              Type: string
+            - Name: compliance
+              Type: struct<AZ:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>,Hardware:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>,Software:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>>
+            - Name: compliancestatus
+              Type: string
+            - Name: cost
+              Type: struct<amount:double,currency:string,frequency:string>
+            - Name: driftstatus
+              Type: string
+            - Name: endtime
+              Type: string
+            - Name: invoker
+              Type: string
+            - Name: policy
+              Type: struct<dataLocationConstraint:string,policy:struct<AZ:struct<rpoInSecs:int,rtoInSecs:int>,Hardware:struct<rpoInSecs:int,rtoInSecs:int>,Software:struct<rpoInSecs:int,rtoInSecs:int>>,policyArn:string,policyName:string,policyDescription:string>
+            - Name: resiliencyscore
+              Type: struct<componentScore:struct<Alarm:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Compliance:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Sop:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Test:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>>,disruptionScore:struct<AZ:double,Hardware:double,Region:double,Software:double>,score:double>
+            - Name: starttime
+              Type: string
+            - Name: tags
+              Type: string
+            - Name: versionname
+              Type: string
+            - Name: summary
+              Type: struct<riskRecommendations:array<struct<appComponents:array<string>,recommendation:string,risk:string>>,summary:string>
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppComponentRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_component_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,assessment_arn,configRecommendations,recommendationStatus"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: configrecommendations
+              Type: array<struct<appComponentName:string,cost:struct<amount:double,currency:string,frequency:string>,description:string,haArchitecture:string,optimizationType:string,recommendationCompliance:struct<AZ:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>,Hardware:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>,Software:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>>,referenceId:string,suggestedChanges:array<string>>>
+            - Name: recommendationstatus
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppVersionResourcesLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_version_resources_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponents,app_arn,app_version,logicalResourceId,physicalResourceId,resourceName,resourceType,sourceType"
+          Columns:
+            - Name: appcomponents
+              Type: array<struct<id:string,name:string,type:string>>
+            - Name: app_arn
+              Type: string
+            - Name: app_version
+              Type: string
+            - Name: logicalresourceid
+              Type: struct<identifier:string,logicalStackName:string>
+            - Name: physicalresourceid
+              Type: struct<awsAccountId:string,awsRegion:string,identifier:string,type:string>
+            - Name: resourcename
+              Type: string
+            - Name: resourcetype
+              Type: string
+            - Name: sourcetype
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAlarmRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_alarm_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,appComponentNames,assessment_arn,description,items,name,prerequisite,recommendationId,recommendationStatus,referenceId,type"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: appcomponentnames
+              Type: array<string>
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: prerequisite
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: type
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubSopRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_sop_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,assessment_arn,description,items,name,prerequisite,recommendationId,recommendationStatus,referenceId,serviceType"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: servicetype
+              Type: string
+            - Name: prerequisite
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubTestRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_test_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentId,appComponentName,assessment_arn,description,items,name,recommendationId,recommendationStatus,referenceId,risk,type"
+          Columns:
+            - Name: appcomponentid
+              Type: string
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: risk
+              Type: string
+            - Name: type
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
