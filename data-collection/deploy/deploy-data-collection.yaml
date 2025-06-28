@@ -38,6 +38,7 @@ Metadata:
           - IncludeISVFeedsModule
           - IncludeLicenseManagerModule
           - IncludeQuickSightModule
+          - IncludeReferenceModule
           - IncludeServiceQuotasModule
           - IncludeEUCUtilizationModule
       - Label:
@@ -107,7 +108,8 @@ Metadata:
         default: 'Include Service Quota Data Collection'
       IncludeQuickSightModule:
         default: 'Include QuickSight User Collection Module'
-
+      IncludeReferenceModule:
+        default: 'Include Reference Data Collection Module'
 Mappings:
   RegionMap:
     # Only support regions that have QuickSight
@@ -272,7 +274,12 @@ Parameters:
     Default: 'no'
   IncludeQuickSightModule:
     Type: String
-    Description: Collects Marketplace Licenses and Grants
+    Description: Collects Quicksight User and Groups and Access Details
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
+  IncludeReferenceModule:
+    Type: String
+    Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
   IncludeServiceQuotasModule:
@@ -300,6 +307,7 @@ Conditions:
   DeployHealthEventsModule: !Equals [ !Ref IncludeHealthEventsModule, "yes"]
   DeployLicenseManagerModule: !Equals [ !Ref IncludeLicenseManagerModule, "yes"]
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
+  DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
@@ -1450,6 +1458,25 @@ Resources:
     Condition: DeployQuickSightModule
     Properties:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-quicksight.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        Schedule: !Ref ScheduleFrequent
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+
+  ReferenceModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployIncludeReferenceModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-reference.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns

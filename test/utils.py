@@ -236,9 +236,10 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeHealthEventsModule',       'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeQuickSightModule',         'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeRDSUtilizationModule',     'ParameterValue': "yes"},            
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
-            {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
-        ]
+            {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},                    ]
     )
 
     deploy_stack(
@@ -404,6 +405,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}health-events-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}license-manager-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}quicksight-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}service-quotas-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}workspaces-metrics-StateMachine",
     ]
