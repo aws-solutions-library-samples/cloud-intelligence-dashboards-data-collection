@@ -151,7 +151,7 @@ Resources:
 
           REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
           ROLE_NAME = os.environ['ROLE_NAME']
-          bucket = os.environ['DESTINATION_BUCKET']
+          BUCKET = os.environ['DESTINATION_BUCKET']
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
@@ -174,15 +174,6 @@ Resources:
                   return obj.strftime("%Y-%m-%d %H:%M:%S")
               return obj
 
-          def sort_dict(d):
-              """ Sort dicts and lists recursively """
-              if isinstance(d, dict):
-                  return {k: sort_dict(v) for k, v in sorted(d.items())}
-              elif isinstance(d, list):
-                  return [sort_dict(v) for v in d]
-              else:
-                  return d
-
           @contextmanager
           def s3_json_file(s3_client: boto3.client, bucket: str, s3_path: str):
               """
@@ -196,7 +187,7 @@ Resources:
                   # Create temporary file
                   temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
                   def write_json(data) -> None:
-                      temp_file.write(json.dumps(sort_dict(data), default=json_converter) + '\n')
+                      temp_file.write(json.dumps(data, default=json_converter) + '\n')
                   yield write_json
                   if not temp_file.closed:
                       temp_file.close()
@@ -216,7 +207,7 @@ Resources:
                       except OSError as e:
                           print(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
 
-          def lambda_handler(event, context):
+          def lambda_handler(event, context): #pylint: disable=unused-argument,too-many-branches,too-many-locals,too-many-statements
               logger.info(f"Event: {event}")
               if 'account' not in event:
                   raise ValueError(
@@ -239,7 +230,7 @@ Resources:
                   aws_session_token=creds["SessionToken"]
               )
               s3 = boto3.client('s3') # local s3
-              s3_uploader = partial(s3_json_file, s3, bucket)
+              s3_uploader = partial(s3_json_file, s3, BUCKET)
 
               for region in REGIONS:
                   try:
@@ -251,8 +242,8 @@ Resources:
                       }
                       status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
                       try:
-                          status_obj = json.loads(s3.get_object(Bucket=bucket, Key=status_key)['Body'].read().decode('utf-8'))
-                      except s3.exceptions.NoSuchKey as exc:
+                          status_obj = json.loads(s3.get_object(Bucket=BUCKET, Key=status_key)['Body'].read().decode('utf-8'))
+                      except s3.exceptions.NoSuchKey:
                           pass # this is fine if there no status file
                       last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
                       collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -262,7 +253,7 @@ Resources:
                           app_arn = app_summary['appArn']
                           app_id = app_arn.split('/')[-1]
                           app = resilience_client.describe_app(appArn=app_arn)['app']
-                                
+
                           # Initialize data structure
                           app_data = {
                               'region': region,
@@ -309,7 +300,7 @@ Resources:
                               with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer_id={payer_id}/account_id={account_id}/region_code={region}/{policy_id}.json') as write_policy:
                                   write_policy(policy_response['policy'])
 
-                          except Exception as e:
+                          except Exception as e: #pylint: disable=broad-exception-caught
                               print(f"Error getting policy details: {str(e)}")
 
                           # Loop over list of assessments to get the latest successful
@@ -317,7 +308,7 @@ Resources:
                           with s3_uploader(f'{module_name}/{module_name}-assessments/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/all.json') as write_assessment:
                               for assessment in paginate(resilience_client.list_app_assessments, 'assessmentSummaries', appArn=app_arn):
                                   if assessment['assessmentStatus'] == 'Success':
-                                      if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']:
+                                      if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']: #pylint: disable=unsubscriptable-object
                                           latest_assessment = assessment
                                   write_assessment(assessment)
 
@@ -403,7 +394,7 @@ Resources:
                                       rec['app_arn'] = app_arn
                                       write(rec)
 
-                                                    
+
                           with s3_uploader(f'{module_name}/{module_name}-applications/payer_id={payer_id}/account={account_id}/{region}-{app_id}.json') as write_app:
                               write_app(app_data)
                           with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
@@ -411,9 +402,9 @@ Resources:
 
                       # Write the time to s3
                       status_obj["last_read"] = collection_time
-                      s3.put_object(Bucket=bucket, Key=status_key, Body=json.dumps(status_obj), ContentType='application/json')
+                      s3.put_object(Bucket=BUCKET, Key=status_key, Body=json.dumps(status_obj), ContentType='application/json')
 
-                  except Exception as e:
+                  except Exception as e: #pylint: disable=broad-exception-caught
                       print(f"Error pulling data in region {region}: {str(e)}")
 
               return {
@@ -421,7 +412,7 @@ Resources:
                   'body': {
                     'message': 'Exports and copy completed successfully',
                     'account': account_id,
-                    'bucket': bucket,
+                    'bucket': BUCKET,
                   }
               }
 
