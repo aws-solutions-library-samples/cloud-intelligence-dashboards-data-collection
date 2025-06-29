@@ -262,6 +262,10 @@ def test_circle_ci_feeds_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."circle_ci_feeds_whats_new" LIMIT 10;')
     assert len(data) > 0, 'circle_ci_feeds_data is empty'
 
+def test_resilience_hub_application_details(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."resilience_hub_application_details" LIMIT 10;')
+    assert len(data) > 0, 'resiliencehub_daily_assessments is empty'
+
 def test_content_of_summary_not_empty(s3):
     s3_client = boto3.client('s3')
     case_data = {

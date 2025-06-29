@@ -1,0 +1,899 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves AWS Resilience Hub information from across an organization
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information.
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Support Cases Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: resilience-hub
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(14 days)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  RegionsInScope:
+    Type: String
+    Description: "Comma Delimited list of AWS regions from which data about resources will be collected. Example: us-east-1,eu-west-1,ap-northeast-1"
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${CFDataName}-MultiAccountRoleAssume-LambdaRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}" # Need to assume a Read role in all Accounts
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:PutObjectAcl"
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}/*'
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: "LambdaFunction to start resilience export jobs"
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Handler: index.lambda_handler
+      Runtime: python3.12
+      Architectures: [x86_64]
+      MemorySize: 2688
+      Timeout: 900
+      Environment:
+        Variables:
+          REGIONS: !Ref RegionsInScope
+          ROLE_NAME: !Ref MultiAccountRoleName
+          DESTINATION_BUCKET: !Ref DestinationBucket
+      Code:
+        ZipFile: |
+          ''' This code will go through all regions in given linked account and pull data from Resilience Hub (only applications with assessment updated since last pull)
+          to preform full pull remove 'resilience-hub' folder on s3 and rerun StepFunction
+          '''
+          import os
+          import json
+          import logging
+          import tempfile
+          from datetime import datetime, timedelta
+          from contextlib import contextmanager
+          from functools import partial
+
+          import boto3
+
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
+          ROLE_NAME = os.environ['ROLE_NAME']
+          BUCKET = os.environ['DESTINATION_BUCKET']
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+
+          def paginate(operation_func, result_key: str, next_token: str=None, **params):
+              """ paginate non paginated boto3 functions"""
+              while True:
+                  if next_token:
+                      params['NextToken'] = next_token
+                  response = operation_func(**params)
+                  yield from response.get(result_key, [])
+                  next_token = response.get('NextToken') or response.get('nextToken')
+                  if not next_token:
+                      break
+
+          def json_converter(obj):
+              """ Help json encode date"""
+              if isinstance(obj, datetime):
+                  return obj.strftime("%Y-%m-%d %H:%M:%S")
+              return obj
+
+          @contextmanager
+          def s3_json_file(s3_client: boto3.client, bucket: str, s3_path: str):
+              """
+              Example:
+                  with s3_json_file(s3, 'my-bucket', 'data/output.json') as write_line:
+                      write_line({"key": "value", "list": [1, 2, 3]})
+                  # file will be uploaded to s3 at the end
+              """
+              temp_file = None
+              try:
+                  # Create temporary file
+                  temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
+                  def write_json(data) -> None:
+                      temp_file.write(json.dumps(data, default=json_converter) + '\n')
+                  yield write_json
+                  if not temp_file.closed:
+                      temp_file.close()
+                  s3_client.upload_file(temp_file.name, bucket, s3_path)
+                  logger.info(f"Uploaded records to s3://{bucket}/{s3_path}")
+
+              except Exception as e:
+                  logger.error(f"Error during S3 upload s3://{bucket}/{s3_path}: {str(e)}")
+                  raise
+
+              finally:
+                  if temp_file and not temp_file.closed:
+                      temp_file.close()
+                  if temp_file and os.path.exists(temp_file.name):
+                      try:
+                          os.unlink(temp_file.name)
+                      except OSError as e:
+                          logger.info(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+
+          def lambda_handler(event, context): #pylint: disable=unused-argument,too-many-branches,too-many-locals,too-many-statements
+              logger.info(f"Event: {event}")
+              if 'account' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              module_name = 'resilience-hub'
+              account = json.loads(event["account"])
+              account_id = account["account_id"]
+              payer_id = account["payer_id"]
+              logger.info(f"Collecting data for account: {account_id}")
+
+              creds = boto3.client('sts').assume_role(
+                  RoleArn=f"arn:aws:iam::{account_id}:role/{ROLE_NAME}",
+                  RoleSessionName="ResHub_CID_Lambda"
+              )['Credentials']
+              assumed_session = boto3.session.Session(
+                  aws_access_key_id=creds["AccessKeyId"],
+                  aws_secret_access_key=creds["SecretAccessKey"],
+                  aws_session_token=creds["SessionToken"]
+              )
+              s3 = boto3.client('s3') # local s3
+              s3_uploader = partial(s3_json_file, s3, BUCKET)
+
+              for region in REGIONS:
+                  try:
+                      resilience_client = assumed_session.client('resiliencehub', region_name=region)
+
+                      # Read the latest read date (if any)
+                      status_obj = {
+                          "last_read":  (datetime.now().date() - timedelta(days=365 * 10)).strftime("%Y-%m-%d %H:%M:%S"),
+                      }
+                      status_key = f"{module_name}/{module_name}-status/payer_id={payer_id}/account_id={account_id}/region_code={region}/status.json"
+                      try:
+                          status_obj = json.loads(s3.get_object(Bucket=BUCKET, Key=status_key)['Body'].read().decode('utf-8'))
+                      except s3.exceptions.NoSuchKey:
+                          pass # this is fine if there no status file
+                      last_collection_time =  datetime.strptime(status_obj["last_read"], "%Y-%m-%d %H:%M:%S")
+                      collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                      # Loop over list of apps to retrieve details
+                      for app_summary in paginate(resilience_client.list_apps, 'appSummaries', fromLastAssessmentTime=last_collection_time):
+                          app_arn = app_summary['appArn']
+                          app_id = app_arn.split('/')[-1]
+                          app = resilience_client.describe_app(appArn=app_arn)['app']
+
+                          # Get policy information
+                          policy_arn = app['policyArn']
+                          policy_id = policy_arn.split('/')[-1]
+                          try:
+                              policy_response = resilience_client.describe_resiliency_policy(policyArn=policy_arn)
+                              with s3_uploader(f'{module_name}/{module_name}-resiliency_policy/payer_id={payer_id}/account_id={account_id}/region_code={region}/{policy_id}.json') as write_policy:
+                                  write_policy(policy_response['policy'])
+
+                          except Exception as e: #pylint: disable=broad-exception-caught
+                              logger.warning(f"Error getting policy details: {str(e)}")
+
+                          # Loop over list of assessments to get the latest successful
+                          latest_assessment = None
+                          with s3_uploader(f'{module_name}/{module_name}-assessments/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/all.json') as write_assessment:
+                              for assessment in paginate(resilience_client.list_app_assessments, 'assessmentSummaries', appArn=app_arn):
+                                  if assessment['assessmentStatus'] == 'Success':
+                                      if not latest_assessment or latest_assessment['endTime'] < assessment['endTime']: #pylint: disable=unsubscriptable-object
+                                          latest_assessment = assessment
+                                  write_assessment(assessment)
+
+                          # Get info from the latest successful assessment
+                          if latest_assessment:
+                              assessment_arn = latest_assessment['assessmentArn']
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_component_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_app_component_recommendations, 'componentRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      rec['assessment_arn'] = assessment_arn
+                                      write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-alarm_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_alarm_recommendations, 'alarmRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      rec['assessment_arn'] = assessment_arn
+                                      write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-sop_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_sop_recommendations, 'sopRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      rec['assessment_arn'] = assessment_arn
+                                      write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-test_recommendations_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_test_recommendations, 'testRecommendations', assessmentArn=latest_assessment['assessmentArn']):
+                                      rec['assessment_arn'] = assessment_arn
+                                      write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-compliance_drifts_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_app_assessment_compliance_drifts, 'complianceDrifts', assessmentArn=latest_assessment['assessmentArn']):
+                                      rec['assessment_arn'] = assessment_arn
+                                      write(rec)
+
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_assessment_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  rec = resilience_client.describe_app_assessment(assessmentArn=latest_assessment['assessmentArn'])['assessment']
+                                  version = rec.get('appVersion', '')
+                                  write(rec)
+
+                              with s3_uploader(f'{module_name}/{module_name}-app_version_resources_latest/payer_id={payer_id}/account_id={account_id}/region_code={region}/app_id={app_id}/latest.json') as write:
+                                  for rec in paginate(resilience_client.list_app_version_resources, 'physicalResources', appArn=app_arn, appVersion=version):
+                                      rec['app_version'] = version
+                                      rec['app_arn'] = app_arn
+                                      write(rec)
+
+                          with s3_uploader(f'{module_name}/{module_name}-application-details/payer_id={payer_id}/account_id={account_id}/{region}-{app_id}.json') as write_app:
+                              write_app(app)
+
+                      # Write the time to s3
+                      status_obj["last_read"] = collection_time
+                      s3.put_object(Bucket=BUCKET, Key=status_key, Body=json.dumps(status_obj), ContentType='application/json')
+
+                  except Exception as e: #pylint: disable=broad-exception-caught
+                      logger.error(f"Error pulling data in {account_id} {region}: {str(e)}")
+
+              return {
+                  'statusCode': 200,
+                  'body': {
+                    'message': 'Completed successfully',
+                    'account': account_id,
+                    'bucket': BUCKET,
+                  }
+              }
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drifts_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
+
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            }
+          }
+        }
+
+  # Resilience Hub Table Definitions
+  ResilienceHubApplicationDetailsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_application_details'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-details/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,assessmentSchedule,complianceStatus,creationTime,description,driftStatus,eventSubscriptions,lastAppComplianceEvaluationTime,lastDriftEvaluationTime,lastResiliencyScoreEvaluationTime,name,permissionModel,policyArn,resiliencyScore,rpoInSecs,rtoInSecs,status,tags"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: assessmentschedule
+              Type: string
+            - Name: compliancestatus
+              Type: string
+            - Name: creationtime
+              Type: string
+            - Name: description
+              Type: string
+            - Name: driftstatus
+              Type: string
+            - Name: eventsubscriptions
+              Type: array<string>
+            - Name: lastappcomplianceevaluationtime
+              Type: string
+            - Name: lastdriftevaluationtime
+              Type: string
+            - Name: lastresiliencyscoreevaluationtime
+              Type: string
+            - Name: name
+              Type: string
+            - Name: permissionmodel
+              Type: struct<type:string,crossAccountRoleArns:array<string>,invokerRoleName:string>
+            - Name: policyarn
+              Type: string
+            - Name: resiliencyscore
+              Type: double
+            - Name: rpoinsecs
+              Type: int
+            - Name: rtoinsecs
+              Type: int
+            - Name: status
+              Type: string
+            - Name: tags
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+
+  ResilienceHubResiliencyPolicyTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_resiliency_policy'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-resiliency_policy/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "creationTime,dataLocationConstraint,estimatedCostTier,policy,policyArn,policyDescription,policyName,tags,tier"
+          Columns:
+            - Name: creationtime
+              Type: string
+            - Name: datalocationconstraint
+              Type: string
+            - Name: estimatedcosttier
+              Type: string
+            - Name: policy
+              Type: struct<AZ:struct<rpoInSecs:int,rtoInSecs:int>,Hardware:struct<rpoInSecs:int,rtoInSecs:int>,Software:struct<rpoInSecs:int,rtoInSecs:int>,Region:struct<rpoInSecs:int,rtoInSecs:int>>
+            - Name: policyarn
+              Type: string
+            - Name: policyname
+              Type: string
+            - Name: tags
+              Type: string
+            - Name: tier
+              Type: string
+            - Name: policydescription
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+
+  ResilienceHubAssessmentsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_assessments'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-assessments/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,appVersion,assessmentArn,assessmentName,assessmentStatus,complianceStatus,cost,driftStatus,endTime,invoker,resiliencyScore,startTime,versionName"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: appversion
+              Type: string
+            - Name: assessmentarn
+              Type: string
+            - Name: assessmentname
+              Type: string
+            - Name: assessmentstatus
+              Type: string
+            - Name: compliancestatus
+              Type: string
+            - Name: cost
+              Type: struct<amount:double,currency:string,frequency:string>
+            - Name: driftstatus
+              Type: string
+            - Name: endtime
+              Type: string
+            - Name: invoker
+              Type: string
+            - Name: resiliencyscore
+              Type: double
+            - Name: starttime
+              Type: string
+            - Name: versionname
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppAssessmentLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_assessment_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appArn,appVersion,assessmentArn,assessmentName,assessmentStatus,compliance,complianceStatus,cost,driftStatus,endTime,invoker,policy,resiliencyScore,startTime,summary,tags,versionName"
+          Columns:
+            - Name: apparn
+              Type: string
+            - Name: appversion
+              Type: string
+            - Name: assessmentarn
+              Type: string
+            - Name: assessmentname
+              Type: string
+            - Name: assessmentstatus
+              Type: string
+            - Name: compliance
+              Type: struct<AZ:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>,Hardware:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>,Software:struct<achievableRpoInSecs:int,achievableRtoInSecs:int,complianceStatus:string,currentRpoInSecs:int,currentRtoInSecs:int>>
+            - Name: compliancestatus
+              Type: string
+            - Name: cost
+              Type: struct<amount:double,currency:string,frequency:string>
+            - Name: driftstatus
+              Type: string
+            - Name: endtime
+              Type: string
+            - Name: invoker
+              Type: string
+            - Name: policy
+              Type: struct<dataLocationConstraint:string,policy:struct<AZ:struct<rpoInSecs:int,rtoInSecs:int>,Hardware:struct<rpoInSecs:int,rtoInSecs:int>,Software:struct<rpoInSecs:int,rtoInSecs:int>>,policyArn:string,policyName:string,policyDescription:string>
+            - Name: resiliencyscore
+              Type: struct<componentScore:struct<Alarm:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Compliance:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Sop:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>,Test:struct<excludedCount:int,outstandingCount:int,possibleScore:double,score:double>>,disruptionScore:struct<AZ:double,Hardware:double,Region:double,Software:double>,score:double>
+            - Name: starttime
+              Type: string
+            - Name: tags
+              Type: string
+            - Name: versionname
+              Type: string
+            - Name: summary
+              Type: struct<riskRecommendations:array<struct<appComponents:array<string>,recommendation:string,risk:string>>,summary:string>
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppComponentRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_component_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_component_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,assessment_arn,configRecommendations,recommendationStatus"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: configrecommendations
+              Type: array<struct<appComponentName:string,cost:struct<amount:double,currency:string,frequency:string>,description:string,haArchitecture:string,optimizationType:string,recommendationCompliance:struct<AZ:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>,Hardware:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>,Software:struct<expectedComplianceStatus:string,expectedRpoDescription:string,expectedRpoInSecs:int,expectedRtoDescription:string,expectedRtoInSecs:int>>,referenceId:string,suggestedChanges:array<string>>>
+            - Name: recommendationstatus
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAppVersionResourcesLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_app_version_resources_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponents,app_arn,app_version,logicalResourceId,physicalResourceId,resourceName,resourceType,sourceType"
+          Columns:
+            - Name: appcomponents
+              Type: array<struct<id:string,name:string,type:string>>
+            - Name: app_arn
+              Type: string
+            - Name: app_version
+              Type: string
+            - Name: logicalresourceid
+              Type: struct<identifier:string,logicalStackName:string>
+            - Name: physicalresourceid
+              Type: struct<awsAccountId:string,awsRegion:string,identifier:string,type:string>
+            - Name: resourcename
+              Type: string
+            - Name: resourcetype
+              Type: string
+            - Name: sourcetype
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubAlarmRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_alarm_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-alarm_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,appComponentNames,assessment_arn,description,items,name,prerequisite,recommendationId,recommendationStatus,referenceId,type"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: appcomponentnames
+              Type: array<string>
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: prerequisite
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: type
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubSopRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_sop_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sop_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentName,assessment_arn,description,items,name,prerequisite,recommendationId,recommendationStatus,referenceId,serviceType"
+          Columns:
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: servicetype
+              Type: string
+            - Name: prerequisite
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
+
+  ResilienceHubTestRecommendationsLatestTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: 'resilience_hub_test_recommendations_latest'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          EXTERNAL: "TRUE"
+          classification: "json"
+          typeOfData: "file"
+          UPDATED_BY_CRAWLER: !Ref Crawler
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-test_recommendations_latest/"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+            Parameters:
+              paths: "appComponentId,appComponentName,assessment_arn,description,items,name,recommendationId,recommendationStatus,referenceId,risk,type"
+          Columns:
+            - Name: appcomponentid
+              Type: string
+            - Name: appcomponentname
+              Type: string
+            - Name: assessment_arn
+              Type: string
+            - Name: description
+              Type: string
+            - Name: items
+              Type: array<struct<alreadyImplemented:boolean,excluded:boolean,resourceId:string,targetAccountId:string,targetRegion:string>>
+            - Name: name
+              Type: string
+            - Name: recommendationid
+              Type: string
+            - Name: recommendationstatus
+              Type: string
+            - Name: referenceid
+              Type: string
+            - Name: risk
+              Type: string
+            - Name: type
+              Type: string
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region_code
+            Type: string
+          - Name: app_id
+            Type: string
