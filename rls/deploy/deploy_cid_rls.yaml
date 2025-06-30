@@ -21,6 +21,14 @@ Parameters:
     Type: String
     AllowedPattern: ([a-z0-9\-, ]*?$)
     Description: "(Ex: 123456789,098654321,789054312) List of Payer IDs you wish to collect data for. Can just be one Accounts"
+  DatabaseName:
+    Type: String
+    Description: Athena Databse where to deploy RLS table, should be same as CID Cudos database
+    Default: "default"
+  AthenaWorkGroup:
+    Type: String
+    Description: Athena Workgroup, keep the same as for CID Dashboards. 
+    Default: "CID"
   Schedule:
     Type: String
     Description: Cron job to trigger the lambda using cloudwatch event
@@ -33,6 +41,10 @@ Parameters:
       Type: String
       Description: file name of ZipFile with data code
       Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+  CidRlsLocation:
+      Type: String
+      Description: location of the RLS files in the S3 bucket
+      Default: "rls"
 Outputs:
   LambdaFunctionName:
     Value:
@@ -44,7 +56,7 @@ Outputs:
         - CIDRLS
         - Arn
 Resources:
-    CidRlsTable:
+  CidRlsTable:
     Type: AWS::Glue::Table
     Properties:
       DatabaseName: !Ref DatabaseName
@@ -77,7 +89,7 @@ Resources:
     Properties:
       AwsAccountId: !Ref AWS::AccountId
       DataSourceId: cid-rls-datasource
-      Name: !Ref CidDataSourceName
+      Name: cid-rls-datasource
       Type: ATHENA
       DataSourceParameters:
         AthenaParameters:
