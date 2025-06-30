@@ -24,7 +24,7 @@ Parameters:
   DatabaseName:
     Type: String
     Description: Existing Athena Database where to deploy RLS table, should be same as CID database
-    Default: "default"
+    Default: "cid_cur"
   AthenaWorkGroup:
     Type: String
     Description: Athena Workgroup, keep the same as for CID Dashboards. 
