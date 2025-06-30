@@ -38,7 +38,7 @@ Metadata:
           CodeKey:
             Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
           CidRlsLocation:
-            Default: "rls"
+            Default: "cid_rls"
           CodeBucket:
             Default: "aws-managed-cost-intelligence-dashboards"
           DeployLambdaResources:
@@ -94,7 +94,7 @@ Parameters:
   CidRlsLocation:
     Type: String
     Description: location of the RLS files in the S3 bucket
-    Default: "rls"
+    Default: "cid_rls"
 Outputs:
   LambdaFunctionName:
     Condition: DeployLambda
@@ -202,7 +202,7 @@ Resources:
             - quicksight:ListIngestions
             - quicksight:UpdateDataSetPermissions
 
-  CIDRLS:
+  LambdaCIDRLS:
     Type: AWS::Lambda::Function
     Condition: DeployLambda
     Properties:
