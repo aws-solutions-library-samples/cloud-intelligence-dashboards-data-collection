@@ -1,7 +1,56 @@
 #https://github.com/awslabs/cid-data-collection-framework/blob/main/rls/deploy/deploy_cid_rls.yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Lambda to collect AWS Organization and Amazon QuickSight data and store in S3 for RLS implementation v0.2.0 - AWS Solution SO9011
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "RLS common configuration parameters"
+        Parameters:
+          - ManagementAccountID
+          - DestinationBucket
+          - QuickSightUser
+      - Label:
+          default: "Default RLS System Configuration. Do not change if not needed"
+        Parameters:
+          - eeployLambdaResources
+          - ManagementAccountRole
+          - ResourcePrefix
+          - DatabaseName
+          - AthenaWorkGroup
+          - CodeKey
+          - CidRlsLocation
+          - CodeBucket
+          - Schedule
+
+    ParameterLabels:
+        Parameters:
+          ManagementAccountRole:
+            Default: Lambda-Assume-Role-Management-Account
+          ResourcePrefix:
+            Default: CID-DC-
+          DatabaseName:
+            Default: "cid_cur"
+          AthenaWorkGroup:
+            Default: "CID"
+          Schedule:
+            Default: "rate(1 hour)"
+          CodeKey:
+            Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+          CidRlsLocation:
+            Default: "rls"
+          CodeBucket:
+            Default: "aws-managed-cost-intelligence-dashboards"
+          DeployLambdaResources:
+            Default: Yes
 Parameters:
+  DeployLambdaResources:
+    Type: String
+    Description: "Yes: Deploy RLS Lambdaor. No: only create RLS Athena Table and DataSet"
+    AllowedValues:
+      - Yes
+      - No
+    Default: Yes
   DestinationBucket:
     Type: String
     Description: Name of the S3 Bucket that is created to hold org data
@@ -9,6 +58,7 @@ Parameters:
   QuickSightUser:
     Type: String
     Description: QuickSight user that will own DataSet and DataSource resources, use the same as in CID deployment.
+    MinLength: 1
   ManagementAccountRole:
     Type: String
     Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
@@ -34,27 +84,31 @@ Parameters:
     Description: Cron job to trigger the lambda using cloudwatch event
     Default: "rate(1 hour)"
   CodeBucket:
-      Type: String
-      Description: S3 Bucket with RLS code,this coverts to CodeBucket-Region e.g. for us-east-1 this will be aws-managed-cost-intelligence-dashboards-us-east-1
-      Default: aws-managed-cost-intelligence-dashboards
+    Type: String
+    Description: S3 Bucket with RLS code,this coverts to CodeBucket-Region e.g. for us-east-1 this will be aws-managed-cost-intelligence-dashboards-us-east-1
+    Default: "aws-managed-cost-intelligence-dashboards"
   CodeKey:
-      Type: String
-      Description: file name of ZipFile with data code
-      Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+    Type: String
+    Description: file name of ZipFile with data code
+    Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
   CidRlsLocation:
-      Type: String
-      Description: location of the RLS files in the S3 bucket
-      Default: "rls"
+    Type: String
+    Description: location of the RLS files in the S3 bucket
+    Default: "rls"
 Outputs:
   LambdaFunctionName:
+    Condition: DeployLambda
     Value:
       Ref: CIDRLS
   LambdaFunctionARN:
+    Condition: DeployLambda
     Description: Lambda function ARN.
     Value:
       Fn::GetAtt:
         - CIDRLS
         - Arn
+Conditions:
+  DeployLambda: !Equals [ !Ref DeployLambdaResources, Yes ]
 Resources:
   CidRlsTable:
     Type: AWS::Glue::Table
@@ -150,6 +204,7 @@ Resources:
 
   CIDRLS:
     Type: AWS::Lambda::Function
+    Condition: DeployLambda
     Properties:
       FunctionName: !Sub
         - 'CIDRLS_${Id}'
@@ -171,6 +226,7 @@ Resources:
           QS_REGION: !Ref AWS::Region
   LambdaRole:
     Type: AWS::IAM::Role
+    Condition: DeployLambda
     Properties:
       RoleName: !Sub "${ResourcePrefix}RLS-LambdaRole"
       AssumeRolePolicyDocument:
@@ -217,6 +273,7 @@ Resources:
                 Resource: "*" # Cannot restrict this
   CloudWatchTrigger:
     Type: AWS::Events::Rule
+    Condition: DeployLambda
     Properties:
       Description: Scheduler
       Name: !Sub
@@ -228,6 +285,7 @@ Resources:
         - Arn: !GetAtt CIDRLS.Arn
           Id: TriggerForCIDRLS
   EventPermission:
+    Condition: DeployLambda
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt CIDRLS.Arn
