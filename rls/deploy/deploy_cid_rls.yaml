@@ -27,7 +27,7 @@ Parameters:
     Default: "cid_cur"
   AthenaWorkGroup:
     Type: String
-    Description: Athena Workgroup, keep the same as for CID Dashboards. 
+    Description: Existing Athena Workgroup, keep the same as for CID Dashboards. 
     Default: "CID"
   Schedule:
     Type: String
