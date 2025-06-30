@@ -13,7 +13,7 @@ Metadata:
       - Label:
           default: "Default RLS System Configuration. Do not change if not needed"
         Parameters:
-          - eeployLambdaResources
+          - DeployLambdaResources
           - ManagementAccountRole
           - ResourcePrefix
           - DatabaseName
