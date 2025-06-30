@@ -99,13 +99,13 @@ Outputs:
   LambdaFunctionName:
     Condition: DeployLambda
     Value:
-      Ref: CIDRLS
+      Ref: LambdaCIDRLS
   LambdaFunctionARN:
     Condition: DeployLambda
     Description: Lambda function ARN.
     Value:
       Fn::GetAtt:
-        - CIDRLS
+        - LambdaCIDRLS
         - Arn
 Conditions:
   DeployLambda: !Equals [ !Ref DeployLambdaResources, Yes ]
@@ -207,7 +207,7 @@ Resources:
     Condition: DeployLambda
     Properties:
       FunctionName: !Sub
-        - 'CIDRLS_${Id}'
+        - 'LambdaCIDRLS_${Id}'
         - Id: !Select [0, !Split ['-', !Ref 'AWS::StackName']]
       Description: LambdaFunction of python3.8.
       Runtime: python3.9
@@ -259,7 +259,7 @@ Resources:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
                   - "logs:DescribeLogStreams"
-                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/CID-RLS*"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/Lambda-CID-RLS*"
               - Effect: "Allow"
                 Action:
                   - "s3:PutObject"
@@ -277,18 +277,18 @@ Resources:
     Properties:
       Description: Scheduler
       Name: !Sub
-        - 'Scheduler_ForCIDRLS_${Id}'
+        - 'Scheduler_ForLambdaCIDRLS_${Id}'
         - Id: !Select [0, !Split ['-', !Ref 'AWS::StackName']]
       ScheduleExpression: !Ref Schedule
       State: ENABLED
       Targets:
-        - Arn: !GetAtt CIDRLS.Arn
-          Id: TriggerForCIDRLS
+        - Arn: !GetAtt LambdaCIDRLS.Arn
+          Id: TriggerForLambdaCIDRLS
   EventPermission:
     Condition: DeployLambda
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !GetAtt CIDRLS.Arn
+      FunctionName: !GetAtt LambdaCIDRLS.Arn
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceAccount: !Ref 'AWS::AccountId'
