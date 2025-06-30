@@ -23,7 +23,7 @@ Parameters:
     Description: "(Ex: 123456789,098654321,789054312) List of Payer IDs you wish to collect data for. Can just be one Accounts"
   DatabaseName:
     Type: String
-    Description: Athena Databse where to deploy RLS table, should be same as CID Cudos database
+    Description: Existing Athena Database where to deploy RLS table, should be same as CID database
     Default: "default"
   AthenaWorkGroup:
     Type: String
