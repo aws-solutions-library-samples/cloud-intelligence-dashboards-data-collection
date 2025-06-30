@@ -6,6 +6,9 @@ Parameters:
     Type: String
     Description: Name of the S3 Bucket that is created to hold org data
     AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  QuickSightUser:
+    Type: String
+    Description: QuickSight user that will own DataSet and DataSource resources, use the same as in CID deployment.
   ManagementAccountRole:
     Type: String
     Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
@@ -41,6 +44,98 @@ Outputs:
         - CIDRLS
         - Arn
 Resources:
+    CidRlsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: cid_rls
+        TableType: EXTERNAL_TABLE
+        StorageDescriptor:
+          Columns:
+            - Name: UserName
+              Type: string
+            - Name: GroupName
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: payer_account_id
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CidRlsLocation}/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              escapeChar: \
+              quoteChar: '"'
+              separatorChar: ','
+
+  CidRlsDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: cid-rls-datasource
+      Name: !Ref CidDataSourceName
+      Type: ATHENA
+      DataSourceParameters:
+        AthenaParameters:
+          WorkGroup: !Ref AthenaWorkGroup
+      Permissions:
+        - Principal: !Sub 'arn:${AWS::Partition}:quicksight:${AWS::Region}:${AWS::AccountId}:user/default/${QuickSightUser}'
+          Actions:
+              - quicksight:PassDataSource
+              - quicksight:DescribeDataSourcePermissions
+              - quicksight:UpdateDataSource
+              - quicksight:UpdateDataSourcePermissions
+              - quicksight:DescribeDataSource
+              - quicksight:DeleteDataSource
+
+  CidRlsDataSet:
+    Type: AWS::QuickSight::DataSet
+    DependsOn: CidRlsDataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSetId: spice_user_ds
+      Name: cid_rls
+      ImportMode: DIRECT_QUERY
+      UseAs: RLS_RULES
+      LogicalTableMap:
+        A-Map-ID:
+          Alias: cid_rls
+          Source:
+            PhysicalTableId: RlsAthenaTable
+      PhysicalTableMap:
+        RlsAthenaTable:
+          RelationalTable:
+            Catalog: AwsDataCatalog
+            DataSourceArn: !GetAtt CidRlsDataSource.Arn
+            Name: cid_rls
+            Schema: default
+            InputColumns:
+              - Name: username
+                Type: STRING
+              - Name: groupname
+                Type: STRING
+              - Name: account_id
+                Type: STRING
+              - Name: payer_account_id
+                Type: STRING
+      Permissions:
+        - Principal: !Sub 'arn:${AWS::Partition}:quicksight:${AWS::Region}:${AWS::AccountId}:user/default/${QuickSightUser}'
+          Actions:
+            - quicksight:PassDataSet
+            - quicksight:DescribeIngestion
+            - quicksight:CreateIngestion
+            - quicksight:UpdateDataSet
+            - quicksight:DeleteDataSet
+            - quicksight:DescribeDataSet
+            - quicksight:CancelIngestion
+            - quicksight:DescribeDataSetPermissions
+            - quicksight:ListIngestions
+            - quicksight:UpdateDataSetPermissions
+
   CIDRLS:
     Type: AWS::Lambda::Function
     Properties:
