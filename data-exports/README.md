@@ -54,7 +54,7 @@ There can be various situations where customers need to replicate data exports t
 
 To accomplish this, both the Headquarters and Business Unit can implement separate data export destination stacks. Business Unit administrators, working from their management account, can specify a target bucket located within the Headquarters stack, enabling seamless data replication to both S3 buckets.
 
-Other scenario can be a replicating data to a staging environment for testing purposes.
+Other scenario can be a replicating data to a staging environment for testing purposes. Please make sure that both destination accounts have the DataExport stack in the Destination configuration before updating Source account(s). 
 
 ![Secondary Replication Bucket](/.images/architecture-data-export-replication-to-secondary.png)
 
