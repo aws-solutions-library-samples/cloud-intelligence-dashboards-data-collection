@@ -41,6 +41,7 @@ Metadata:
           - IncludeServiceQuotasModule
           - IncludeEUCUtilizationModule
           - IncludeResilienceHubModule
+          - IncludeReferenceModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -288,6 +289,11 @@ Parameters:
    Description: Collects AWS Resilience Hub data
    AllowedValues: ['yes', 'no']
    Default: 'no'
+  IncludeReferenceModule:
+    Type: String
+    Description: Collects Reference data for other modules
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -339,7 +345,8 @@ Conditions:
     - ""
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
-
+  DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
+  
 Resources:
   S3Bucket:
     Type: 'AWS::S3::Bucket'
@@ -1497,6 +1504,30 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+
+  ReferenceModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployIncludeReferenceModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.11.0/module-reference.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        Schedule: !Ref ScheduleFrequent
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        RegionsInScope:
+          Fn::If:
+            - RegionsInScopeIsEmpty
+            - !Sub "${AWS::Region}"
+            - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
 
   AccountCollector:
     Type: AWS::CloudFormation::Stack

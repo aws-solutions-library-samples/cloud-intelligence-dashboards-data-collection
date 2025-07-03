@@ -337,6 +337,26 @@ def test_content_of_summary_not_empty(s3):
     else:
         raise Exception('no Summary produced in 30s')
 
+def test_rds_db_engine_versions_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_rds_db_engine_versions" LIMIT 10;')
+    assert len(data) > 0, 'rds_db_engine_versions is empty'
+
+def test_rds_db_major_engine_versions_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_rds_db_major_engine_versions" LIMIT 10;')
+    assert len(data) > 0, 'rds_db_major_engine_versions is empty'
+
+def test_ec2_instance_types_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_ec2_instance_types" LIMIT 10;')
+    assert len(data) > 0, 'ec2_instance_types is empty'
+
+def test_elasticache_engine_versions_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_elasticache_engine_versions" LIMIT 10;')
+    assert len(data) > 0, 'elasticache_engine_versions is empty'
+
+def test_elasticache_reserved_cache_nodes_offerings_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_elasticache_reserved_cache_nodes_offerings" LIMIT 10;')
+    assert len(data) > 0, 'elasticache_reserved_cache_nodes_offerings is empty'
+
 if __name__ == '__main__':
     pytest.params = {}
     if '--no-teardown' in sys.argv:

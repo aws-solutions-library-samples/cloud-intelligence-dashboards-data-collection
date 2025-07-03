@@ -1,0 +1,711 @@
+#IAKOV's version
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves Reference data like RDS EOL in Data Collection Account only
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold information
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: reference
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  RegionsInScope:
+    Type: String
+    Description: "Comma Delimited list of AWS regions from which data about resources will be collected. Example: us-east-1,eu-west-1,ap-northeast-1"
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the Lambda
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+      Policies:
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "RDSDBMajorEngineVersions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "rds:DescribeDBMajorEngineVersions"
+                  - "rds:DescribeDBEngineVersions"
+                  - "ec2:DescribeInstanceTypes"
+                  - "elasticache:DescribeCacheEngineVersions"
+                  - "elasticache:DescribeReservedCacheNodesOfferings"
+                Resource: "*" ## Policy is used for scanning of a wide range of resources
+        - PolicyName: "S3Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of resources"
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Timeout: 900
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          LOG_LEVEL: INFO
+          REGIONS: !Ref RegionsInScope
+      Code:
+        ZipFile: |
+          """
+          Lambda to collect RDS DB Major Versions
+          Author: Soham Majumder
+          """
+          import os
+          import json
+          import logging
+          from datetime import datetime, timedelta
+          import tempfile
+          from json import JSONEncoder
+          from contextlib import contextmanager
+          from functools import partial
+
+          bucket = os.environ["BUCKET_NAME"]
+          prefix = os.environ["PREFIX"]
+          REGIONS = os.environ["REGIONS"].split(',')
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          #ensure we get latest boto3
+          from pip._internal.cli.main import main, sys
+          logging.getLogger('pip').setLevel(logging.ERROR) # Silence pip's logger
+          main(['install', '-I', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+          import boto3 #pylint: disable=wrong-import-position          
+
+          from botocore.config import Config
+          config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            }
+          )
+
+          class DateTimeEncoder(JSONEncoder):
+              """encoder for json with time object"""
+              def default(self, o):
+                  if isinstance(o, (datetime.date, datetime.datetime)):
+                      return o.isoformat()
+                  return None
+
+          def json_converter(obj):
+              """ Help json encode date"""
+              if isinstance(obj, datetime):
+                  return obj.strftime("%Y-%m-%d %H:%M:%S")
+              return obj
+
+          @contextmanager
+          def s3_json_file(s3_client: boto3.client, bucket: str, s3_path: str):
+              """
+              Example:
+              with s3_json_file(s3, 'my-bucket', 'data/output.json') as write_line:
+                  write_line({"key": "value", "list": [1, 2, 3]})
+              # file will be uploaded to s3 at the end
+              """
+              temp_file = None
+              try:
+                  # Create temporary file
+                  temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
+                  def write_json(data) -> None:
+                      temp_file.write(json.dumps(data, default=json_converter) + '\n')
+                  yield write_json
+                  if not temp_file.closed:
+                      temp_file.close()
+                  print(f"Uploading JSON file to s3://{bucket}/{s3_path}")
+                  s3_client.upload_file(temp_file.name, bucket, s3_path)
+                  print(f"Successfully uploaded JSON to s3://{bucket}/{s3_path}")
+
+              except Exception as e:
+                  print(f"Error during S3 JSON upload: {str(e)}")
+                  raise
+
+              finally:
+                  if temp_file and not temp_file.closed:
+                      temp_file.close()
+                  if temp_file and os.path.exists(temp_file.name):
+                      try:
+                          os.unlink(temp_file.name)
+                      except OSError as e:
+                          print(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+
+          def lambda_handler(event, context): #pylint: disable=W0613
+              """Starting Point for Lambda"""
+              # account_id = context.invoked_function_arn.split(":")[4]
+              # logger.debug("Collecting data for account: %s", account_id)
+              logger.debug("Boto3 version:", boto3.__version__)
+              
+              module_name_major_versions = 'rds_db_major_engine_versions'
+              module_name_engine_versions = 'rds_db_engine_versions'  
+
+              rds = boto3.client('rds', config=config)
+              engine_versions_paginator = rds.get_paginator('describe_db_engine_versions')
+              major_engine_versions_paginator = rds.get_paginator('describe_db_major_engine_versions')
+              
+              s3 = boto3.client('s3') # local s3
+              s3_uploader = partial(s3_json_file, s3, bucket)
+
+              with s3_uploader(f'{prefix}/{prefix}_rds_db_major_engine_versions/rds_db_major_engine_versions.json') as write:
+                  for major_engine_version in major_engine_versions_paginator.paginate().search('DBMajorEngineVersions'):        
+                      logger.debug(major_engine_version)
+                      write(major_engine_version)
+
+              with s3_uploader(f'{prefix}/{prefix}_rds_db_engine_versions/rds_db_engine_versions.json') as write:
+                  for engine_version in engine_versions_paginator.paginate().search('DBEngineVersions'):        
+                      logger.debug(engine_version)
+                      write(engine_version)
+
+              # Pull region specific data
+              for region in REGIONS:
+                  ec2 = boto3.client('ec2', region_name=region)
+                  with s3_uploader(f'{prefix}/{prefix}_ec2_instance_types/{region}.json') as write:
+                      for rec in ec2.get_paginator('describe_instance_types').paginate().search('InstanceTypes'):
+                          rec['region'] = region
+                          write(rec)
+
+                  elasticache = boto3.client('elasticache', region_name=region)
+                  with s3_uploader(f'{prefix}/{prefix}_elasticache_engine_versions/{region}.json') as write:
+                      for rec in elasticache.get_paginator('describe_cache_engine_versions').paginate().search('CacheEngineVersions'):
+                          rec['region'] = region
+                          write(rec)
+
+                  with s3_uploader(f'{prefix}/{prefix}_elasticache_reserved_cache_nodes_offerings/{region}.json') as write:
+                      for rec in elasticache.get_paginator('describe_reserved_cache_nodes_offerings').paginate().search('ReservedCacheNodesOfferings'):
+                          rec['region'] = region
+                          write(rec)
+
+
+      Handler: 'index.lambda_handler'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89 # Lambda functions should be deployed inside a VPC
+            reason: "No need for VPC in this case"
+          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  RDSMajorEngineVersionsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_db_major_engine_versions
+        StorageDescriptor:
+          Columns:
+            - Name: engine
+              Type: string
+            - Name: majorengineversion
+              Type: string
+            - Name: supportedenginelifecycles
+              Type: array<struct<lifecyclesupportname:string,lifecyclesupportstartdate:timestamp,lifecyclesupportenddate:timestamp>>
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_major_engine_versions/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        TableType: EXTERNAL_TABLE
+
+  RDSEngineVersionsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_db_engine_versions
+        StorageDescriptor:
+          Columns:
+            - Name: engine
+              Type: string
+            - Name: engineversion
+              Type: string
+            - Name: dbparametergroupfamily
+              Type: string
+            - Name: dbenginedescription
+              Type: string
+            - Name: dbengineversiondescription
+              Type: string
+            - Name: defaultcharacterset
+              Type: struct<charactersetname:string,charactersetdescription:string>
+            - Name: image
+              Type: struct<imageid:string,status:string>
+            - Name: dbenginemediatype
+              Type: string
+            - Name: supportedcharactersets
+              Type: array<struct<charactersetname:string,charactersetdescription:string>>
+            - Name: supportedncharcharactersets
+              Type: array<struct<charactersetname:string,charactersetdescription:string>>
+            - Name: validupgradetarget
+              Type: array<struct<engine:string,engineversion:string,description:string,autoupgrade:boolean,ismajorversionupgrade:boolean,supportedenginemodes:array<string>,supportsparallelquery:boolean,supportsglobaldatabases:boolean,supportsbabelfish:boolean,supportslimitlessdatabase:boolean,supportslocalwriteforwarding:boolean,supportsintegrations:boolean>>
+            - Name: supportedtimezones
+              Type: array<struct<timezonename:string>>
+            - Name: exportablelogtypes
+              Type: array<string>
+            - Name: supportslogexportstocloudwatchlogs
+              Type: boolean
+            - Name: supportsreadreplica
+              Type: boolean
+            - Name: supportedenginemodes
+              Type: array<string>
+            - Name: supportedfeaturenames
+              Type: array<string>
+            - Name: status
+              Type: string
+            - Name: supportsparallelquery
+              Type: boolean
+            - Name: supportsglobaldatabases
+              Type: boolean
+            - Name: majorengineversion
+              Type: string
+            - Name: databaseinstallationfiless3bucketname
+              Type: string
+            - Name: databaseinstallationfiless3prefix
+              Type: string
+            - Name: dbengineversionarn
+              Type: string
+            - Name: kmskeyid
+              Type: string
+            - Name: createtime
+              Type: timestamp
+            - Name: taglist
+              Type: array<struct<key:string,value:string>>
+            - Name: supportsbabelfish
+              Type: boolean
+            - Name: customdbengineversionmanifest
+              Type: string
+            - Name: supportslimitlessdatabase
+              Type: boolean
+            - Name: supportscertificaterotationwithoutrestart
+              Type: boolean
+            - Name: supportedcacertificateidentifiers
+              Type: array<string>
+            - Name: supportslocalwriteforwarding
+              Type: boolean
+            - Name: supportsintegrations
+              Type: boolean
+            - Name: serverlessv2featuressupport
+              Type: struct<mincapacity:double,maxcapacity:double>
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_engine_versions/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        TableType: EXTERNAL_TABLE
+
+  EC2InstanceTypesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: ec2_instance_types
+        StorageDescriptor:
+          Columns:
+            - Name: instancetype
+              Type: string
+            - Name: currentgeneration
+              Type: boolean
+            - Name: freetierelgible
+              Type: boolean
+            - Name: supportedusageclasses
+              Type: array<string>
+            - Name: supportedrootdevicetypes
+              Type: array<string>
+            - Name: supportedvirtualizationtypes
+              Type: array<string>
+            - Name: baremetal
+              Type: boolean
+            - Name: hypervisor
+              Type: string
+            - Name: processorinfo
+              Type: struct<supportedarchitectures:array<string>,sustainedclockspeedinghz:double,supportedfeatures:array<string>,manufacturer:string>
+            - Name: vcpuinfo
+              Type: struct<defaultvcpus:int,defaultcores:int,defaultthreadspercore:int,validcores:array<int>,validthreadspercore:array<int>>
+            - Name: memoryinfo
+              Type: struct<sizeinmib:bigint>
+            - Name: instancestoragesupported
+              Type: boolean
+            - Name: instancestorageinfo
+              Type: struct<totalsizeingb:bigint,disks:array<struct<sizeingb:bigint,count:int,type:string>>,nvmesupport:string,encryptionsupport:string>
+            - Name: ebsinfo
+              Type: struct<ebsoptimizedsupport:string,encryptionsupport:string,ebsoptimizedinfo:struct<baselinebandwidthinmbps:int,baselinethroughputinmbps:double,baselineiops:int,maximumbandwidthinmbps:int,maximumthroughputinmbps:double,maximumiops:int>,nvmesupport:string>
+            - Name: networkinfo
+              Type: struct<networkperformance:string,maximumnetworkinterfaces:int,maximumnetworkcards:int,defaultnetworkcardindex:int,networkcards:array<struct<networkcardindex:int,networkperformance:string,maximumnetworkinterfaces:int,baselinebandwidthingbps:double,peakbandwidthingbps:double>>,ipv4addressesperinterface:int,ipv6addressesperinterface:int,ipv6supported:boolean,enasupport:string,efasupported:boolean,encryptionintransitsupported:boolean,enasrdsupported:boolean>
+            - Name: gpuinfo
+              Type: struct<gpus:array<struct<name:string,manufacturer:string,count:int,memoryinfo:struct<sizeinmib:int>>>,totalgpumemorysizeinmib:int>
+            - Name: fpgainfo
+              Type: struct<fpgas:array<struct<name:string,manufacturer:string,count:int,memoryinfo:struct<sizeinmib:int>>>,totalfpgamemorysizeinmib:int>
+            - Name: placementgroupinfo
+              Type: struct<supportedstrategies:array<string>>
+            - Name: inferenceacceleratorinfo
+              Type: struct<accelerators:array<struct<count:int,name:string,manufacturer:string,memoryinfo:struct<sizeinmib:int>>>,totalinferencememorysizeinmib:int>
+            - Name: hibernationsupported
+              Type: boolean
+            - Name: burstableperformancesupported
+              Type: boolean
+            - Name: dedicatedhostssupported
+              Type: boolean
+            - Name: autorecoversupported
+              Type: boolean
+            - Name: supportedbootmodes
+              Type: array<string>
+            - Name: nitroenclavessupport
+              Type: string
+            - Name: nitrotpmsupport
+              Type: string
+            - Name: nitrotpminfo
+              Type: struct<supportedversions:array<string>>
+            - Name: mediaacceleratorinfo
+              Type: struct<accelerators:array<struct<count:int,name:string,manufacturer:string,memoryinfo:struct<sizeinmib:int>>>,totalmediamemorysizeinmib:int>
+            - Name: neuroninfo
+              Type: struct<neurondevices:array<struct<count:int,name:string,coreinfo:struct<count:int,version:int>,memoryinfo:struct<sizeinmib:int>>>,totalneurondevicememorysizeinmib:int>
+            - Name: phcsupport
+              Type: string
+            - Name: rebootmigrationsupport
+              Type: string
+            - Name: region
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_ec2_instance_types/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        TableType: EXTERNAL_TABLE
+
+  ElastiCacheEngineVersionsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: elasticache_engine_versions
+        StorageDescriptor:
+          Columns:
+            - Name: engine
+              Type: string
+            - Name: engineversion
+              Type: string
+            - Name: cacheparametergroupfamily
+              Type: string
+            - Name: cachenodetype
+              Type: string
+            - Name: description
+              Type: string
+            - Name: region
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_elasticache_engine_versions/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        TableType: EXTERNAL_TABLE
+
+  ElastiCacheReservedCacheNodesOfferingsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: elasticache_reserved_cache_nodes_offerings
+        StorageDescriptor:
+          Columns:
+            - Name: reservedcachenodesofferingid
+              Type: string
+            - Name: cachenodetype
+              Type: string
+            - Name: duration
+              Type: int
+            - Name: fixedprice
+              Type: double
+            - Name: usageprice
+              Type: double
+            - Name: productdescription
+              Type: string
+            - Name: offeringtype
+              Type: string
+            - Name: recurringcharges
+              Type: array<struct<recurringchargeamount:double,recurringchargefrequency:string>>
+            - Name: region
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_elasticache_reserved_cache_nodes_offerings/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        TableType: EXTERNAL_TABLE
+
+  ReferenceDataCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_major_engine_versions/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_rds_db_engine_versions/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_ec2_instance_types/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_elasticache_engine_versions/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_elasticache_reserved_cache_nodes_offerings/"
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawler: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
+
+  RDSMajorEngineVersionsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "Flattened view of RDS major engine versions with lifecycle support"
+      Name: !Sub "${CFDataName}_rds_db_major_engine_versions_view"
+      QueryString: |
+        CREATE OR REPLACE VIEW reference_rds_db_major_engine_versions_view AS
+        SELECT 
+          engine,
+          majorengineversion,
+          lifecycle.lifecyclesupportname,
+          lifecycle.lifecyclesupportstartdate,
+          lifecycle.lifecyclesupportenddate
+        FROM reference_rds_db_major_engine_versions
+        CROSS JOIN UNNEST(supportedenginelifecycles) AS t(lifecycle)
+
+  RDSEngineVersionsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "Flattened view of RDS engine versions with upgrade targets"
+      Name: !Sub "${CFDataName}_rds_db_engine_versions_view"
+      QueryString: |
+        CREATE OR REPLACE VIEW reference_rds_db_engine_versions_view AS
+        SELECT 
+          engine,
+          engineversion,
+          dbparametergroupfamily,
+          dbenginedescription,
+          dbengineversiondescription,
+          status,
+          majorengineversion,
+          supportsparallelquery,
+          supportsglobaldatabases,
+          supportsbabelfish,
+          supportslimitlessdatabase,
+          supportslocalwriteforwarding,
+          supportsintegrations,
+          upgrade.engine AS upgrade_engine,
+          upgrade.engineversion AS upgrade_engineversion,
+          upgrade.description AS upgrade_description,
+          upgrade.autoupgrade,
+          upgrade.ismajorversionupgrade,
+          log_type,
+          ca_cert
+        FROM reference_rds_db_engine_versions
+        CROSS JOIN UNNEST(validupgradetarget) AS t(upgrade)
+        CROSS JOIN UNNEST(exportablelogtypes) AS t2(log_type)
+        CROSS JOIN UNNEST(supportedcacertificateidentifiers) AS t3(ca_cert)
+
+  EC2InstanceTypesView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "Flattened view of EC2 instance types with expanded arrays and structs"
+      Name: !Sub "${CFDataName}_ec2_instance_types_view"
+      QueryString: |
+        CREATE OR REPLACE VIEW reference_ec2_instance_types_view AS
+        SELECT 
+          instancetype,
+          currentgeneration,
+          freetierelgible,
+          usage_class,
+          root_device_type,
+          virtualization_type,
+          baremetal,
+          hypervisor,
+          processorinfo.manufacturer AS processor_manufacturer,
+          arch AS processor_architecture,
+          processorinfo.sustainedclockspeedinghz AS processor_clock_speed,
+          vcpuinfo.defaultvcpus AS default_vcpus,
+          vcpuinfo.defaultcores AS default_cores,
+          memoryinfo.sizeinmib AS memory_size_mib,
+          instancestoragesupported,
+          networkinfo.networkperformance AS network_performance,
+          networkinfo.maximumnetworkinterfaces AS max_network_interfaces,
+          networkinfo.ipv6supported AS ipv6_supported,
+          networkinfo.enasupport AS ena_support,
+          hibernationsupported,
+          burstableperformancesupported,
+          boot_mode,
+          nitroenclavessupport,
+          nitrotpmsupport,
+          region
+        FROM ec2_instance_types
+        CROSS JOIN UNNEST(supportedusageclasses) AS t1(usage_class)
+        CROSS JOIN UNNEST(supportedrootdevicetypes) AS t2(root_device_type)
+        CROSS JOIN UNNEST(supportedvirtualizationtypes) AS t3(virtualization_type)
+        CROSS JOIN UNNEST(processorinfo.supportedarchitectures) AS t4(arch)
+        CROSS JOIN UNNEST(supportedbootmodes) AS t5(boot_mode)
+
+  ElastiCacheEngineVersionsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "View of ElastiCache engine versions"
+      Name: !Sub "${CFDataName}_elasticache_engine_versions_view"
+      QueryString: |
+        CREATE OR REPLACE VIEW reference_elasticache_engine_versions_view AS
+        SELECT 
+          engine,
+          engineversion,
+          cacheparametergroupfamily,
+          cachenodetype,
+          description,
+          region
+        FROM elasticache_engine_versions
+
+  ElastiCacheReservedOfferingsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "Flattened view of ElastiCache reserved cache nodes offerings with recurring charges"
+      Name: !Sub "${CFDataName}_elasticache_reserved_offerings_view"
+      QueryString: |
+        CREATE OR REPLACE VIEW reference_elasticache_reserved_offerings_view AS
+        SELECT 
+          reservedcachenodesofferingid,
+          cachenodetype,
+          duration,
+          fixedprice,
+          usageprice,
+          productdescription,
+          offeringtype,
+          charge.recurringchargeamount AS recurring_charge_amount,
+          charge.recurringchargefrequency AS recurring_charge_frequency,
+          region
+        FROM elasticache_reserved_cache_nodes_offerings
+        CROSS JOIN UNNEST(recurringcharges) AS t(charge)
+
+  
