@@ -163,7 +163,7 @@ Resources:
     DependsOn: CidRlsDataSource
     Properties:
       AwsAccountId: !Ref AWS::AccountId
-      DataSetId: spice_user_ds
+      DataSetId: cid_rls
       Name: cid_rls
       ImportMode: DIRECT_QUERY
       UseAs: RLS_RULES
