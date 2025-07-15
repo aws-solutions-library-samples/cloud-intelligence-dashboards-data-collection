@@ -153,10 +153,12 @@ Conditions:
     Fn::Or:
       - !Not [!Condition IsDestinationAccount]
       - !Equals [!Ref 'AWS::AccountId', !Select [0, !Split [',', !Sub '${SourceAccountIds},']]]
-  RegionSupportsDataExportsViaCFN: # CFN supports DataExports only in us-east-1 and cn-northwest-1. Other regions must use lambda.
+  RegionSupportsDataExportsViaCFN: # CFN supports DataExports only in several regions. Other regions must use lambda.
     Fn::Or:
       - !Equals [!Ref 'AWS::Region', 'us-east-1']
       - !Equals [!Ref 'AWS::Region', 'cn-northwest-1']
+      - !Equals [!Ref 'AWS::Region', 'us-iso-east-1']
+      - !Equals [!Ref 'AWS::Region', 'us-iso-west-1']
   ManageCUR2: !Equals [!Ref ManageCUR2, 'yes']
   ManageFOCUS: !Equals [!Ref ManageFOCUS, 'yes']
   ManageCOH: !Equals [!Ref ManageCOH, 'yes']
@@ -1159,8 +1161,12 @@ Resources:
           import boto3
           import cfnresponse
 
-          # DataExports only exist in us-east-1 and cn-northwest-1 regions
-          region = 'us-east-1' if not os.environ['AWS_REGION'].startswith('cn-') else 'cn-northwest-1'
+          # DataExports only exist in paricular regions
+          region = 'us-east-1'
+          if os.environ['AWS_REGION'].startswith('cn-'):
+              region = 'cn-northwest-1'
+          if os.environ['AWS_REGION'].startswith('us-iso-'):
+              region = os.environ['AWS_REGION']
 
           client = boto3.client('bcm-data-exports', region_name=region)
 
