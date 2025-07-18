@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS Multi-Tenant Cost Visibility Module'
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    AllowedPattern: ([a-z0-9_]*?$)
+    Default: optimization_data
+  
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+  
+  DestinationBucket:
+    Type: String
+    Description: S3 bucket for storing data
+  
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 bucket for storing data
+  
+  Schedule:
+    Type: String
+    Description: Schedule expression for the Lambda function
+    Default: rate(1 hour)
+  
+  GlueRoleARN:
+    Type: String
+    Description: ARN of the Glue role
+  
+  ResourcePrefix:
+    Type: String
+    Description: Prefix for resource names
+  
+  LambdaAnalyticsARN:
+    Type: String
+    Description: ARN of the Lambda Analytics function
+  
+  CodeBucket:
+    Type: String
+    Description: S3 bucket containing the code
+  
+  StepFunctionTemplate:
+    Type: String
+    Description: Path to the Step Function template
+  
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: ARN of the Step Function execution role
+  
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: ARN of the Scheduler execution role
+  
+  RegionsInScope:
+    Type: String
+    Description: Comma-delimited list of regions to collect data from
+    Default: ""
+
+Resources:
+  RdsMetricsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "rds-metrics-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAfter5Years
+            Status: Enabled
+            ExpirationInDays: 1825
+            Prefix: '*'
+      LoggingConfiguration:
+        DestinationBucketName: !Ref DestinationBucket
+        LogFilePrefix: logs/rds-metrics/
+      VersioningConfiguration:
+        Status: Enabled
+
+  RdsMetricsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RdsMetricsBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowSSLOnly
+            Action: s3:*
+            Effect: Deny
+            Principal: "*"
+            Resource:
+              - !Sub "${RdsMetricsBucket.Arn}"
+              - !Sub "${RdsMetricsBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: AllowTLS12Only
+            Action: s3:*
+            Effect: Deny
+            Principal: "*"
+            Resource:
+              - !Sub "${RdsMetricsBucket.Arn}"
+              - !Sub "${RdsMetricsBucket.Arn}/*"
+            Condition:
+              NumericLessThan:
+                s3:TlsVersion: 1.2
+
+  RDSMetricsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}RDSMultitenant-Lambda-Role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: RDSMetricsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - pi:GetResourceMetrics
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${RdsMetricsBucket.Arn}/*"
+
+  RDSPerformanceInsightsFnHourly:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ResourcePrefix}RDSMultitenant-Collector"
+      Handler: rds_multitenant_handler.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 1024
+      Role: !GetAtt RDSMetricsLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref DestinationBucket
+        S3Key: source/rds-multitenant/rds_multitenant_handler.zip
+      Environment:
+        Variables:
+          METRICS_BUCKET: !Ref RdsMetricsBucket
+          METRICS_PERIOD_IN_SECONDS: '3600'
+          METRICS_S3_PREFIX: 'rds_pi_data_hourly'
+
+  EventRuleHourly:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ResourcePrefix}RDSMultitenant-Hourly"
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RDSPerformanceInsightsFnHourly.Arn
+          Id: RDSPerformanceInsightsTarget
+
+  EventRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RDSPerformanceInsightsFnHourly
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRuleHourly.Arn
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: rds_performance_insights_db
+        Description: Database for RDS Performance Insights data
+
+  RDSPIDataTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: rds_pi_data
+        PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: metric
+              Type: string
+            - Name: resourcearn
+              Type: string
+            - Name: instance_id
+              Type: string
+            - Name: num_vcpus
+              Type: double
+            - Name: db.user.name
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: value
+              Type: double
+          Location: !Sub "s3://${RdsMetricsBucket}/rds_pi_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  RDSPIDataTableHourly:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: rds_pi_data_hourly
+        PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: metric
+              Type: string
+            - Name: resourcearn
+              Type: string
+            - Name: instance_id
+              Type: string
+            - Name: num_vcpus
+              Type: double
+            - Name: db.user.name
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: value
+              Type: double
+          Location: !Sub "s3://${RdsMetricsBucket}/rds_pi_data_hourly/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+  PerformanceInsightsRDSCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawler"
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${RdsMetricsBucket}/rds_pi_data/"
+      Schedule:
+        ScheduleExpression: cron(50 */12 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  PerformanceInsightsRDSCrawlerHourly:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${RdsMetricsBucket}/rds_pi_data_hourly/"
+      Schedule:
+        ScheduleExpression: cron(50 */12 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  AthenaViewsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}RDSMultitenant-Athena-Role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: AthenaAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:CreateWorkGroup
+                  - athena:GetWorkGroup
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/*"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${DatabaseName}/*"
+
+  CreateAthenaViewsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ResourcePrefix}RDSMultitenant-Views"
+      Handler: rds_multitenant_views.handler
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 256
+      Role: !GetAtt AthenaViewsLambdaRole.Arn
+      Code:
+        S3Bucket: !Ref DestinationBucket
+        S3Key: source/rds-multitenant/rds_multitenant_views.zip
+      Environment:
+        Variables:
+          GLUE_DATABASE_NAME: !Ref GlueDatabase
+          CUR_DATABASE_NAME: !Ref DatabaseName
+          CUR_TABLE_NAME: cur_report
+
+  CreateAthenaViewsCustomResource:
+    Type: Custom::CreateAthenaViews
+    Properties:
+      ServiceToken: !GetAtt CreateAthenaViewsLambda.Arn
+      Version: '1.0'
+
+Outputs:
+  RdsMetricsBucket:
+    Description: S3 bucket for RDS metrics
+    Value: !Ref RdsMetricsBucket
+
+  GlueDatabaseName:
+    Description: Glue database for RDS Performance Insights data
+    Value: !Ref GlueDatabase
