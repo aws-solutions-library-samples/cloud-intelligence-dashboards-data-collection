@@ -13,7 +13,7 @@ This readme contains description of solutions for AWS Data Exports and Legacy CU
 
 ## Data Exports
 
-For deployment instructions, please refer to the documentation at: https://catalog.workshops.aws/awscid/data-exports.  
+For deployment instructions, please refer to the documentation at: https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html.
 
 Check code here: [data-exports-aggregation.yaml](deploy/data-exports-aggregation.yaml)
 

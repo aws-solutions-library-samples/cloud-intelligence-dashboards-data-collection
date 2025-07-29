@@ -2,7 +2,7 @@
 
 ### About
 
-This plugin is aimed at augmenting the exerience of the AWS Support Cases Radar which is part of the [Cloud Intelligence Dashboards Framework](https://catalog.workshops.aws/awscid) by leveraging Generative AI powered by Amazon Bedrock to summarize AWS Support Case Communications and help customers achieve operation excellence.
+This plugin is aimed at augmenting the exerience of the AWS Support Cases Radar which is part of the [Cloud Intelligence Dashboards Framework](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards) by leveraging Generative AI powered by Amazon Bedrock to summarize AWS Support Case Communications and help customers achieve operation excellence.
 
 This plugin contains the following elements:
 * [case-summarization](README.md) - a CloudFormation Template for deploying the AWS Support Case Summarization Plugin that integrates seamlessly with the Data Collection Framework.
