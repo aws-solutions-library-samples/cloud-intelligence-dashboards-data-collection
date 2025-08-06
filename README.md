@@ -1,21 +1,26 @@
 ## Cloud Intelligence Dashboards - Data Collection
 
 ## Table of Contents
-1. [Overview](#Overview)
-1. [Architecture of Data Exports](#Architecture-of-Data-Exports)
-1. [Architecture of Data Collection](#Architecture-of-Data-Collection)
-1. [Cost](#Cost)
-1. [Prerequisites](#Prerequisites)
-1. [Regions](#Regions)
-1. [Deployment and Cleanup Steps](#Deployment-and-Cleanup-Steps)
-1. [Changelogs](#Changelogs)
-1. [Feedback](#Feedback)
-1. [Security](#Security)
-1. [License](#License)
-1. [Notices](#Notices)
+- [Cloud Intelligence Dashboards - Data Collection](#cloud-intelligence-dashboards---data-collection)
+- [Table of Contents](#table-of-contents)
+- [Overview](#overview)
+  - [Other AWS Services](#other-aws-services)
+  - [Multi-cloud data](#multi-cloud-data)
+- [Architecture of Data Exports](#architecture-of-data-exports)
+- [Architecture of Data Collection](#architecture-of-data-collection)
+- [Cost](#cost)
+- [Prerequisites](#prerequisites)
+- [Regions](#regions)
+- [Deployment and Cleanup Steps](#deployment-and-cleanup-steps)
+- [Changelogs](#changelogs)
+- [Feedback](#feedback)
+- [Contribution](#contribution)
+- [Security](#security)
+- [License](#license)
+- [Notices](#notices)
 
 ## Overview
-This repository is a part of [Cloud Intelligence Dashboards](https://catalog.workshops.aws/awscid), a project that provides AWS customers with a series of in-depth and customizable dashboards for the most comprehensive cost and usage details to help optimize cost, track usage goals, and achieve operational excellence.
+This repository is a part of [Cloud Intelligence Dashboards](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/), a project that provides AWS customers with a series of in-depth and customizable dashboards for the most comprehensive cost and usage details to help optimize cost, track usage goals, and achieve operational excellence.
 
 This repository contains following elements:
 * [data-exports](/data-exports) - a Cloud Formation Templates for AWS Data Exports, such as Cost and Usage Report 2.0 and others. This allows a replication of Exports from your Management Account(s) to a Dedicated Data Collection Accounts as well as aggregation of multiple Exports from a set of Linked Accounts.
@@ -123,7 +128,7 @@ Reference to folders.
 Check [Releases](/../../releases)
 
 ## Feedback
-Please reference to [this page](https://catalog.workshops.aws/awscid/en-US/feedback-support)
+Please reference to [this page](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/feedback-support.html)
 
 ## Contribution
 See [CONTRIBUTING](CONTRIBUTING.md) for more information.
