@@ -204,7 +204,7 @@ Resources:
 
                                   # Collect metrics for this instance
                                   region_metrics[region].extend(
-                                      process_metrics(instance_id, instance_arn, metrics, region)
+                                      process_metrics(instance_id, instance_arn, metrics, region, engine)
                                   )
                               else:
                                   print(f"Performance Insights not enabled for instance {instance_id} in {region}")
@@ -280,7 +280,7 @@ Resources:
               return response['MetricList']
 
 
-          def process_metrics(instance_id, instance_arn, metrics, region):
+          def process_metrics(instance_id, instance_arn, metrics, region, engine):
               all_flattened_metrics = []
               num_cpus = ''
 
@@ -312,6 +312,7 @@ Resources:
                           "metric": metric["Key"]["Metric"],
                           "resourcearn": instance_arn,
                           "instance_id": instance_id,
+                          "engine": engine,
                           "num_vcpus": num_cpus,
                           "dimension_type": dimension_type,
                           "db_user_name": dimensions.get('db.user.name', None),
@@ -572,6 +573,7 @@ Resources:
                               b.timestamp,
                               b.account_id, 
                               b.resourcearn,
+                              b.engine,
                               b.num_vcpus,
                               b.dimension_type,
                               CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
