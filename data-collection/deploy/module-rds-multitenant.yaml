@@ -194,12 +194,13 @@ Resources:
                           for instance in rds_instances:
                               instance_id = instance['DbiResourceId']
                               instance_arn = instance['DBInstanceArn']
-                              print(f"Processing metrics for instance {instance_arn} in region {region}")
+                              engine = instance.get('Engine', '')
+                              print(f"Processing metrics for instance {instance_arn} (engine: {engine}) in region {region}")
 
                               # Check if Performance Insights is enabled
                               if instance.get('PerformanceInsightsEnabled', False):
                                   # Get Performance Insights metrics
-                                  metrics = get_performance_metrics(pi_client, instance_id)
+                                  metrics = get_performance_metrics(pi_client, instance_id, engine)
 
                                   # Collect metrics for this instance
                                   region_metrics[region].extend(
@@ -234,26 +235,43 @@ Resources:
               return instances
 
 
-          def get_performance_metrics(pi_client, instance_id):
+          def should_collect_database_metrics(engine):
+              excluded_engines = ['oracle-ee', 'oracle-se2', 'oracle-se1', 'oracle-se', 
+                                'sqlserver-ee', 'sqlserver-se', 'sqlserver-ex', 'sqlserver-web']
+              return engine.lower() not in excluded_engines
+
+          def get_performance_metrics(pi_client, instance_id, engine):
               current_time = datetime.utcnow()
               end_time = current_time.replace(minute=0, second=0, microsecond=0)
               start_time = end_time - timedelta(hours=hour_delta)
 
+              metric_queries = [
+                  {
+                      'Metric': 'os.general.numVCPUs.avg'
+                  },
+                  {
+                      'Metric': 'db.load.avg',
+                      'GroupBy': {
+                          'Group': 'db.user',
+                          'Dimensions': ['db.user.name']
+                      }
+                  }
+              ]
+              
+              # Add database dimension query if engine supports it
+              if should_collect_database_metrics(engine):
+                  metric_queries.append({
+                      'Metric': 'db.load.avg',
+                      'GroupBy': {
+                          'Group': 'db',
+                          'Dimensions': ['db.name']
+                      }
+                  })
+
               response = pi_client.get_resource_metrics(
                   ServiceType='RDS',
                   Identifier=instance_id,
-                  MetricQueries=[
-                      {
-                          'Metric': 'os.general.numVCPUs.avg'
-                      },
-                      {
-                          'Metric': 'db.load.avg',
-                          'GroupBy': {
-                              'Group': 'db.user',
-                              'Dimensions': ['db.user.name']
-                          }
-                      },
-                  ],
+                  MetricQueries=metric_queries,
                   StartTime=start_time,
                   EndTime=end_time,
                   PeriodInSeconds=metrics_period_in_seconds
@@ -280,13 +298,25 @@ Resources:
                               break
 
                   if "Dimensions" in metric["Key"]:
+                      dimensions = metric["Key"]["Dimensions"]
+                      
+                      # Determine dimension type based on available dimensions
+                      if 'db.user.name' in dimensions:
+                          dimension_type = 'user'
+                      elif 'db.name' in dimensions:
+                          dimension_type = 'database'
+                      else:
+                          dimension_type = 'unknown'
+                      
                       base_entry = {
                           "metric": metric["Key"]["Metric"],
                           "resourcearn": instance_arn,
                           "instance_id": instance_id,
-                          "num_vcpus": num_cpus
+                          "num_vcpus": num_cpus,
+                          "dimension_type": dimension_type,
+                          "db_user_name": dimensions.get('db.user.name', None),
+                          "db_database_name": dimensions.get('db.name', None)
                       }
-                      base_entry.update(metric["Key"]["Dimensions"])
 
                       for datapoint in metric["DataPoints"]:
                           flattened_entry = base_entry.copy()
@@ -530,28 +560,31 @@ Resources:
                               SELECT 
                                   timestamp,
                                   resourcearn,
+                                  dimension_type,
                                   AVG(num_vcpus) AS num_vcpus,
                                   SUM(value) AS total_db_load,
                                   greatest(AVG(num_vcpus), SUM(value)) total_compute_power,
-                                  count(1) AS num_users
+                                  count(1) AS num_entities
                               FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" 
-                              GROUP BY 1, 2
+                              GROUP BY 1, 2, 3
                           ) 
                           SELECT 
                               b.timestamp,
                               b.account_id, 
                               b.resourcearn,
                               b.num_vcpus,
-                              b."db.user.name"    as user_name, 
+                              b.dimension_type,
+                              CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
+                              CASE WHEN b.dimension_type = 'database' THEN b.db_database_name END as database_name,
                               b.value db_load, 
                               a.total_db_load,
                               a.total_compute_power,
-                              a.num_users distinct_users,
+                              a.num_entities,
                               case when a.total_db_load = 0 then 0 else  b.value / a.total_db_load end AS perc_utilization,
                               (b.value / a.total_compute_power) perc_utilization_rebased
-                          FROM aggregate_load_data a 
-                          JOIN "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" b
-                              ON a.timestamp = b.timestamp AND a.resourcearn = b.resourcearn
+                          FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" b
+                          JOIN aggregate_load_data a 
+                              ON a.timestamp = b.timestamp AND a.resourcearn = b.resourcearn AND a.dimension_type = b.dimension_type
                       """
                       
                       response = athena.start_query_execution(
