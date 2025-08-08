@@ -33,6 +33,7 @@ Metadata:
           - IncludeLicenseManagerModule
           - IncludeServiceQuotasModule
           - IncludeResilienceHubModule
+          - IncludeRdsMultitenantModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -191,6 +192,11 @@ Parameters:
     Description: Collects Resilience Hub information
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRdsMultitenantModule:
+    Type: String
+    Description: Collects RDS Performance Insights data for multi-tenant cost allocation
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployModuleReadInMgmt: !Equals [!Ref AllowModuleReadInMgmt, "yes"]
 
@@ -230,6 +236,7 @@ Resources:
         IncludeTransitGatewayModule: !Ref IncludeTransitGatewayModule
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
+
         
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
@@ -272,6 +279,8 @@ Resources:
           ParameterValue: !Ref IncludeServiceQuotasModule
         - ParameterKey: IncludeResilienceHubModule
           ParameterValue: !Ref IncludeResilienceHubModule
+        - ParameterKey: IncludeRdsMultitenantModule
+          ParameterValue: !Ref IncludeRdsMultitenantModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]

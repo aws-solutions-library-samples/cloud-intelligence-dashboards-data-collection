@@ -22,6 +22,7 @@ Metadata:
         - IncludeTransitGatewayModule
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
+        - IncludeRdsMultitenantModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -49,6 +50,8 @@ Metadata:
         default: 'Include Service Quotas Module'
       IncludeResilienceHubModule:
         default: 'Include Resilience Hub Module'
+      IncludeRdsMultitenantModule:
+        default: 'Include RDS Multitenant Module'
 
 Parameters:
   DataCollectionAccountID:
@@ -112,6 +115,11 @@ Parameters:
     Description: Collects Resilience Hub data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRdsMultitenantModule:
+    Type: String
+    Description: Collects RDS Performance Insights data for multi-tenant cost allocation
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -124,6 +132,7 @@ Conditions:
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
+  IncludeRdsMultitenantModulePolicy:     !Equals [!Ref IncludeRdsMultitenantModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -155,6 +164,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}support-cases-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}RDSMultitenant-Lambda-Role"
       Path: /
     Metadata:
       cfn_nag:
@@ -458,6 +468,31 @@ Resources:
               - "resiliencehub:DescribeResiliencyPolicy"
               - "resiliencehub:ListAppVersionResources"
             Resource: "*" # Wildcard required as actions do not support   resource-level permissions
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of resources"
+  # RDS Multitenant policy
+  RdsMultitenantPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeRdsMultitenantModulePolicy
+    Properties:
+      PolicyName: RdsMultitenantPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "rds:DescribeDBInstances"
+            Resource: !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:*"
+          - Effect: "Allow"
+            Action:
+              - "pi:GetResourceMetrics"
+              - "ec2:DescribeRegions"
+            Resource: "*"
       Roles:
         - Ref: LambdaRole
     Metadata:
