@@ -1,5 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'RDS Multi-Tenant Cost Visibility Module'
+Description: |
+  RDS Multi-Tenant Cost Visibility Module
+  Collects CloudWatch Database Insights metrics to enable cost allocation for multi-tenant RDS instances.
+  Supports both user-level and database-level metric collection across all RDS engines.
 
 Parameters:
   DatabaseName:
@@ -68,6 +71,7 @@ Parameters:
     Description: Arn of the Account Collector Lambda
 
 Resources:
+  # IAM Role for the Lambda function to collect CloudWatch Database Insights metrics
   RDSMetricsLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -110,6 +114,7 @@ Resources:
                   - s3:PutObject
                 Resource: !Sub "${DestinationBucketARN}/*"
 
+  # Lambda function that collects CloudWatch Database Insights metrics for multi-tenant cost allocation
   RDSPerformanceInsightsFnHourly:
     Type: AWS::Lambda::Function
     Properties:
@@ -152,6 +157,10 @@ Resources:
 
 
           def lambda_handler(event, context):
+              """
+              Main Lambda handler for collecting CloudWatch Database Insights metrics from RDS instances.
+              Enables multi-tenant cost allocation by collecting db.load metrics by user and database dimensions.
+              """
               if 'account' not in event:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
@@ -164,7 +173,7 @@ Resources:
                   account_name = account["account_name"]
                   payer_id = account["payer_id"]
                   
-                  print(f"Collecting RDS Performance Insights data for account: {account_id}")
+                  print(f"Collecting CloudWatch Database Insights data for account: {account_id}")
                   
                   # Get all active AWS regions
                   ec2_client = boto3.client('ec2')
@@ -236,21 +245,31 @@ Resources:
 
 
           def should_collect_database_metrics(engine):
+              """
+              Determines if database dimension metrics are supported for the given engine.
+              Oracle and SQL Server engines don't support db.name dimension in CloudWatch Database Insights.
+              https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.UsingDashboard.Components.html#USER_PerfInsights.UsingDashboard.Components.AvgActiveSessions
+              """
               excluded_engines = ['oracle-ee', 'oracle-se2', 'oracle-se1', 'oracle-se', 
                                 'sqlserver-ee', 'sqlserver-se', 'sqlserver-ex', 'sqlserver-web']
               return engine.lower() not in excluded_engines
 
           def get_performance_metrics(pi_client, instance_id, engine):
+              """
+              Retrieves CloudWatch Database Insights metrics for the specified RDS instance.
+              Collects CPU metrics and db.load metrics grouped by user and database dimensions.
+              """
               current_time = datetime.utcnow()
-              end_time = current_time.replace(minute=0, second=0, microsecond=0)
+              end_time = current_time.replace(minute=0, second=0, microsecond=0)  # Round to top of hour
               start_time = end_time - timedelta(hours=hour_delta)
 
+              # Base metrics: CPU utilization (no dimensions)
               metric_queries = [
                   {
-                      'Metric': 'os.general.numVCPUs.avg'
+                      'Metric': 'os.general.numVCPUs.avg'  # Used for cost allocation calculations
                   },
                   {
-                      'Metric': 'db.load.avg',
+                      'Metric': 'db.load.avg',  # Database load by user (tenant)
                       'GroupBy': {
                           'Group': 'db.user',
                           'Dimensions': ['db.user.name']
@@ -258,10 +277,11 @@ Resources:
                   }
               ]
               
-              # Add database dimension query if engine supports it
+              # Add database dimension if supported by engine
+              # Oracle and SQL Server don't support database-level grouping
               if should_collect_database_metrics(engine):
                   metric_queries.append({
-                      'Metric': 'db.load.avg',
+                      'Metric': 'db.load.avg',  # Database load by database name
                       'GroupBy': {
                           'Group': 'db',
                           'Dimensions': ['db.name']
@@ -281,6 +301,10 @@ Resources:
 
 
           def process_metrics(instance_id, instance_arn, metrics, region, engine):
+              """
+              Processes CloudWatch Database Insights metrics and flattens them for storage.
+              Creates records for each metric data point with proper dimension mapping.
+              """
               all_flattened_metrics = []
               num_cpus = ''
 
@@ -288,35 +312,37 @@ Resources:
               print(f"Total metrics received: {len(metrics)}")
 
               for metric in metrics:
-                  # Debug print for each metric
                   print(f"Processing metric: {metric['Key']['Metric']}")
 
+                  # Extract CPU count for cost allocation calculations
                   if metric["Key"]["Metric"] == 'os.general.numVCPUs.avg':
                       for datapoint in metric["DataPoints"]:
                           num_cpus = datapoint.get("Value", 0)
                           if num_cpus != '':
                               break
 
+                  # Process metrics with dimensions (user or database level)
                   if "Dimensions" in metric["Key"]:
                       dimensions = metric["Key"]["Dimensions"]
                       
-                      # Determine dimension type based on available dimensions
+                      # Determine dimension type for multi-tenant cost allocation
                       if 'db.user.name' in dimensions:
-                          dimension_type = 'user'
+                          dimension_type = 'user'      # Cost allocation by database user
                       elif 'db.name' in dimensions:
-                          dimension_type = 'database'
+                          dimension_type = 'database'  # Cost allocation by database name
                       else:
                           dimension_type = 'unknown'
                       
+                      # Create base record with all metadata
                       base_entry = {
                           "metric": metric["Key"]["Metric"],
                           "resourcearn": instance_arn,
                           "instance_id": instance_id,
-                          "engine": engine,
-                          "num_vcpus": num_cpus,
-                          "dimension_type": dimension_type,
-                          "db_user_name": dimensions.get('db.user.name', None),
-                          "db_database_name": dimensions.get('db.name', None)
+                          "engine": engine,                    # Database engine type
+                          "num_vcpus": num_cpus,              # For cost calculations
+                          "dimension_type": dimension_type,   # user|database|unknown
+                          "db_user_name": dimensions.get('db.user.name', None),     # Tenant user
+                          "db_database_name": dimensions.get('db.name', None)       # Database name
                       }
 
                       for datapoint in metric["DataPoints"]:
@@ -347,14 +373,17 @@ Resources:
               )
 
           def write_metrics_to_s3(s3_client, region_metrics, account_id, payer_id):
-
-              # Group metrics by their individual timestamps
+              """
+              Writes collected metrics to S3 in Parquet format with proper partitioning.
+              Groups metrics by timestamp and stores them in hourly partitions for efficient querying.
+              """
+              # Process metrics for each region
               for region, metrics in region_metrics.items():
                   if not metrics:
                       print(f"No metrics to process for region {region}")
                       continue
 
-                  # Group metrics by their unique timestamp keys
+                  # Group metrics by hourly timestamps for efficient storage
                   timestamp_grouped_metrics = {}
                   for metric in metrics:
                       timestamp = datetime.strptime(metric['timestamp'], "%Y-%m-%d %H:%M:%S%z")
@@ -363,7 +392,7 @@ Resources:
                       day = timestamp.strftime('%d')
                       hour = timestamp.strftime('%H')
 
-                      # Create a unique key for each timestamp
+                      # Create partition key for S3 organization
                       timestamp_key = f"{year}/{month}/{day}/{hour}"
                       
                       if timestamp_key not in timestamp_grouped_metrics:
@@ -371,25 +400,25 @@ Resources:
                       
                       timestamp_grouped_metrics[timestamp_key].append(metric)
 
-                  # Write metrics for each unique timestamp
+                  # Write each hourly batch to S3 as separate Parquet files
                   for timestamp_key, grouped_metrics in timestamp_grouped_metrics.items():
                       year, month, day, hour = timestamp_key.split('/')
 
-                      # Create S3 key for this specific timestamp group with payer_id partitioning
+                      # S3 key with Hive-style partitioning for Athena compatibility
                       s3_key = f"{metrics_s3_prefix}/payer_id={payer_id}/account_id={account_id}/region={region}/year={year}/month={month}/day={day}/hour={hour}/metrics.parquet"
 
                       print(f"Writing metrics to S3 key: {s3_key}")
                       print(f"Total number of metrics: {len(grouped_metrics)}")
 
-                      # Convert to Arrow table
+                      # Convert to Apache Arrow table for efficient Parquet storage
                       table = pa.Table.from_pylist(grouped_metrics)
 
-                      # Write to Parquet format
+                      # Serialize to Parquet format in memory
                       buf = BytesIO()
                       pq.write_table(table, buf)
                       buf.seek(0)
 
-                      # Upload to S3
+                      # Upload to S3 bucket
                       s3_client.put_object(
                           Bucket=os.environ['METRICS_BUCKET'],
                           Key=s3_key,
@@ -403,6 +432,7 @@ Resources:
           METRICS_S3_PREFIX: 'rds-multitenant'
           ROLENAME: !Ref MultiAccountRoleName
 
+  # EventBridge Scheduler to run the data collection hourly
   ModuleRefreshSchedule:
     Type: 'AWS::Scheduler::Schedule'
     Properties:
@@ -418,13 +448,14 @@ Resources:
         RoleArn: !Ref SchedulerExecutionRoleARN
         Input: !Sub '{"module_lambda":"${RDSPerformanceInsightsFnHourly.Arn}","crawlers": ["${ResourcePrefix}PerformanceInsightsRDSCrawler", "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"]}'
 
+  # Glue Database to store CloudWatch Database Insights table metadata
   GlueDatabase:
     Type: AWS::Glue::Database
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
         Name: rds_performance_insights_db
-        Description: Database for RDS Performance Insights data
+        Description: Database for CloudWatch Database Insights multi-tenant cost allocation data
 
 
 
@@ -452,6 +483,7 @@ Resources:
                   - s3:PutObject
                 Resource: !Sub "${DestinationBucketARN}/*"
 
+  # Glue Crawler to automatically discover and catalog the Parquet data schema
   PerformanceInsightsRDSCrawler:
     Type: AWS::Glue::Crawler
     Properties:
@@ -527,6 +559,7 @@ Resources:
                   - !Sub "${DestinationBucketARN}"
                   - !Sub "${DestinationBucketARN}/*"
 
+  # Lambda function to create Athena views for cost allocation analysis
   CreateAthenaViewsLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -644,6 +677,7 @@ Resources:
       GlueDatabase: !Ref GlueDatabase
       S3OutputLocation: !Sub 's3://${DestinationBucket}/athena_output/'
 
+  # Step Function to orchestrate the data collection workflow across accounts
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:
