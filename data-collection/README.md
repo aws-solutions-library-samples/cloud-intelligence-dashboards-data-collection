@@ -44,7 +44,7 @@ List of modules and objects collected:
 | `quicksight`                 |  [Amazon QuickSight](https://aws.amazon.com/quicksight/)    | Data Collection Account | Collects QuickSight User and Group information in the Data Collection Account only |
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
-| `rds-multitenant`           |  [Amazon RDS](https://aws.amazon.com/rds/) | Linked Accounts | Collects CloudWatch Database Insights metrics for multi-tenant RDS instances to enable cost allocation by tenant |
+| `rds-multitenant`           |  [Amazon RDS](https://aws.amazon.com/rds/) | Data Collection Account | Collects CloudWatch Database Insights metrics for multi-tenant RDS instances to enable cost allocation by tenant |
 
 ### Deployment Overview
 
