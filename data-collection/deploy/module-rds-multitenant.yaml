@@ -175,9 +175,14 @@ Resources:
                   
                   print(f"Collecting CloudWatch Database Insights data for account: {account_id}")
                   
-                  # Get all active AWS regions
-                  ec2_client = boto3.client('ec2')
-                  regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+                  # Get regions in scope from environment variable
+                  regions_in_scope = os.environ.get('REGIONS_IN_SCOPE', '')
+                  if regions_in_scope:
+                      regions = [region.strip() for region in regions_in_scope.split(',') if region.strip()]
+                  else:
+                      # Fallback to all regions if none specified
+                      ec2_client = boto3.client('ec2')
+                      regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
                   
                   # Create S3 client
                   s3_client = boto3.client('s3')
@@ -431,6 +436,7 @@ Resources:
           METRICS_PERIOD_IN_SECONDS: '3600'
           METRICS_S3_PREFIX: 'rds-multitenant'
           ROLENAME: !Ref MultiAccountRoleName
+          REGIONS_IN_SCOPE: !Ref RegionsInScope
 
   # EventBridge Scheduler to run the data collection hourly
   ModuleRefreshSchedule:
