@@ -602,7 +602,7 @@ Resources:
     Type: AWS::Lambda::Function
     Condition: DeployWriteBlocker
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       Handler: index.lambda_handler
       FunctionName: !Sub ${ResourcePrefix}-CID-WriteBlocker
       Role: !GetAtt BucketWriteBlockerLambdaRole.Arn
@@ -919,7 +919,7 @@ Resources:
       FunctionName: !Sub "${ResourcePrefix}-CreateServiceLinkedRoleFunction"
       Handler: index.handler
       MemorySize: 128
-      Runtime: python3.12
+      Runtime: python3.13
       Timeout: 90
       Role: !GetAtt LambdaServiceLinkedRoleExecutionRole.Arn
       Code:
@@ -1144,7 +1144,7 @@ Resources:
     Type: AWS::Lambda::Function
     Condition: DeployAnyExportViaLambda
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}-DataExportCreator
       Handler: index.lambda_handler
       MemorySize: 128
@@ -1873,7 +1873,7 @@ Resources:
   CidLambdaAnalytics:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}-CID-Analytics-DataExports
       Handler: index.lambda_handler
       MemorySize: 128
