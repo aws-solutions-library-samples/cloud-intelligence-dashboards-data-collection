@@ -424,8 +424,12 @@ Resources:
                       # Get CloudWatch metrics if payload specified
                       usage_metrics = {}
                       if payload:
-                          # Filter quotas for specified services
-                          filtered_quotas = [q for q in all_quotas if q.get('ServiceCode') in payload]
+                          # Check if payload contains "*" for all services
+                          if "*" in payload:
+                              filtered_quotas = all_quotas
+                          else:
+                              # Filter quotas for specified services
+                              filtered_quotas = [q for q in all_quotas if q.get('ServiceCode') in payload]
                           
                           if filtered_quotas:
                               # Prepare CloudWatch metric queries in parallel
