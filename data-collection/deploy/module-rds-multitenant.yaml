@@ -177,12 +177,7 @@ Resources:
                   
                   # Get regions in scope from environment variable
                   regions_in_scope = os.environ.get('REGIONS_IN_SCOPE', '')
-                  if regions_in_scope:
-                      regions = [region.strip() for region in regions_in_scope.split(',') if region.strip()]
-                  else:
-                      # Fallback to all regions if none specified
-                      ec2_client = boto3.client('ec2')
-                      regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+                  regions = [region.strip() for region in regions_in_scope.split(',') if region.strip()]
                   
                   # Create S3 client
                   s3_client = boto3.client('s3')
