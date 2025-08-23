@@ -50,6 +50,9 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
 
 Outputs:
   StepFunctionARN:
@@ -244,11 +247,9 @@ Resources:
                   # Get all checks metadata first for dynamic field mapping
                   checks_metadata = {}
                   try:
-                      checks_response = trustedadvisor.get_paginator('list_checks').paginate()
-                      for page in checks_response:
-                          for check in page.get('checkSummaries', []):
-                              # Store metadata dictionary for each check ARN
-                              checks_metadata[check['arn']] = check.get('metadata', {})
+                      for check in trustedadvisor.get_paginator('list_checks').paginate().search('checkSummaries'):
+                          # Store metadata dictionary for each check ARN
+                          checks_metadata[check['arn']] = check.get('metadata', {})
                   except Exception as e:
                       print(f"Warning: Could not fetch checks metadata: {str(e)}")
                       checks_metadata = {}
@@ -367,10 +368,9 @@ Resources:
 
   # Add glue table based on existing TAO columns
   TADataTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: trusted_advisor_data
         TableType: EXTERNAL_TABLE
@@ -895,10 +895,9 @@ Resources:
 
   # Add glue table for trusted advisor priority data
   TAPriorityTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: trusted_advisor_priority_data
         TableType: EXTERNAL_TABLE
