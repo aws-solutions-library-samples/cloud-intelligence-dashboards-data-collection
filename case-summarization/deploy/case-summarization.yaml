@@ -223,7 +223,7 @@ Resources:
     Properties:
       FunctionName: !Sub ${ResourcePrefix}support-case-summarization-Lambda
       Description: "Lambda function to summarize aws support cases"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Code:
         ZipFile: |

@@ -125,7 +125,7 @@ Resources:
       Description: "LambdaFunction to start resilience export jobs"
       Role: !GetAtt LambdaFunctionRole.Arn
       Handler: index.lambda_handler
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       MemorySize: 2688
       Timeout: 900

@@ -99,7 +99,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Whats-New-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName} What's New"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [arm64]
       Code:
         ZipFile: |
@@ -266,7 +266,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Blog-Post-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName} Blog Posts"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [arm64]
       Code:
         ZipFile: |
@@ -394,7 +394,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-YouTube-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName} AWS YouTube Videos"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [arm64]
       Code:
         ZipFile: |
@@ -540,7 +540,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-SecurityBulletin-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName} AWS Security Bulletin"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [arm64]
       Code:
         ZipFile: |

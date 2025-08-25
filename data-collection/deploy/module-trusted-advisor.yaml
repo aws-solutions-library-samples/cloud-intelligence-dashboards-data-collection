@@ -118,7 +118,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName}"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Code:
         ZipFile: |
