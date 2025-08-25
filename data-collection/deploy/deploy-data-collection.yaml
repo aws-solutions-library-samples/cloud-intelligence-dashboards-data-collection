@@ -41,7 +41,8 @@ Metadata:
           - IncludeServiceQuotasModule
           - IncludeEUCUtilizationModule
           - IncludeResilienceHubModule
-          - IncludeReferenceModule          
+          - IncludeReferenceModule
+          - IncludeRdsMultitenantModule
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -294,6 +295,11 @@ Parameters:
     Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRdsMultitenantModule:
+    Type: String
+    Description: Collects RDS Performance Insights data for multi-tenant cost allocation
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -315,6 +321,7 @@ Conditions:
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
+  DeployRdsMultitenantModule: !Equals [ !Ref IncludeRdsMultitenantModule, "yes"]
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -340,6 +347,7 @@ Conditions:
       - !Condition DeployServiceQuotasModule
       - !Condition DeployEUCUtilizationModule 
       - !Condition DeployComputeOptimizerModule
+      - !Condition DeployRdsMultitenantModule
   RegionsInScopeIsEmpty: !Equals
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
@@ -1521,6 +1529,32 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
         StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        RegionsInScope:
+          Fn::If:
+            - RegionsInScopeIsEmpty
+            - !Sub "${AWS::Region}"
+            - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
+            
+  RdsMultitenantModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployRdsMultitenantModule
+    Properties:
+      TemplateURL: "https://dcoccia-test-static-website.s3.eu-central-1.amazonaws.com/module-rds-multitenant.yaml" 
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        Schedule: !Ref Schedule
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         RegionsInScope:

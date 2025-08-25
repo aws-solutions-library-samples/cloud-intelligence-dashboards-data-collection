@@ -1,0 +1,712 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  RDS Multi-Tenant Cost Visibility Module
+  Collects CloudWatch Database Insights metrics to enable cost allocation for multi-tenant RDS instances.
+  Supports both user-level and database-level metric collection across all RDS engines.
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    AllowedPattern: ([a-z0-9_]*?$)
+    Default: optimization_data
+  
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+  
+  DestinationBucket:
+    Type: String
+    Description: S3 bucket for storing data
+  
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 bucket for storing data
+  
+  Schedule:
+    Type: String
+    Description: Schedule expression for the Lambda function
+    Default: rate(1 hour)
+  
+  GlueRoleARN:
+    Type: String
+    Description: ARN of the Glue role
+  
+  ResourcePrefix:
+    Type: String
+    Description: Prefix for resource names
+  
+  LambdaAnalyticsARN:
+    Type: String
+    Description: ARN of the Lambda Analytics function
+  
+  CodeBucket:
+    Type: String
+    Description: S3 bucket containing the code
+  
+  StepFunctionTemplate:
+    Type: String
+    Description: Path to the Step Function template
+  
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: ARN of the Step Function execution role
+  
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: ARN of the Scheduler execution role
+  
+  RegionsInScope:
+    Type: String
+    Description: Comma-delimited list of regions to collect data from
+    Default: ""
+  
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+
+Resources:
+  # IAM Role for the Lambda function to collect CloudWatch Database Insights metrics
+  RDSMetricsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}RDSMultitenant-Lambda-Role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: "AssumeMultiAccountRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: RDSMetricsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - pi:GetResourceMetrics
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeRegions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "${DestinationBucketARN}/*"
+
+  # Lambda function that collects CloudWatch Database Insights metrics for multi-tenant cost allocation
+  RDSPerformanceInsightsFnHourly:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ResourcePrefix}rds-multitenant-Lambda"
+      Handler: index.lambda_handler
+      Runtime: python3.13
+      Timeout: 300
+      MemorySize: 1024
+      Role: !GetAtt RDSMetricsLambdaRole.Arn
+      Code:
+        ZipFile: |
+          from io import BytesIO
+          from datetime import datetime
+          import boto3
+          from datetime import datetime, timedelta
+          import json
+          import os
+          import subprocess
+          import sys
+          from collections import defaultdict
+
+
+          def install_packages():
+              subprocess.check_call([sys.executable, "-m", "pip",
+                                    "install", "--target", "/tmp", "pyarrow"])
+              sys.path.append('/tmp')
+
+
+          install_packages()
+
+          import pyarrow as pa
+          import pyarrow.parquet as pq
+
+
+          metrics_period_in_seconds = int(os.environ['METRICS_PERIOD_IN_SECONDS'])
+          metrics_s3_prefix = os.environ['METRICS_S3_PREFIX']
+          # the number of hours to get performance insights data.
+          # default 1 hour, can be used to initially load past data
+          hour_delta = int(os.environ.get("DELTA_HOUR") or 1)
+
+
+          def lambda_handler(event, context):
+              """
+              Main Lambda handler for collecting CloudWatch Database Insights metrics from RDS instances.
+              Enables multi-tenant cost allocation by collecting db.load metrics by user and database dimensions.
+              """
+              if 'account' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually."
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              
+              try:
+                  account = json.loads(event["account"])
+                  account_id = account["account_id"]
+                  account_name = account["account_name"]
+                  payer_id = account["payer_id"]
+                  
+                  print(f"Collecting CloudWatch Database Insights data for account: {account_id}")
+                  
+                  # Get regions in scope from environment variable
+                  regions_in_scope = os.environ.get('REGIONS_IN_SCOPE', '')
+                  regions = [region.strip() for region in regions_in_scope.split(',') if region.strip()]
+                  
+                  # Create S3 client
+                  s3_client = boto3.client('s3')
+                  
+                  # Dictionary to accumulate metrics across all instances in a region
+                  region_metrics = {}
+                  
+                  # Iterate through all regions
+                  for region in regions:
+                      try:
+                          # Create region-specific RDS and Performance Insights clients using cross-account role
+                          rds_client = assume_role(account_id, 'rds', region)
+                          pi_client = assume_role(account_id, 'pi', region)
+                          
+                          # Get RDS instances in this region
+                          rds_instances = get_rds_instances(rds_client)
+                          
+                          # Initialize metrics for this region if not already present
+                          if region not in region_metrics:
+                              region_metrics[region] = []
+                          
+                          # Process each RDS instance
+                          for instance in rds_instances:
+                              instance_id = instance['DbiResourceId']
+                              instance_arn = instance['DBInstanceArn']
+                              engine = instance.get('Engine', '')
+                              print(f"Processing metrics for instance {instance_arn} (engine: {engine}) in region {region}")
+
+                              # Check if Performance Insights is enabled
+                              if instance.get('PerformanceInsightsEnabled', False):
+                                  # Get Performance Insights metrics
+                                  metrics = get_performance_metrics(pi_client, instance_id, engine)
+
+                                  # Collect metrics for this instance
+                                  region_metrics[region].extend(
+                                      process_metrics(instance_id, instance_arn, metrics, region, engine)
+                                  )
+                              else:
+                                  print(f"Performance Insights not enabled for instance {instance_id} in {region}")
+                      
+                      except Exception as e:
+                          print(f"Error processing region {region}: {str(e)}")
+              
+                  # Write accumulated metrics to S3
+                  write_metrics_to_s3(s3_client, region_metrics, account_id, payer_id)
+                  
+              except Exception as e:
+                  print(f"Error processing account {account_id}: {str(e)}")
+                  raise
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f'Processed RDS instances across {len(regions)} regions')
+              }
+
+
+          def get_rds_instances(rds_client):
+              instances = []
+              paginator = rds_client.get_paginator('describe_db_instances')
+
+              for page in paginator.paginate():
+                  instances.extend(page['DBInstances'])
+
+              return instances
+
+
+          def should_collect_database_metrics(engine):
+              """
+              Determines if database dimension metrics are supported for the given engine.
+              Oracle and SQL Server engines don't support db.name dimension in CloudWatch Database Insights.
+              https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.UsingDashboard.Components.html#USER_PerfInsights.UsingDashboard.Components.AvgActiveSessions
+              """
+              excluded_engines = ['oracle-ee', 'oracle-se2', 'oracle-se1', 'oracle-se', 
+                                'sqlserver-ee', 'sqlserver-se', 'sqlserver-ex', 'sqlserver-web']
+              return engine.lower() not in excluded_engines
+
+          def get_performance_metrics(pi_client, instance_id, engine):
+              """
+              Retrieves CloudWatch Database Insights metrics for the specified RDS instance.
+              Collects CPU metrics and db.load metrics grouped by user and database dimensions.
+              """
+              current_time = datetime.utcnow()
+              end_time = current_time.replace(minute=0, second=0, microsecond=0)  # Round to top of hour
+              start_time = end_time - timedelta(hours=hour_delta)
+
+              # Base metrics: CPU utilization (no dimensions)
+              metric_queries = [
+                  {
+                      'Metric': 'os.general.numVCPUs.avg'  # Used for cost allocation calculations
+                  },
+                  {
+                      'Metric': 'db.load.avg',  # Database load by user (tenant)
+                      'GroupBy': {
+                          'Group': 'db.user',
+                          'Dimensions': ['db.user.name']
+                      }
+                  }
+              ]
+              
+              # Add database dimension if supported by engine
+              # Oracle and SQL Server don't support database-level grouping
+              if should_collect_database_metrics(engine):
+                  metric_queries.append({
+                      'Metric': 'db.load.avg',  # Database load by database name
+                      'GroupBy': {
+                          'Group': 'db',
+                          'Dimensions': ['db.name']
+                      }
+                  })
+
+              response = pi_client.get_resource_metrics(
+                  ServiceType='RDS',
+                  Identifier=instance_id,
+                  MetricQueries=metric_queries,
+                  StartTime=start_time,
+                  EndTime=end_time,
+                  PeriodInSeconds=metrics_period_in_seconds
+              )
+
+              return response['MetricList']
+
+
+          def process_metrics(instance_id, instance_arn, metrics, region, engine):
+              """
+              Processes CloudWatch Database Insights metrics and flattens them for storage.
+              Creates records for each metric data point with proper dimension mapping.
+              """
+              all_flattened_metrics = []
+              num_cpus = ''
+
+              print(f"Processing metrics for instance {instance_id} in region {region}")
+              print(f"Total metrics received: {len(metrics)}")
+
+              for metric in metrics:
+                  print(f"Processing metric: {metric['Key']['Metric']}")
+
+                  # Extract CPU count for cost allocation calculations
+                  if metric["Key"]["Metric"] == 'os.general.numVCPUs.avg':
+                      for datapoint in metric["DataPoints"]:
+                          num_cpus = datapoint.get("Value", 0)
+                          if num_cpus != '':
+                              break
+
+                  # Process metrics with dimensions (user or database level)
+                  if "Dimensions" in metric["Key"]:
+                      dimensions = metric["Key"]["Dimensions"]
+                      
+                      # Determine dimension type for multi-tenant cost allocation
+                      if 'db.user.name' in dimensions:
+                          dimension_type = 'user'      # Cost allocation by database user
+                      elif 'db.name' in dimensions:
+                          dimension_type = 'database'  # Cost allocation by database name
+                      else:
+                          dimension_type = 'unknown'
+                      
+                      # Create base record with all metadata
+                      base_entry = {
+                          "metric": metric["Key"]["Metric"],
+                          "resourcearn": instance_arn,
+                          "instance_id": instance_id,
+                          "engine": engine,                    # Database engine type
+                          "num_vcpus": num_cpus,              # For cost calculations
+                          "dimension_type": dimension_type,   # user|database|unknown
+                          "db_user_name": dimensions.get('db.user.name', None),     # Tenant user
+                          "db_database_name": dimensions.get('db.name', None)       # Database name
+                      }
+
+                      for datapoint in metric["DataPoints"]:
+                          flattened_entry = base_entry.copy()
+                          flattened_entry.update({
+                              "timestamp": datapoint["Timestamp"].strftime("%Y-%m-%d %H:%M:%S%z"),
+                              "value": datapoint["Value"]
+                          })
+
+                          all_flattened_metrics.append(flattened_entry)
+
+              print(f"Total metrics processed for instance {instance_id}: {len(all_flattened_metrics)}")
+              return all_flattened_metrics
+
+
+          def assume_role(account_id, service, region):
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              role_name = os.environ['ROLENAME']
+              assumed = boto3.client('sts', region_name=region).assume_role(
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{role_name}",
+                  RoleSessionName='rds_multitenant_data_collection'
+              )
+              creds = assumed['Credentials']
+              return boto3.client(service, region_name=region,
+                  aws_access_key_id=creds['AccessKeyId'],
+                  aws_secret_access_key=creds['SecretAccessKey'],
+                  aws_session_token=creds['SessionToken']
+              )
+
+          def write_metrics_to_s3(s3_client, region_metrics, account_id, payer_id):
+              """
+              Writes collected metrics to S3 in Parquet format with proper partitioning.
+              Groups metrics by timestamp and stores them in hourly partitions for efficient querying.
+              """
+              # Process metrics for each region
+              for region, metrics in region_metrics.items():
+                  if not metrics:
+                      print(f"No metrics to process for region {region}")
+                      continue
+
+                  # Group metrics by hourly timestamps for efficient storage
+                  timestamp_grouped_metrics = {}
+                  for metric in metrics:
+                      timestamp = datetime.strptime(metric['timestamp'], "%Y-%m-%d %H:%M:%S%z")
+                      year = timestamp.strftime('%Y')
+                      month = timestamp.strftime('%m')
+                      day = timestamp.strftime('%d')
+                      hour = timestamp.strftime('%H')
+
+                      # Create partition key for S3 organization
+                      timestamp_key = f"{year}/{month}/{day}/{hour}"
+                      
+                      if timestamp_key not in timestamp_grouped_metrics:
+                          timestamp_grouped_metrics[timestamp_key] = []
+                      
+                      timestamp_grouped_metrics[timestamp_key].append(metric)
+
+                  # Write each hourly batch to S3 as separate Parquet files
+                  for timestamp_key, grouped_metrics in timestamp_grouped_metrics.items():
+                      year, month, day, hour = timestamp_key.split('/')
+
+                      # S3 key with Hive-style partitioning for Athena compatibility
+                      s3_key = f"{metrics_s3_prefix}/payer_id={payer_id}/account_id={account_id}/region={region}/year={year}/month={month}/day={day}/hour={hour}/metrics.parquet"
+
+                      print(f"Writing metrics to S3 key: {s3_key}")
+                      print(f"Total number of metrics: {len(grouped_metrics)}")
+
+                      # Convert to Apache Arrow table for efficient Parquet storage
+                      table = pa.Table.from_pylist(grouped_metrics)
+
+                      # Serialize to Parquet format in memory
+                      buf = BytesIO()
+                      pq.write_table(table, buf)
+                      buf.seek(0)
+
+                      # Upload to S3 bucket
+                      s3_client.put_object(
+                          Bucket=os.environ['METRICS_BUCKET'],
+                          Key=s3_key,
+                          Body=buf.getvalue()
+                      )
+                      print(f"Successfully wrote metrics to {s3_key}")
+      Environment:
+        Variables:
+          METRICS_BUCKET: !Ref DestinationBucket
+          METRICS_PERIOD_IN_SECONDS: '3600'
+          METRICS_S3_PREFIX: 'rds-multitenant'
+          ROLENAME: !Ref MultiAccountRoleName
+          REGIONS_IN_SCOPE: !Ref RegionsInScope
+
+  # EventBridge Scheduler to run the data collection hourly
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC RDS Multitenant module'
+      Name: !Sub '${ResourcePrefix}RDSMultitenant-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub '{"module_lambda":"${RDSPerformanceInsightsFnHourly.Arn}","crawlers": ["${ResourcePrefix}PerformanceInsightsRDSCrawler", "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"]}'
+
+  # Glue Database to store CloudWatch Database Insights table metadata
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: rds_performance_insights_db
+        Description: Database for CloudWatch Database Insights multi-tenant cost allocation data
+
+
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}RDSMultitenant-Glue-Role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSGlueServiceRole"
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "${DestinationBucketARN}/*"
+
+  # Glue Crawler to automatically discover and catalog the Parquet data schema
+  PerformanceInsightsRDSCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawler"
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/rds-multitenant/"
+      Schedule:
+        ScheduleExpression: cron(50 */12 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  PerformanceInsightsRDSCrawlerHourly:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      TablePrefix: "hourly_"
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/rds-multitenant/"
+      Schedule:
+        ScheduleExpression: cron(50 */12 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+
+
+  AthenaViewsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}RDSMultitenant-Athena-Role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: AthenaAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                  - athena:GetQueryExecution
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${DestinationBucketARN}"
+                  - !Sub "${DestinationBucketARN}/*"
+
+  # Lambda function to create Athena views for cost allocation analysis
+  CreateAthenaViewsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ResourcePrefix}RDSMultitenant-Views"
+      Handler: index.handler
+      Runtime: python3.13
+      Timeout: 300
+      MemorySize: 256
+      Role: !GetAtt AthenaViewsLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib3
+          import time
+          
+          def handler(event, context):
+              print(f"ResponseURL: {event.get('ResponseURL', 'Not found')}")
+              print(f"Event: {json.dumps(event)}")
+              response_status = 'SUCCESS'
+              response_data = {}
+              
+              try:
+                  print(f"Request type: {event['RequestType']}")
+                  if event['RequestType'] in ['Create', 'Update']:
+                      print("Starting Athena view creation")
+                      athena = boto3.client('athena')
+                      
+                      view_sql = f"""
+                      create or replace view "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."pi_data_view" as 
+                          WITH aggregate_load_data AS (
+                              SELECT 
+                                  timestamp,
+                                  resourcearn,
+                                  dimension_type,
+                                  AVG(num_vcpus) AS num_vcpus,
+                                  SUM(value) AS total_db_load,
+                                  greatest(AVG(num_vcpus), SUM(value)) total_compute_power,
+                                  count(1) AS num_entities
+                              FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" 
+                              GROUP BY 1, 2, 3
+                          ) 
+                          SELECT 
+                              b.timestamp,
+                              b.account_id, 
+                              b.resourcearn,
+                              b.engine,
+                              b.num_vcpus,
+                              b.dimension_type,
+                              CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
+                              CASE WHEN b.dimension_type = 'database' THEN b.db_database_name END as database_name,
+                              b.value db_load, 
+                              a.total_db_load,
+                              a.total_compute_power,
+                              a.num_entities,
+                              case when a.total_db_load = 0 then 0 else  b.value / a.total_db_load end AS perc_utilization,
+                              (b.value / a.total_compute_power) perc_utilization_rebased
+                          FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" b
+                          JOIN aggregate_load_data a 
+                              ON a.timestamp = b.timestamp AND a.resourcearn = b.resourcearn AND a.dimension_type = b.dimension_type
+                      """
+                      
+                      response = athena.start_query_execution(
+                          QueryString=view_sql,
+                          QueryExecutionContext={'Database': event['ResourceProperties']['GlueDatabase']},
+                          ResultConfiguration={'OutputLocation': event['ResourceProperties']['S3OutputLocation']}
+                      )
+                      
+                      # Wait for completion
+                      query_id = response['QueryExecutionId']
+                      while True:
+                          result = athena.get_query_execution(QueryExecutionId=query_id)
+                          status = result['QueryExecution']['Status']['State']
+                          if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                              break
+                          time.sleep(2)
+                      
+                      if status != 'SUCCEEDED':
+                          raise Exception(f"Query failed: {result['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')}")
+                      
+                      response_data['Message'] = 'Views created successfully'
+                  elif event['RequestType'] == 'Delete':
+                      response_data['Message'] = 'Views deleted successfully'
+              except Exception as e:
+                  print(f"ERROR: {str(e)}")
+                  print(f"ERROR TYPE: {type(e)}")
+                  import traceback
+                  print(f"TRACEBACK: {traceback.format_exc()}")
+                  response_status = 'FAILED'
+                  response_data['Message'] = str(e)
+              
+              send_response(event, context, response_status, response_data)
+          
+          def send_response(event, context, response_status, response_data):
+              response_body = {
+                  'Status': response_status,
+                  'Reason': f'See CloudWatch Log Stream: {context.log_stream_name}',
+                  'PhysicalResourceId': context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': response_data
+              }
+              
+              http = urllib3.PoolManager()
+              response = http.request('PUT', event['ResponseURL'], 
+                                    body=json.dumps(response_body),
+                                    headers={'Content-Type': 'application/json'})
+              print(f'Response status: {response.status}')
+
+  CreateAthenaViewsCustomResource:
+    Type: Custom::CreateAthenaViews
+    Properties:
+      ServiceToken: !GetAtt CreateAthenaViewsLambda.Arn
+      GlueDatabase: !Ref GlueDatabase
+      S3OutputLocation: !Sub 's3://${DestinationBucket}/athena_output/'
+
+  # Step Function to orchestrate the data collection workflow across accounts
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RDSMultitenant-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt RDSPerformanceInsightsFnHourly.Arn
+        Crawlers: !Sub '["${ResourcePrefix}PerformanceInsightsRDSCrawler", "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: rds-multitenant
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+
+
+  GlueDatabaseName:
+    Description: Glue database for RDS Performance Insights data
+    Value: !Ref GlueDatabase
