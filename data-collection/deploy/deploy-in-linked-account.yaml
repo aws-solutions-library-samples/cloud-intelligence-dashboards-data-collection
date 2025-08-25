@@ -177,6 +177,7 @@ Resources:
               - "trustedadvisor:ListRecommendations"
               - "trustedadvisor:ListRecommendationResources"
               - "trustedadvisor:GetRecommendation"
+              - "trustedadvisor:ListChecks"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole

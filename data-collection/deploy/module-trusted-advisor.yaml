@@ -50,6 +50,9 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
 
 Outputs:
   StepFunctionARN:
@@ -241,6 +244,16 @@ Resources:
               """
               trustedadvisor = assume_role(account_id, "trustedadvisor", REGIONS[0], ROLE_NAME)
               try:
+                  # Get all checks metadata first for dynamic field mapping
+                  checks_metadata = {}
+                  try:
+                      for check in trustedadvisor.get_paginator('list_checks').paginate().search('checkSummaries'):
+                          # Store metadata dictionary for each check ARN
+                          checks_metadata[check['arn']] = check.get('metadata', {})
+                  except Exception as e:
+                      print(f"Warning: Could not fetch checks metadata: {str(e)}")
+                      checks_metadata = {}
+
                   recommendations = (trustedadvisor
                       .get_paginator('list_recommendations')
                       .paginate(type='priority')
@@ -280,14 +293,32 @@ Resources:
                               'accountID': account_id,
                               'accountName': account_name
                           }
+                          
+                          # Get check ARN from recommendation for metadata mapping
+                          check_arn = recommendation_details.get('checkArn')
+                          metadata_schema = checks_metadata.get(check_arn, {}) if check_arn else {}
+                          
                           for resource in (resources or [{}]):
                               resource_data = rec_data.copy()
+                              
+                              # Dynamically map metadata fields
+                              metadata_dict = {}
+                              if metadata_schema and 'metadata' in resource:
+                                  resource_metadata = resource['metadata']
+                                  if isinstance(resource_metadata, dict) and isinstance(metadata_schema, dict):
+                                      for key in metadata_schema.keys():
+                                          if key in resource_metadata:
+                                              field_name = metadata_schema[key].lower()
+                                              metadata_dict[field_name] = resource_metadata[key]
+                              
+                              # Update resource details
                               resource_data.update({
-                                  'awsResourceId': resource.get('awsResourceId', 'N/A'),
+                                  'awsResourceDetails': json.dumps(metadata_dict) if metadata_dict else json.dumps({}),
                                   'exclusionStatus': resource.get('exclusionStatus', 'N/A'),
                                   'regionCode': resource.get('regionCode', 'N/A'),
                                   'resourceStatus': resource.get('status', 'N/A')
                               })
+                              
                               jsonfile.write(json.dumps(resource_data) + '\n')
 
               except Exception as e: #pylint: disable=broad-exception-caught
@@ -330,17 +361,550 @@ Resources:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-priority-data/"
-      Configuration: "{\"Version\":1.0,\"Grouping\":{\"TableGroupingPolicy\":\"CombineCompatibleSchemas\"}}"
+      Configuration: "{\"Version\":1.0,\"Grouping\":{\"TableGroupingPolicy\":\"CombineCompatibleSchemas\"},\"CrawlerOutput\":{\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # Add glue table based on existing TAO columns
+  TADataTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: trusted_advisor_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          compressionType: none
+        StorageDescriptor:
+          Columns:
+            - Name: "ip address"
+              Type: string
+            - Name: "checkname"
+              Type: string
+            - Name: "accountparentname"
+              Type: string
+            - Name: "accountid"
+              Type: string
+            - Name: "category"
+              Type: string
+            - Name: "checkid"
+              Type: string
+            - Name: "issuppressed"
+              Type: string
+            - Name: "resourceid"
+              Type: string
+            - Name: "region"
+              Type: string
+            - Name: "accountparentid"
+              Type: string
+            - Name: "timestamp"
+              Type: string
+            - Name: "accountname"
+              Type: string
+            - Name: "status"
+              Type: string
+            - Name: "acl allows list"
+              Type: string
+            - Name: "bucket name"
+              Type: string
+            - Name: "acl allows upload/delete"
+              Type: string
+            - Name: "region name"
+              Type: string
+            - Name: "policy allows access"
+              Type: string
+            - Name: "ignored bucket name"
+              Type: string
+            - Name: "region api parameter"
+              Type: string
+            - Name: "password policy"
+              Type: string
+            - Name: "reason"
+              Type: string
+            - Name: "number"
+              Type: string
+            - Name: "uppercase"
+              Type: string
+            - Name: "lowercase"
+              Type: string
+            - Name: "non-alphanumeric"
+              Type: string
+            - Name: "write enabled"
+              Type: string
+            - Name: "same owner"
+              Type: string
+            - Name: "target exists"
+              Type: string
+            - Name: "target name"
+              Type: string
+            - Name: "trail name"
+              Type: string
+            - Name: "logging status"
+              Type: string
+            - Name: "last delivery error"
+              Type: string
+            - Name: "access key"
+              Type: string
+            - Name: "key last rotated"
+              Type: string
+            - Name: "iam user"
+              Type: string
+            - Name: "mfa delete enabled"
+              Type: string
+            - Name: "versioning"
+              Type: string
+            - Name: "current usage"
+              Type: string
+            - Name: "service"
+              Type: string
+            - Name: "limit amount"
+              Type: string
+            - Name: "limit name"
+              Type: string
+            - Name: "snapshot id"
+              Type: string
+            - Name: "volume name"
+              Type: string
+            - Name: "snapshot age"
+              Type: string
+            - Name: "volume attachment"
+              Type: string
+            - Name: "volume id"
+              Type: string
+            - Name: "snapshot name"
+              Type: string
+            - Name: "volume type"
+              Type: string
+            - Name: "volume size"
+              Type: string
+            - Name: "monthly storage cost"
+              Type: string
+            - Name: "max daily median"
+              Type: string
+            - Name: "number of days over"
+              Type: string
+            - Name: "day 14"
+              Type: string
+            - Name: "day 13"
+              Type: string
+            - Name: "day 12"
+              Type: string
+            - Name: "day 11"
+              Type: string
+            - Name: "day 10"
+              Type: string
+            - Name: "day 1"
+              Type: string
+            - Name: "day 2"
+              Type: string
+            - Name: "day 3"
+              Type: string
+            - Name: "day 8"
+              Type: string
+            - Name: "day 9"
+              Type: string
+            - Name: "day 4"
+              Type: string
+            - Name: "day 5"
+              Type: string
+            - Name: "day 6"
+              Type: string
+            - Name: "day 7"
+              Type: string
+            - Name: "region/az"
+              Type: string
+            - Name: "14-day average cpu utilization"
+              Type: string
+            - Name: "instance type"
+              Type: string
+            - Name: "instance name"
+              Type: string
+            - Name: "estimated monthly savings"
+              Type: string
+            - Name: "14-day average network i/o"
+              Type: string
+            - Name: "number of days low utilization"
+              Type: string
+            - Name: "instance id"
+              Type: string
+            - Name: "instances in zone a"
+              Type: string
+            - Name: "instances in zone b"
+              Type: string
+            - Name: "instances in zone e"
+              Type: string
+            - Name: "instances in zone f"
+              Type: string
+            - Name: "instances in zone c"
+              Type: string
+            - Name: "instances in zone d"
+              Type: string
+            - Name: "load balancer associated"
+              Type: string
+            - Name: "auto scaling group name"
+              Type: string
+            - Name: "health check"
+              Type: string
+            - Name: "total inbound rules"
+              Type: string
+            - Name: "total outbound rules"
+              Type: string
+            - Name: "vpc id"
+              Type: string
+            - Name: "db instance"
+              Type: string
+            - Name: "multi-az"
+              Type: string
+            - Name: "security group id"
+              Type: string
+            - Name: "ports"
+              Type: string
+            - Name: "security group name"
+              Type: string
+            - Name: "protocol"
+              Type: string
+            - Name: "port"
+              Type: string
+            - Name: "ip range"
+              Type: string
+            - Name: "customer gateway"
+              Type: string
+            - Name: "vpc"
+              Type: string
+            - Name: "active tunnels"
+              Type: string
+            - Name: "vpn id"
+              Type: string
+            - Name: "virtual private gateway"
+              Type: string
+            - Name: "distribution domain name"
+              Type: string
+            - Name: "distribution id"
+              Type: string
+            - Name: "alternate domain name"
+              Type: string
+            - Name: "hosted zone name"
+              Type: string
+            - Name: "hosted zone id"
+              Type: string
+            - Name: "number of name server delegations used"
+              Type: string
+            - Name: "number of days over 90% cpu utilization"
+              Type: string
+            - Name: "resource name"
+              Type: string
+            - Name: "launch configuration name"
+              Type: string
+            - Name: "launch type"
+              Type: string
+            - Name: "resource type"
+              Type: string
+            - Name: "launch name"
+              Type: string
+            - Name: "backup retention period"
+              Type: string
+            - Name: "description"
+              Type: string
+            - Name: "instance count"
+              Type: string
+            - Name: "group id"
+              Type: string
+            - Name: "resource record set identifier"
+              Type: string
+            - Name: "resource record set type"
+              Type: string
+            - Name: "alias target"
+              Type: string
+            - Name: "resource record set name"
+              Type: string
+            - Name: "headers"
+              Type: string
+            - Name: "cache behavior path pattern"
+              Type: string
+            - Name: "lookback period (days)"
+              Type: string
+            - Name: "upfront cost"
+              Type: string
+            - Name: "payment option"
+              Type: string
+            - Name: "hourly commitment to purchase"
+              Type: string
+            - Name: "estimated savings percentage"
+              Type: string
+            - Name: "term (years)"
+              Type: string
+            - Name: "savings plan type"
+              Type: string
+            - Name: "estimated average utilization"
+              Type: string
+            - Name: "origin"
+              Type: string
+            - Name: "days since last connection"
+              Type: string
+            - Name: "db instance name"
+              Type: string
+            - Name: "storage provisioned (gb)"
+              Type: string
+            - Name: "estimated monthly savings (on demand)"
+              Type: string
+            - Name: "cluster"
+              Type: string
+            - Name: "estimated break even (months)"
+              Type: string
+            - Name: "platform"
+              Type: string
+            - Name: "expected average ri utilization"
+              Type: string
+            - Name: "estimated on-demand cost post recommended ri purchase (monthly)"
+              Type: string
+            - Name: "recommended number of ris to purchase"
+              Type: string
+            - Name: "upfront cost of ris"
+              Type: string
+            - Name: "estimated savings with recommendation (monthly)"
+              Type: string
+            - Name: "estimated cost of ris (monthly)"
+              Type: string
+            - Name: "load balancer name"
+              Type: string
+            - Name: "# of zones"
+              Type: string
+            - Name: "access key id"
+              Type: string
+            - Name: "case id"
+              Type: string
+            - Name: "certificate name"
+              Type: string
+            - Name: "connection details"
+              Type: string
+            - Name: "connection id for vif"
+              Type: string
+            - Name: "connection id"
+              Type: string
+            - Name: "current monthly cost"
+              Type: string
+            - Name: "data transfer out (gb)"
+              Type: string
+            - Name: "database edition"
+              Type: string
+            - Name: "database engine"
+              Type: string
+            - Name: "db instance or cluster id"
+              Type: string
+            - Name: "deadline"
+              Type: string
+            - Name: "deployment option"
+              Type: string
+            - Name: "ebs optimized"
+              Type: string
+            - Name: "estimated cost of reserved instances (monthly)"
+              Type: string
+            - Name: "estimated cost of reserved nodes (monthly)"
+              Type: string
+            - Name: "estimated on-demand cost post recommended reserved instance purchase (monthly)"
+              Type: string
+            - Name: "estimated on-demand cost post recommended reserved nodes purchase (monthly)"
+              Type: string
+            - Name: "expected average reserved instance utilization"
+              Type: string
+            - Name: "expected average reserved node utilization"
+              Type: string
+            - Name: "expected avergae reserved instance utilization"
+              Type: string
+            - Name: "expected avergae reserved node utilization"
+              Type: string
+            - Name: "expiration date"
+              Type: string
+            - Name: "family"
+              Type: string
+            - Name: "fraud type"
+              Type: string
+            - Name: "gateway id"
+              Type: string
+            - Name: "ingress rule"
+              Type: string
+            - Name: "instance class"
+              Type: string
+            - Name: "instance size"
+              Type: string
+            - Name: "license model"
+              Type: string
+            - Name: "load balancer port"
+              Type: string
+            - Name: "location for vif"
+              Type: string
+            - Name: "location"
+              Type: string
+            - Name: "node type"
+              Type: string
+            - Name: "private db instances"
+              Type: string
+            - Name: "product description"
+              Type: string
+            - Name: "public db instances"
+              Type: string
+            - Name: "ratio of transfer to storage"
+              Type: string
+            - Name: "rds security group name"
+              Type: string
+            - Name: "recommended number of reserved instances to purchase"
+              Type: string
+            - Name: "recommended number of reserved nodes to purchase"
+              Type: string
+            - Name: "reserved instance id"
+              Type: string
+            - Name: "resource record set id"
+              Type: string
+            - Name: "s3 storage (gb)"
+              Type: string
+            - Name: "security group ids"
+              Type: string
+            - Name: "time near maximum"
+              Type: string
+            - Name: "time updated"
+              Type: string
+            - Name: "ttl"
+              Type: string
+            - Name: "upfront cost of reserved instances"
+              Type: string
+            - Name: "upfront cost of reserved nodes"
+              Type: string
+            - Name: "usage (usd per day)"
+              Type: string
+            - Name: "user name (iam or root)"
+              Type: string
+            - Name: "zone"
+              Type: string
+            - Name: "function arn"
+              Type: string
+            - Name: "max daily error rate"
+              Type: string
+            - Name: "date for max error rate"
+              Type: string
+            - Name: "average daily error rate"
+              Type: string
+            - Name: "lost daily compute cost"
+              Type: string
+            - Name: "current day invokes"
+              Type: string
+            - Name: "current day error rate"
+              Type: string
+            - Name: "average daily invokes"
+              Type: string
+            - Name: "last refresh time"
+              Type: string
+            - Name: "max daily timeout rate"
+              Type: string
+            - Name: "date of max daily timeout rate"
+              Type: string
+            - Name: "average daily timeout rate"
+              Type: string
+            - Name: "function timeout setting"
+              Type: string
+            - Name: "current day timeout rate"
+              Type: string
+            - Name: "runtime"
+              Type: string
+            - Name: "days to deprecation"
+              Type: string
+            - Name: "deprecation date"
+              Type: string
+            - Name: "resource"
+              Type: string
+            - Name: "workload type"
+              Type: string
+            - Name: "workload last modified date"
+              Type: string
+            - Name: "workload started date"
+              Type: string
+            - Name: "number of questions answered for performance"
+              Type: string
+            - Name: "Number of hris resolved for performance"
+              Type: string
+            - Name: "total number of questions in performance pillar"
+              Type: string
+            - Name: "number of identified hris for performance"
+              Type: string
+            - Name: "reviewer name"
+              Type: string
+            - Name: "workload arn"
+              Type: string
+            - Name: "workload name"
+              Type: string
+            - Name: "number of hris resolved for reliability"
+              Type: string
+            - Name: "total number of questions in reliability pillar"
+              Type: string
+            - Name: "number of questions answered for reliability"
+              Type: string
+            - Name: "number of identified hris for reliability"
+              Type: string
+            - Name: "number of hris resolved for security"
+              Type: string
+            - Name: "total number of questions in security pillar"
+              Type: string
+            - Name: "number of questions answered for security"
+              Type: string
+            - Name: "number of identified hris for security"
+              Type: string
+            - Name: "number of hris resolved for cost optimization"
+              Type: string
+            - Name: "total number of questions in cost optimization pillar"
+              Type: string
+            - Name: "number of questions answered for cost optimization"
+              Type: string
+            - Name: "number of identified hris for cost optimization"
+              Type: string
+            - Name: "cluster name"
+              Type: string
+            - Name: "resource id"
+              Type: string
+            - Name: "recommended action"
+              Type: string
+            - Name: "current resource summary"
+              Type: string
+            - Name: "recommended resource summary"
+              Type: string
+            - Name: "estimated monthly cost"
+              Type: string
+            - Name: "last refresh time stamp"
+              Type: string
+            - Name: "logging enabled"
+              Type: string
+            - Name: "delivery error reported"
+              Type: string
+            - Name: "last updated time"
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+              UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        PartitionKeys:
+          - Name: "payer_id"
+            Type: string
+          - Name: "year"
+            Type: string
+          - Name: "month"
+            Type: string
 
   # Add glue table for trusted advisor priority data
   TAPriorityTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: trusted_advisor_priority_data
         TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          compressionType: none
         StorageDescriptor:
           Columns:
             - Name: recommendationArn
@@ -369,7 +933,7 @@ Resources:
               Type: string
             - Name: accountName
               Type: string
-            - Name: awsResourceId
+            - Name: awsResourceDetails
               Type: string
             - Name: exclusionStatus
               Type: string
@@ -384,8 +948,6 @@ Resources:
               UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
-            Parameters:
-              paths: recommendationArn,name,description,awsServices,createdAt,resolvedAt,lastUpdatedAt,lifecycleStage,recommendationStatus,pillars,source,accountID,accountName,awsResourceId,exclusionStatus,regionCode,resourceStatus
         PartitionKeys:
           - Name: payer_id
             Type: string
