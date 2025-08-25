@@ -313,7 +313,7 @@ Resources:
                               
                               # Update resource details
                               resource_data.update({
-                                  'awsResourceId': metadata_dict if metadata_dict else resource.get('awsResourceId', 'N/A'),
+                                  'awsResourceDetails': json.dumps(metadata_dict) if metadata_dict else json.dumps({}),
                                   'exclusionStatus': resource.get('exclusionStatus', 'N/A'),
                                   'regionCode': resource.get('regionCode', 'N/A'),
                                   'resourceStatus': resource.get('status', 'N/A')
@@ -933,7 +933,7 @@ Resources:
               Type: string
             - Name: accountName
               Type: string
-            - Name: awsResourceId
+            - Name: awsResourceDetails
               Type: string
             - Name: exclusionStatus
               Type: string
@@ -948,8 +948,6 @@ Resources:
               UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
-            # Parameters:
-            #   paths: recommendationArn,name,description,awsServices,createdAt,resolvedAt,lastUpdatedAt,lifecycleStage,recommendationStatus,pillars,source,accountID,accountName,awsResourceId,exclusionStatus,regionCode,resourceStatus
         PartitionKeys:
           - Name: payer_id
             Type: string
