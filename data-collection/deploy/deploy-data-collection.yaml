@@ -276,7 +276,7 @@ Parameters:
     Default: 'no'
   IncludeQuickSightModule:
     Type: String
-    Description: Collects Marketplace Licenses and Grants
+    Description: Collects Amazon QuickSight users and gropus details
     AllowedValues: ['yes', 'no']
     Default: 'no'
   IncludeServiceQuotasModule:
