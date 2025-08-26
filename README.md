@@ -24,7 +24,7 @@ This repository is a part of [Cloud Intelligence Dashboards](https://docs.aws.am
 
 This repository contains following elements:
 * [data-exports](/data-exports) - a Cloud Formation Templates for AWS Data Exports, such as Cost and Usage Report 2.0 and others. This allows a replication of Exports from your Management Account(s) to a Dedicated Data Collection Accounts as well as aggregation of multiple Exports from a set of Linked Accounts.
-* [data-collection](/data-collection) - a set of Cloud Formation Templates for collecting infrastructure operational data from Management and Linked Accounts. Such as data from AWS Trusted Advisor, AWS Compute Optimizer, Inventories, Pricing, AWS Health, AWS Support Cases etc. See more about types of data collected [here](/data-collection).
+* [data-collection](/data-collection) - a set of Cloud Formation Templates for collecting infrastructure operational data from Management and Linked Accounts. Such as data from AWS Trusted Advisor, AWS Compute Optimizer, Inventories, Pricing, AWS Health, AWS Support Cases, AWS Marketplace Agreements etc. See more about types of data collected [here](/data-collection).
 * [case-summarization](/case-summarization) - an additional Cloud Formation Template for deploying the AWS Support Case Summarization plugin that offers the capability to summarize cases through Generative AI powered by Amazon Bedrock.
 * [rls](/rls) - a stack for managing Row Level Security for CID Dashboards.
 * [security-hub](/security-hub) - Collection of data from AWS Security Hub.
