@@ -895,9 +895,10 @@ Resources:
 
   # Add glue table for trusted advisor priority data
   TAPriorityTable:
-    Type: Custom::ManageGlueTable
+    Type: AWS::Glue::Table
     Properties:
-      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
       TableInput:
         Name: trusted_advisor_priority_data
         TableType: EXTERNAL_TABLE
