@@ -33,7 +33,7 @@ Metadata:
           - IncludeLicenseManagerModule
           - IncludeServiceQuotasModule
           - IncludeResilienceHubModule
-          - IncludeAgreementsModule
+          - IncludeMarketplaceModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -81,7 +81,7 @@ Metadata:
         default: "Include Service Quotas Module"
       IncludeResilienceHubModule:
         default: "Include ResilienceHub Module"
-      IncludeAgreementsModule:
+      IncludeMarketplaceModule:
         default: "Include Marketplace Agreements Module"
 
 Parameters:
@@ -194,7 +194,7 @@ Parameters:
     Description: Collects Resilience Hub information
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  IncludeAgreementsModule:
+  IncludeMarketplaceModule:
     Type: String
     Description: Collects Marketplace Agreement information
     AllowedValues: ['yes', 'no']
@@ -238,7 +238,7 @@ Resources:
         IncludeTransitGatewayModule: !Ref IncludeTransitGatewayModule
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
-        IncludeAgreementsModule: !Ref IncludeAgreementsModule
+        IncludeMarketplaceModule: !Ref IncludeMarketplaceModule
         
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
@@ -281,8 +281,8 @@ Resources:
           ParameterValue: !Ref IncludeServiceQuotasModule
         - ParameterKey: IncludeResilienceHubModule
           ParameterValue: !Ref IncludeResilienceHubModule
-        - ParameterKey: IncludeAgreementsModule
-          ParameterValue: !Ref IncludeAgreementsModule
+        - ParameterKey: IncludeMarketplaceModule
+          ParameterValue: !Ref IncludeMarketplaceModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]

@@ -41,7 +41,7 @@ Metadata:
           - IncludeServiceQuotasModule
           - IncludeEUCUtilizationModule
           - IncludeResilienceHubModule
-          - IncludeAgreementsModule
+          - IncludeMarketplaceModule
           - IncludeReferenceModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
@@ -112,8 +112,8 @@ Metadata:
         default: 'Include QuickSight User Collection Module'
       IncludeResilienceHubModule:
         default: 'Include Resilience Hub Data Collection Module'
-      IncludeAgreementsModule:
-        default: 'Include Marketplace Agreements Data Collection Module'
+      IncludeMarketplaceModule:
+        default: 'Include Marketplace Data Collection Module'
 
 Mappings:
   RegionMap:
@@ -292,9 +292,9 @@ Parameters:
    Description: Collects AWS Resilience Hub data
    AllowedValues: ['yes', 'no']
    Default: 'no'
-  IncludeAgreementsModule:
+  IncludeMarketplaceModule:
    Type: String
-   Description: Collects AWS Marketplace Agreement data
+   Description: Collects AWS Marketplace data
    AllowedValues: ['yes', 'no']
    Default: 'no'
   IncludeReferenceModule:
@@ -323,7 +323,7 @@ Conditions:
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
-  DeployAgreementsModule: !Equals [ !Ref IncludeAgreementsModule, "yes"]
+  DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -341,7 +341,7 @@ Conditions:
       - !Condition DeployBudgetsModule
       - !Condition DeployResilienceHubModule
     - !Or
-      - !Condition DeployAgreementsModule
+      - !Condition DeployMarketplaceModule
       - !Condition DeployBackupModule
       - !Condition DeployTransitGatewayModule
       - !Condition DeployHealthEventsModule
@@ -1517,11 +1517,11 @@ Resources:
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
-  AgreementsModule:
+  MarketplaceModule:
     Type: AWS::CloudFormation::Stack
-    Condition: DeployAgreementsModule
+    Condition: DeployMarketplaceModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.12.1/module-agreements.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.12.1/module-marketplace.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket

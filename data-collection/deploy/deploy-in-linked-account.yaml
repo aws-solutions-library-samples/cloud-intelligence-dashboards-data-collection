@@ -22,7 +22,7 @@ Metadata:
         - IncludeTransitGatewayModule
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
-        - IncludeAgreementsModule
+        - IncludeMarketplaceModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -50,7 +50,7 @@ Metadata:
         default: 'Include Service Quotas Module'
       IncludeResilienceHubModule:
         default: 'Include Resilience Hub Module'
-      IncludeAgreementsModule:
+      IncludeMarketplaceModule:
         default: 'Include Marketplace Agreements Module'
 
 Parameters:
@@ -115,7 +115,7 @@ Parameters:
     Description: Collects Resilience Hub data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  IncludeAgreementsModule:
+  IncludeMarketplaceModule:
     Type: String
     Description: Collects Marketplace Agreement data from your accounts
     AllowedValues: ['yes', 'no']
@@ -132,7 +132,7 @@ Conditions:
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
-  IncludeAgreementsModulePolicy:         !Equals [!Ref IncludeAgreementsModule, "yes"]
+  IncludeMarketplaceModulePolicy:         !Equals [!Ref IncludeMarketplaceModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -164,7 +164,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}support-cases-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
-                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}agreements-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -478,7 +478,7 @@ Resources:
   # Marketplace Agreements policy
   AgreementsPolicy:
     Type: 'AWS::IAM::Policy'
-    Condition: IncludeAgreementsModulePolicy
+    Condition: IncludeMarketplaceModulePolicy
     Properties:
       PolicyName: AgreementsPolicy
       PolicyDocument:

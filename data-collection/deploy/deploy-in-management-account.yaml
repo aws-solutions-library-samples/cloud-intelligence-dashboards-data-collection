@@ -19,7 +19,7 @@ Metadata:
           - IncludeRightsizingModule
           - IncludeLicenseManagerModule
           - IncludeServiceQuotasModule
-          - IncludeAgreementsModule
+          - IncludeMarketplaceModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -41,7 +41,7 @@ Metadata:
         default: "Include Marketplace Licensing Module"
       IncludeServiceQuotasModule:
         default: "Include Service Quotas Module"
-      IncludeAgreementsModule:
+      IncludeMarketplaceModule:
         default: "Include Marketplace Agreements Module"
 Parameters:
   DataCollectionAccountID:
@@ -90,7 +90,7 @@ Parameters:
     Description: Collects Service Quotas Information from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  IncludeAgreementsModule:
+  IncludeMarketplaceModule:
     Type: String
     Description: Collects Marketplace Agreement Information from your accounts
     AllowedValues: ['yes', 'no']
@@ -104,7 +104,7 @@ Conditions:
   EnableHealthEventsModule: !Equals [!Ref IncludeHealthEventsModule, "yes"]
   EnableLicenseManagerModule: !Equals [!Ref IncludeLicenseManagerModule, "yes"]
   EnableServiceQuotasModule: !Equals [!Ref IncludeServiceQuotasModule, "yes"]
-  EnableAgreementsModule: !Equals [!Ref IncludeAgreementsModule, "yes"]
+  EnableMarketplaceModule: !Equals [!Ref IncludeMarketplaceModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -375,12 +375,12 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
-  # Marketplace Agreements policy
-  AgreementsPolicy:
+  # Marketplace policy
+  MarketplacePolicy:
     Type: "AWS::IAM::Policy"
-    Condition: EnableAgreementsModule
+    Condition: EnableMarketplaceModule
     Properties:
-      PolicyName: AgreementsPolicy
+      PolicyName: MarketplacePolicy
       PolicyDocument:
         Version: "2012-10-17"
         Statement:

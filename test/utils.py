@@ -219,7 +219,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
-           {'ParameterKey': 'IncludeAgreementsModule',         'ParameterValue': "yes"},
+           {'ParameterKey': 'IncludeMarketplaceModule',         'ParameterValue': "yes"},
        ]
     )
 
@@ -257,7 +257,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
-            {'ParameterKey': 'IncludeAgreementsModule',         'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeMarketplaceModule',         'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
         ]
     )
@@ -428,7 +428,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}service-quotas-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}workspaces-metrics-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}resilience-hub-StateMachine",
-        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}agreements-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
     ]
     lambda_arns = []

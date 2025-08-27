@@ -43,7 +43,7 @@ List of modules and objects collected:
 | `aws-feeds`                  |  N/A                  | Data Collection Account | Collects Blog posts and News Feeds |
 | `quicksight`                 |  [Amazon QuickSight](https://aws.amazon.com/quicksight/)    | Data Collection Account | Collects QuickSight User and Group information in the Data Collection Account only |
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
-| `agreements`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace Agreement data and terms |
+| `marketplace`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace data and terms |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
 
 ### Deployment Overview

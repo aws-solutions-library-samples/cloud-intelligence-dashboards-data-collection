@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Retrieves AWS Marketplace Agreements data with full GetProduct API data
+Description: Retrieves AWS Marketplace data with full GetProduct API data
 
 Parameters:
   DatabaseName:
     Type: String
-    Description: Name of the Athena database to be created to hold AWS Marketplace Agreements information
+    Description: Name of the Athena database to be created to hold AWS Marketplace information
     Default: optimization_data
   DataBucketsKmsKeysArns:
     Type: String
@@ -15,18 +15,18 @@ Parameters:
     Default: cid-data-359484663501
   DestinationBucket:
     Type: String
-    Description: Name of the S3 Bucket to be created to hold AWS Marketplace Agreements information
+    Description: Name of the S3 Bucket to be created to hold AWS Marketplace information
     AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
   DestinationBucketARN:
     Type: String
-    Description: ARN of the S3 Bucket that exists or needs to be created to hold AWS Marketplace Agreements information
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold AWS Marketplace information
   MultiAccountRoleName:
     Type: String
-    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Marketplace Agreements Data.
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Marketplace Data.
   CFDataName:
     Type: String
     Description: The name of what this cf is doing.
-    Default: agreements
+    Default: marketplace
   GlueRoleARN:
     Type: String
     Description: Arn for the Glue Crawler role
@@ -178,7 +178,7 @@ Resources:
 
           BUCKET = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
-          MODULE_NAME = os.environ.get('MODULE_NAME', 'agreements')
+          MODULE_NAME = os.environ.get('MODULE_NAME', 'marketplace')
 
           logger = logging.getLogger(__name__)
           logger.setLevel(logging.INFO)
@@ -269,7 +269,12 @@ Resources:
                   r_str = {k: safe_str(v) for k, v in r.items()}
                   buf.write(json.dumps(r_str, ensure_ascii=False))
                   buf.write('\n')
-              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'), ContentType='application/json')
+              try:
+                  s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'), ContentType='application/json')
+                  logger.info(f"Successfully wrote to s3://{bucket}/{key}")
+              except Exception as e:
+                  logger.error(f"Failed to write to s3://{bucket}/{key}: {e}")
+                  raise
 
           def s3_put_csv(bucket, key, rows):
               s3 = boto3.client('s3')
@@ -286,7 +291,12 @@ Resources:
                   w = csv.DictWriter(buf, fieldnames=fieldnames, quoting=csv.QUOTE_ALL, lineterminator='\n')
                   w.writeheader()
                   w.writerows(rows)
-              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'))
+              try:
+                  s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'))
+                  logger.info(f"Successfully wrote to s3://{bucket}/{key}")
+              except Exception as e:
+                  logger.error(f"Failed to write to s3://{bucket}/{key}: {e}")
+                  raise
 
           # ---------- handler ----------
           def lambda_handler(event, context):
@@ -454,9 +464,8 @@ Resources:
                   logger.info(f"No agreements found for account {account_id}, skipping CSV creation")
                   return
 
-              key = f"{MODULE_NAME}/agreements/data/agreements_{account_id}.jsonl"
+              key = f"{MODULE_NAME}/marketplace/data/marketplace_{account_id}.jsonl"
               s3_put_jsonl(BUCKET, key, rows)
-              logger.info("Wrote %d rows to s3://%s/%s", len(rows), BUCKET, key)
               
               # Save terms data to separate CSV only if there are terms
               if terms_rows:
@@ -467,7 +476,6 @@ Resources:
                   
                   terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.jsonl"
                   s3_put_jsonl(BUCKET, terms_key, terms_rows)
-                  logger.info("Wrote %d term rows to s3://%s/%s", len(terms_rows), BUCKET, terms_key)
               else:
                   logger.info(f"No terms found for account {account_id}, skipping terms CSV creation")
 
