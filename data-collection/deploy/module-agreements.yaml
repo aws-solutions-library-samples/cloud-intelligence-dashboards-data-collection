@@ -136,23 +136,6 @@ Resources:
                   - "marketplace-agreement:GetAgreementTerms"  # Agreement service
                   - "marketplace-agreement:ListAgreementCharges"  # Agreement service
                 Resource: "*"
-        - PolicyName: "Glue-Crawler"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "glue:StartCrawler"
-                  - "glue:GetCrawler"
-                  - "glue:CreateCrawler"
-                  - "glue:DeleteCrawler"
-                Resource: 
-                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ResourcePrefix}${CFDataName}-crawler"
-                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ResourcePrefix}${CFDataName}-terms-crawler"
-              - Effect: "Allow"
-                Action:
-                  - "iam:PassRole"
-                Resource: !Ref GlueRoleARN
 
   AgreementsLambda:
     Type: AWS::Lambda::Function
@@ -312,78 +295,6 @@ Resources:
               account = json.loads(event['account'])
               run_for_account(account['account_id'])
               return {'statusCode': 200}
-
-          def ensure_and_trigger_crawlers():
-              glue = boto3.client('glue')
-              
-              # Crawler configurations
-              crawlers = [
-                  {
-                      'name': f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-crawler",
-                      's3_path': f"s3://{BUCKET}/{MODULE_NAME}/agreements/data/",
-                      'table_prefix': 'agreements_'
-                  },
-                  {
-                      'name': f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-terms-crawler", 
-                      's3_path': f"s3://{BUCKET}/{MODULE_NAME}/terms/data/",
-                      'table_prefix': 'agreement_terms_'
-                  }
-              ]
-              
-              for crawler_config in crawlers:
-                  crawler_name = crawler_config['name']
-                  
-                  # Delete existing crawler to recreate with new config
-                  try:
-                      glue.get_crawler(Name=crawler_name)
-                      logger.info(f"Deleting existing crawler {crawler_name} to recreate with new config")
-                      glue.delete_crawler(Name=crawler_name)
-                      # Wait a moment for deletion to complete
-                      import time
-                      time.sleep(2)
-                  except glue.exceptions.EntityNotFoundException:
-                      logger.info(f"Crawler {crawler_name} doesn't exist")
-                  except Exception as e:
-                      logger.warning(f"Could not delete crawler {crawler_name}: {e}")
-                  
-                  # Create crawler with new configuration
-                  try:
-                      glue.create_crawler(
-                          Name=crawler_name,
-                          Role=os.environ.get('GLUE_ROLE_ARN', ''),
-                          DatabaseName=os.environ.get('DATABASE_NAME', 'optimization_data'),
-                          TablePrefix=crawler_config['table_prefix'],
-                          Targets={
-                              'S3Targets': [
-                                  {
-                                      'Path': crawler_config['s3_path']
-                                  }
-                              ]
-                          },
-                          SchemaChangePolicy={
-                              'UpdateBehavior': 'UPDATE_IN_DATABASE',
-                              'DeleteBehavior': 'LOG'
-                          },
-                          RecrawlPolicy={
-                              'RecrawlBehavior': 'CRAWL_EVERYTHING'
-                          }
-                      )
-                      logger.info(f"Created crawler {crawler_name} with grouping configuration")
-                  except glue.exceptions.AlreadyExistsException:
-                      logger.info(f"Crawler {crawler_name} already exists, skipping creation")
-                  except Exception as e:
-                      logger.error(f"Failed to create crawler {crawler_name}: {e}")
-                      continue
-                  
-                  # Start the crawler
-                  try:
-                      glue.start_crawler(Name=crawler_name)
-                      logger.info(f"Started crawler {crawler_name}")
-                  except Exception as e:
-                      if "CrawlerRunningException" not in str(e):
-                          logger.warning(f"Could not start crawler {crawler_name}: {e}")
-                      else:
-                          logger.info(f"Crawler {crawler_name} is already running")
 
           def run_for_account(account_id):
               agr, sts_creds = assume_and_client(account_id, 'marketplace-agreement', region='us-east-1')
@@ -559,9 +470,6 @@ Resources:
                   logger.info("Wrote %d term rows to s3://%s/%s", len(terms_rows), BUCKET, terms_key)
               else:
                   logger.info(f"No terms found for account {account_id}, skipping terms CSV creation")
-              
-              # Trigger crawler after data upload
-              ensure_and_trigger_crawlers()
 
   LogGroup:
     Type: AWS::Logs::LogGroup
