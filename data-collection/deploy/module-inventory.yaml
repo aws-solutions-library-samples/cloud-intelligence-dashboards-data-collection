@@ -1261,7 +1261,7 @@ Resources:
                       x.isoformat() if isinstance(x, (date, datetime)) else None
               )
 
-          @lru_cache(maxsize=10000)
+          @lru_cache(maxsize=100)
           def assume_session(account_id, region):
               """assume role in account"""
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
