@@ -99,6 +99,15 @@ Resources:
                   - "s3:PutObject"
                 Resource:
                   - !Sub "${DestinationBucketARN}/*"
+        - PolicyName: "Organizations"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "organizations:ListAccounts"
+                  - "organizations:DescribeOrganization"
+                Resource: "*"
         - !If
           - NeedDataBucketsKms
           - PolicyName: "KMS"
