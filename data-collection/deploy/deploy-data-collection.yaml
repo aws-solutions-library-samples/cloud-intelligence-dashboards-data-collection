@@ -323,7 +323,8 @@ Conditions:
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
-  DeployAgreementsModule: !Equals [ !Ref IncludeAgreementsModule, "yes"]  DeployPricingModule: !Or
+  DeployAgreementsModule: !Equals [ !Ref IncludeAgreementsModule, "yes"]
+  DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
     - !Condition DeployEUCUtilizationModule
