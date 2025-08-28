@@ -66,9 +66,16 @@ def athena_query(athena, sql_query, sleep_duration=1, database: str=None, catalo
     context = {}
     if database: context['Database'] = database
     if catalog: context['Catalog'] = catalog
+    
+    # Set up S3 output location for Athena query results
+    result_configuration = {
+        'OutputLocation': f's3://{BUCKET_PREFIX}{account_id}/athena-results/'
+    }
+    
     response = athena.start_query_execution(
         QueryString=sql_query,
         QueryExecutionContext=context,
+        ResultConfiguration=result_configuration,
         WorkGroup=workgroup,
     )
     query_id = response.get('QueryExecutionId')
@@ -167,6 +174,15 @@ def deploy_stack(cloudformation, stack_name: str, url: str, parameters: list[dic
         except cloudformation.exceptions.ClientError as exc:
             if 'No updates are to be performed.' in str(exc):
                 logger.info(f'No updates are to be performed for {stack_name}')
+            elif 'DELETE_COMPLETE state and can not be updated' in str(exc):
+                logger.info(f'{stack_name} is in DELETE_COMPLETE state, creating new stack')
+                res = cloudformation.create_stack(
+                    EnableTerminationProtection=False,
+                    OnFailure='DELETE',
+                    TimeoutInMinutes=60,
+                    **options,
+                )
+                logger.info(f'{stack_name} creation started {res}')
             else:
                 logger.error(exc)
     except Exception as exc:
@@ -203,6 +219,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
+           {'ParameterKey': 'IncludeAgreementsModule',         'ParameterValue': "yes"},
        ]
     )
 
@@ -240,6 +257,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeAgreementsModule',         'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
         ]
     )
@@ -410,6 +428,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}service-quotas-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}workspaces-metrics-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}resilience-hub-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}agreements-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
     ]
     lambda_arns = []

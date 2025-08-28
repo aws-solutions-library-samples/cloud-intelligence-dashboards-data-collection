@@ -266,6 +266,10 @@ def test_resilience_hub_application_details(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."resilience_hub_application_details" LIMIT 10;')
     assert len(data) > 0, 'resiliencehub_daily_assessments is empty'
 
+def test_agreements_data(athena): #agreements - specific
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."agreements" LIMIT 10;')
+    assert len(data) > 0, 'agreements data is empty'
+
 def test_content_of_summary_not_empty(s3):
     s3_client = boto3.client('s3')
     case_data = {

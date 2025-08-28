@@ -1,0 +1,851 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves AWS Marketplace Agreements data with full GetProduct API data
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold AWS Marketplace Agreements information
+    Default: optimization_data
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: KMS Key ARNs used for encrypting data in S3 buckets (comma separated)
+  DataCollectionBucket:
+    Type: String
+    Description: Name of the S3 Bucket in the data collection account where data will be stored
+    Default: cid-data-359484663501
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold AWS Marketplace Agreements information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold AWS Marketplace Agreements information
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Marketplace Agreements Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: agreements
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(14 days)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+  QuickSightPrincipalArn:
+    Type: String
+    Description: QuickSight user or group ARN to grant permissions to
+    Default: "arn:aws:quicksight:us-east-1:585567417489:user/default/Admin/yyanis-Isengard"
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  RegionsInScope:
+    Type: String
+    Description: Comma-delimited list of regions in scope for data collection
+    Default: ""
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - !If 
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "AssumeMultiAccountRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:PutObjectAcl"
+                Resource: 
+                  - !Sub "${DestinationBucketARN}/*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "${DestinationBucketARN}"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetBucketLocation"
+                Resource:
+                  - !Sub "${DestinationBucketARN}"
+        - PolicyName: "Marketplace-Discovery-GetProduct"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "aws-marketplace:GetProduct"   # Discovery (signed HTTP)
+                  - "aws-marketplace:GetAgreementTerms"  # Agreement service
+                  - "aws-marketplace:ListAgreementCharges"  # Agreement service
+                  - "marketplace-agreement:GetAgreementTerms"  # Agreement service
+                  - "marketplace-agreement:ListAgreementCharges"  # Agreement service
+                Resource: "*"
+        - PolicyName: "Glue-Crawler"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "glue:StartCrawler"
+                  - "glue:GetCrawler"
+                  - "glue:CreateCrawler"
+                  - "glue:DeleteCrawler"
+                Resource: 
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ResourcePrefix}${CFDataName}-crawler"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ResourcePrefix}${CFDataName}-terms-crawler"
+              - Effect: "Allow"
+                Action:
+                  - "iam:PassRole"
+                Resource: !Ref GlueRoleARN
+        - PolicyName: "QuickSight-Enhanced"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "quicksight:CreateDataSource"
+                  - "quicksight:CreateDataSet"
+                  - "quicksight:CreateIngestion"
+                  - "quicksight:DescribeDataSet"
+                  - "quicksight:DescribeDataSource"
+                  - "quicksight:UpdateDataSet"
+                  - "quicksight:UpdateDataSource"
+                  - "quicksight:UpdateDataSetPermissions"
+                  - "quicksight:UpdateDataSourcePermissions"
+                  - "quicksight:PassDataSource"
+                  - "quicksight:PassDataSet"
+                  - "glue:GetTable"
+                  - "glue:GetTables"
+                  - "glue:GetDatabase"
+                Resource: "*"
+
+  AgreementsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Architectures: [x86_64]
+      Timeout: 900
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          ROLE_NAME: !Ref MultiAccountRoleName
+          MODULE_NAME: !Ref CFDataName
+          RESOURCE_PREFIX: !Ref ResourcePrefix
+          GLUE_ROLE_ARN: !Ref GlueRoleARN
+          DATABASE_NAME: !Ref DatabaseName
+          QUICKSIGHT_PRINCIPAL_ARN: !Ref QuickSightPrincipalArn
+      Code:
+        ZipFile: |
+          import os, json, csv, io, logging, boto3, urllib3, time, re
+          from datetime import datetime, timezone
+          from botocore.auth import SigV4Auth
+          from botocore.awsrequest import AWSRequest
+          from botocore.credentials import Credentials
+
+          def _clean_text(s, maxlen=8192):
+              if not s:
+                  return ''
+              # remove newlines/tabs and collapse whitespace
+              s = str(s).replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
+              s = re.sub(r'\s+', ' ', s).strip()
+              return s[:maxlen]
+
+          def safe_str(value):
+              if value is None:
+                  return ''
+              return str(value)
+
+          BUCKET = os.environ['BUCKET_NAME']
+          ROLE_NAME = os.environ['ROLE_NAME']
+          MODULE_NAME = os.environ.get('MODULE_NAME', 'agreements')
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+          # ---------- helpers ----------
+          def assume_and_client(account_id, service, region='us-east-1'):
+              sts = boto3.client('sts')
+              resp = sts.assume_role(
+                  RoleArn=f"arn:aws:iam::{account_id}:role/{ROLE_NAME}",
+                  RoleSessionName=f"{MODULE_NAME}-session-{int(time.time())}"
+              )
+              creds = resp['Credentials']
+              return boto3.client(
+                  service,
+                  region_name=region,
+                  aws_access_key_id=creds['AccessKeyId'],
+                  aws_secret_access_key=creds['SecretAccessKey'],
+                  aws_session_token=creds['SessionToken'],
+              ), creds
+
+          def signed_post(host, path, payload, region, credentials, service='aws-marketplace', timeout=30):
+              # Discovery calls (GetProduct) use SigV4 with service 'aws-marketplace'
+              url = f"https://{host}{path}"
+              # normalize STS dict to object if needed
+              if isinstance(credentials, dict):
+                  class _Shim:
+                      def __init__(self, d):
+                          self.access_key = d['AccessKeyId']
+                          self.secret_key = d['SecretAccessKey']
+                          self.token = d.get('SessionToken')
+                  credentials = _Shim(credentials)
+              req = AWSRequest(
+                  method='POST',
+                  url=url,
+                  data=json.dumps(payload),
+                  headers={'Content-Type': 'application/json'}
+              )
+              SigV4Auth(credentials, service, region).add_auth(req)
+              http = urllib3.PoolManager(cert_reqs='CERT_NONE')
+              resp = http.request('POST', req.url, headers=dict(req.headers), body=req.body, timeout=timeout)
+              if resp.status != 200:
+                  raise RuntimeError(f"{host}{path} -> HTTP {resp.status}: {resp.data[:256]!r}")
+              return json.loads(resp.data.decode('utf-8'))
+
+          def get_offer_terms(credentials, offer_id, region='us-east-1'):
+              try:
+                  return signed_post(
+                      f"catalog.marketplace.{region}.amazonaws.com",
+                      "/get-offer-terms",
+                      {"offerId": offer_id},
+                      region,
+                      credentials,
+                      service='aws-marketplace'
+                  )
+              except Exception as e:
+                  logger.warning(f"[getOfferTerms] {offer_id} failed: {e}")
+                  return None
+
+          def get_agreement_charges(agr_client, agreement_id):
+              try:
+                  return agr_client.list_agreement_charges(agreementId=agreement_id)
+              except Exception as e:
+                  logger.warning(f"[listAgreementCharges] {agreement_id} failed: {e}")
+                  return None
+
+          def get_agreement_terms(agr_client, agreement_id):
+              try:
+                  return agr_client.get_agreement_terms(agreementId=agreement_id)
+              except Exception as e:
+                  logger.warning(f"[getAgreementTerms] {agreement_id} failed: {e}")
+                  return None
+
+          def get_product_raw(credentials, product_id, region='us-east-1'):
+              return signed_post(
+                  f"discovery.marketplace.{region}.amazonaws.com",
+                  "/getProduct",
+                  {"productId": product_id},
+                  region,
+                  credentials
+              )
+
+          def s3_put_jsonl(bucket, key, rows):
+              s3 = boto3.client('s3')
+              buf = io.StringIO()
+              for r in rows:
+                  # ensure every value is a string
+                  r_str = {k: safe_str(v) for k, v in r.items()}
+                  buf.write(json.dumps(r_str, ensure_ascii=False))
+                  buf.write('\n')
+              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'), ContentType='application/json')
+
+          def s3_put_csv(bucket, key, rows):
+              s3 = boto3.client('s3')
+              buf = io.StringIO()
+              if rows:
+                  # EXACT header order requested
+                  fieldnames = [
+                      'acceptance_time','acceptor_account_id','agreement_id','agreement_type','agreement_value',
+                      'collection_timestamp','currency_code','end_time','offer_id','party_type',
+                      'product_deployedOnAws','product_id','product_manufacturer_displayName',
+                      'product_productId','product_productName','product_shortDescription',
+                      'proposer_account_id','source_account_id','status','eula_url'
+                  ]
+                  w = csv.DictWriter(buf, fieldnames=fieldnames, quoting=csv.QUOTE_ALL, lineterminator='\n')
+                  w.writeheader()
+                  w.writerows(rows)
+              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'))
+
+          # ---------- handler ----------
+          def lambda_handler(event, context):
+              if 'account' not in event:
+                  raise RuntimeError(f"Missing 'account' in event for {MODULE_NAME}")
+              account = json.loads(event['account'])
+              run_for_account(account['account_id'])
+              return {'statusCode': 200}
+
+          def ensure_and_trigger_crawlers():
+              glue = boto3.client('glue')
+              
+              # Crawler configurations
+              crawlers = [
+                  {
+                      'name': f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-crawler",
+                      's3_path': f"s3://{BUCKET}/{MODULE_NAME}/agreements/data/",
+                      'table_prefix': 'agreements_'
+                  },
+                  {
+                      'name': f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-terms-crawler", 
+                      's3_path': f"s3://{BUCKET}/{MODULE_NAME}/terms/data/",
+                      'table_prefix': 'agreement_terms_'
+                  }
+              ]
+              
+              for crawler_config in crawlers:
+                  crawler_name = crawler_config['name']
+                  
+                  # Delete existing crawler to recreate with new config
+                  try:
+                      glue.get_crawler(Name=crawler_name)
+                      logger.info(f"Deleting existing crawler {crawler_name} to recreate with new config")
+                      glue.delete_crawler(Name=crawler_name)
+                      # Wait a moment for deletion to complete
+                      import time
+                      time.sleep(2)
+                  except glue.exceptions.EntityNotFoundException:
+                      logger.info(f"Crawler {crawler_name} doesn't exist")
+                  except Exception as e:
+                      logger.warning(f"Could not delete crawler {crawler_name}: {e}")
+                  
+                  # Create crawler with new configuration
+                  try:
+                      glue.create_crawler(
+                          Name=crawler_name,
+                          Role=os.environ.get('GLUE_ROLE_ARN', ''),
+                          DatabaseName=os.environ.get('DATABASE_NAME', 'optimization_data'),
+                          TablePrefix=crawler_config['table_prefix'],
+                          Targets={
+                              'S3Targets': [
+                                  {
+                                      'Path': crawler_config['s3_path']
+                                  }
+                              ]
+                          },
+                          SchemaChangePolicy={
+                              'UpdateBehavior': 'UPDATE_IN_DATABASE',
+                              'DeleteBehavior': 'LOG'
+                          },
+                          RecrawlPolicy={
+                              'RecrawlBehavior': 'CRAWL_EVERYTHING'
+                          }
+                      )
+                      logger.info(f"Created crawler {crawler_name} with grouping configuration")
+                  except glue.exceptions.AlreadyExistsException:
+                      logger.info(f"Crawler {crawler_name} already exists, skipping creation")
+                  except Exception as e:
+                      logger.error(f"Failed to create crawler {crawler_name}: {e}")
+                      continue
+                  
+                  # Start the crawler
+                  try:
+                      glue.start_crawler(Name=crawler_name)
+                      logger.info(f"Started crawler {crawler_name}")
+                  except Exception as e:
+                      if "CrawlerRunningException" not in str(e):
+                          logger.warning(f"Could not start crawler {crawler_name}: {e}")
+                      else:
+                          logger.info(f"Crawler {crawler_name} is already running")
+
+          def create_quicksight_datasets():
+              quicksight = boto3.client('quicksight')
+              glue = boto3.client('glue')
+              account_id = boto3.client('sts').get_caller_identity()['Account']
+              region = boto3.Session().region_name
+              qs_principal = os.environ.get('QUICKSIGHT_PRINCIPAL_ARN')
+              
+              # Wait for crawlers to complete
+              crawler_names = [
+                  f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-crawler",
+                  f"{os.environ.get('RESOURCE_PREFIX', '')}{MODULE_NAME}-terms-crawler"
+              ]
+              
+              for crawler_name in crawler_names:
+                  max_wait = 300  # 5 minutes max wait
+                  wait_time = 0
+                  while wait_time < max_wait:
+                      try:
+                          response = glue.get_crawler(Name=crawler_name)
+                          state = response['Crawler']['State']
+                          if state == 'READY':
+                              logger.info(f"Crawler {crawler_name} completed")
+                              break
+                          elif state in ['STOPPING', 'RUNNING']:
+                              logger.info(f"Crawler {crawler_name} is {state}, waiting...")
+                              time.sleep(30)
+                              wait_time += 30
+                          else:
+                              logger.warning(f"Crawler {crawler_name} in unexpected state: {state}")
+                              break
+                      except Exception as e:
+                          logger.error(f"Error checking crawler {crawler_name}: {e}")
+                          break
+              
+              # Get actual table names from Glue
+              database_name = os.environ.get('DATABASE_NAME', 'optimization_data')
+              try:
+                  tables_response = glue.get_tables(DatabaseName=database_name)
+                  table_names = [table['Name'] for table in tables_response['TableList']]
+                  logger.info(f"Found tables: {table_names}")
+              except Exception as e:
+                  logger.error(f"Could not get table names: {e}")
+                  return
+              
+              # Find the actual table names
+              agreements_table = None
+              terms_table = None
+              
+              for table_name in table_names:
+                  if 'agreement' in table_name.lower() and 'term' not in table_name.lower():
+                      agreements_table = table_name
+                  elif 'term' in table_name.lower():
+                      terms_table = table_name
+              
+              if not agreements_table:
+                  logger.error("Could not find agreements table")
+                  return
+              
+              # Dataset configurations with actual table names
+              datasets = []
+              if agreements_table:
+                  datasets.append({
+                      'id': 'marketplace-agreements',
+                      'name': 'Marketplace Agreements',
+                      'table': agreements_table
+                  })
+              
+              if terms_table:
+                  datasets.append({
+                      'id': 'marketplace-agreement-terms',
+                      'name': 'Marketplace Agreement Terms', 
+                      'table': terms_table
+                  })
+              
+              for dataset_config in datasets:
+                  try:
+                      # Check if dataset exists
+                      try:
+                          quicksight.describe_data_set(
+                              AwsAccountId=account_id,
+                              DataSetId=dataset_config['id']
+                          )
+                          logger.info(f"Dataset {dataset_config['id']} already exists, skipping creation")
+                          continue
+                      except quicksight.exceptions.ResourceNotFoundException:
+                          pass
+                      
+                      # Create data source first
+                      data_source_id = f"{dataset_config['id']}-athena-source"
+                      try:
+                          quicksight.describe_data_source(
+                              AwsAccountId=account_id,
+                              DataSourceId=data_source_id
+                          )
+                          logger.info(f"Data source {data_source_id} already exists")
+                      except quicksight.exceptions.ResourceNotFoundException:
+                          try:
+                              quicksight.create_data_source(
+                                  AwsAccountId=account_id,
+                                  DataSourceId=data_source_id,
+                                  Name=f"{dataset_config['name']} Athena Source",
+                                  Type='ATHENA',
+                                  DataSourceParameters={
+                                      'AthenaParameters': {
+                                          'WorkGroup': 'primary'
+                                      }
+                                  },
+                                  Permissions=[
+                                      {
+                                          'Principal': qs_principal,
+                                          'Actions': [
+                                              "quicksight:DescribeDataSource",
+                                              "quicksight:DescribeDataSourcePermissions",
+                                              "quicksight:PassDataSource",
+                                              "quicksight:UpdateDataSource",
+                                              "quicksight:DeleteDataSource",
+                                              "quicksight:UpdateDataSourcePermissions"
+                                          ]
+                                      }
+                                  ]
+                              )
+                              logger.info(f"Created data source {data_source_id}")
+                          except Exception as e:
+                              logger.error(f"Could not create data source {data_source_id}: {e}")
+                              continue
+                      
+                      # Get table schema from Glue
+                      try:
+                          table_response = glue.get_table(
+                              DatabaseName=database_name,
+                              Name=dataset_config['table']
+                          )
+                          columns = table_response['Table']['StorageDescriptor']['Columns']
+                          input_columns = [{'Name': col['Name'], 'Type': 'STRING'} for col in columns]
+                          
+                          logger.info(f"Table {dataset_config['table']} has {len(input_columns)} columns")
+                          
+                      except Exception as e:
+                          logger.warning(f"Could not get table schema for {dataset_config['table']}: {e}")
+                          # Fallback to basic columns
+                          input_columns = [
+                              {'Name': 'agreement_id', 'Type': 'STRING'},
+                              {'Name': 'status', 'Type': 'STRING'}
+                          ]
+                      
+                      # Create dataset
+                      quicksight.create_data_set(
+                          AwsAccountId=account_id,
+                          DataSetId=dataset_config['id'],
+                          Name=dataset_config['name'],
+                          ImportMode='SPICE',
+                          PhysicalTableMap={
+                              'table1': {
+                                  'RelationalTable': {
+                                      'DataSourceArn': f"arn:aws:quicksight:{region}:{account_id}:datasource/{data_source_id}",
+                                      'Catalog': 'AwsDataCatalog',
+                                      'Schema': database_name,
+                                      'Name': dataset_config['table'],
+                                      'InputColumns': input_columns
+                                  }
+                              }
+                          },
+                          Permissions=[
+                              {
+                                  'Principal': qs_principal,
+                                  'Actions': [
+                                      "quicksight:DescribeDataSet",
+                                      "quicksight:DescribeDataSetPermissions",
+                                      "quicksight:PassDataSet",
+                                      "quicksight:DescribeIngestion",
+                                      "quicksight:ListIngestions",
+                                      "quicksight:UpdateDataSet",
+                                      "quicksight:DeleteDataSet",
+                                      "quicksight:CreateIngestion",
+                                      "quicksight:CancelIngestion",
+                                      "quicksight:UpdateDataSetPermissions"
+                                  ]
+                              }
+                          ]
+                      )
+                      logger.info(f"Created QuickSight dataset {dataset_config['id']}")
+                      
+                      # Trigger SPICE ingestion
+                      try:
+                          quicksight.create_ingestion(
+                              DataSetId=dataset_config['id'],
+                              IngestionId=f"ingestion-{int(time.time())}",
+                              AwsAccountId=account_id
+                          )
+                          logger.info(f"Started SPICE ingestion for {dataset_config['id']}")
+                      except Exception as e:
+                          logger.warning(f"Could not start ingestion for {dataset_config['id']}: {e}")
+                      
+                  except Exception as e:
+                      logger.error(f"Failed to create QuickSight dataset {dataset_config['id']}: {e}")
+
+          def run_for_account(account_id):
+              agr, sts_creds = assume_and_client(account_id, 'marketplace-agreement', region='us-east-1')
+              credentials = Credentials(
+                  access_key=sts_creds['AccessKeyId'],
+                  secret_key=sts_creds['SecretAccessKey'],
+                  token=sts_creds['SessionToken']
+              )
+
+              # search agreements (Acceptor, PurchaseAgreement)
+              agreements = []
+              next_token = None
+              while True:
+                  params = {
+                      'catalog': 'AWSMarketplace',
+                      'filters': [
+                          {'name': 'PartyType', 'values': ['Acceptor']},
+                          {'name': 'AgreementType', 'values': ['PurchaseAgreement']}
+                      ],
+                      'maxResults': 50
+                  }
+                  if next_token:
+                      params['nextToken'] = next_token
+                  resp = agr.search_agreements(**params)
+                  agreements.extend(resp.get('agreementViewSummaries', []))
+                  next_token = resp.get('nextToken')
+                  if not next_token:
+                      break
+
+              rows = []
+              terms_rows = []  # Separate list for terms data
+              now_iso = datetime.now(timezone.utc).isoformat()
+
+              for summary in agreements:
+                  agreement_id = summary.get('agreementId')
+                  if not agreement_id:
+                      continue
+                  
+                  # Only process ACTIVE agreements
+                  if summary.get('status') != 'ACTIVE':
+                      continue
+                  agreement_id = summary.get('agreementId')
+                  base = {
+                      'acceptance_time': str(summary.get('acceptanceTime','')),
+                      'acceptor_account_id': safe_str((summary.get('acceptor') or {}).get('accountId')),
+                      'agreement_id': str(agreement_id),
+                      'agreement_type': str(summary.get('agreementType','')),
+                      'agreement_value': str(''),
+                      'collection_timestamp': str(now_iso),
+                      'currency_code': str(''),
+                      'end_time': str(summary.get('endTime','')),
+                      'offer_id': str(''),
+                      'party_type': str('Acceptor'),
+                      'product_deployedOnAws': str(''),
+                      'product_id': str(''),
+                      'product_manufacturer_displayName': str(''),
+                      'product_productId': str(''),
+                      'product_productName': str(''),
+                      'product_shortDescription': str(''),
+                      'proposer_account_id': str((summary.get('proposer') or {}).get('accountId','')),
+                      'source_account_id': str(account_id),
+                      'status': str(summary.get('status','')),
+                      'eula_url': str('')
+                  }
+
+                  # DescribeAgreement -> estimated charges + offer id + product id (via resources)
+                  try:
+                      det = agr.describe_agreement(agreementId=agreement_id)
+                      est = det.get('estimatedCharges') or {}
+                      base['agreement_value'] = str(est.get('agreementValue') or est.get('amount') or est.get('value') or '')
+                      base['currency_code'] = str(est.get('currencyCode') or '')
+                      prop = det.get('proposalSummary') or {}
+                      base['offer_id'] = str(prop.get('offerId',''))
+
+                      # product id from resources
+                      pid = ''
+                      for r in (prop.get('resources') or []):
+                          rid = r.get('id') or ''
+                          if rid:
+                              pid = rid
+                              break
+                      if pid:
+                          base['product_id'] = str(pid)
+                          prod = get_product_raw(credentials, pid) or {}
+                          base['product_productId'] = str(prod.get('productId','') or pid)
+                          base['product_productName'] = str(prod.get('productName',''))
+                          base['product_manufacturer_displayName'] = str((prod.get('manufacturer') or {}).get('displayName',''))
+                          if 'deployedOnAws' in prod:
+                              base['product_deployedOnAws'] = str(prod['deployedOnAws'])
+                          # base['product_shortDescription'] = _clean_text((prod.get('shortDescription') or ''))[:8192]
+                  except Exception as e:
+                      logger.warning("[describe_agreement/getProduct] %s failed: %s", agreement_id, e)
+
+                  # Get agreement terms using agreement_id
+                  try:
+                      logger.info(f"Calling getAgreementTerms for agreement_id: {agreement_id}")
+                      terms = get_agreement_terms(agr, agreement_id) or {}
+                      accepted_terms = terms.get('acceptedTerms', [])
+                      logger.info(f"getAgreementTerms returned {len(accepted_terms)} terms")
+                      
+                      # Extract EULA for main agreements CSV
+                      for term in accepted_terms:
+                          for term_type, term_data in term.items():
+                              if term_type == 'legalTerm' and term_data and isinstance(term_data, dict):
+                                  documents = term_data.get('documents', [])
+                                  for doc in documents:
+                                      if doc.get('type') in ['StandardEula', 'CustomEula', 'EnterpriseEula']:
+                                          base['eula_url'] = doc.get('url', '')
+                                          break
+                                  break
+                      
+                      # Create simplified terms rows - only LegalTerm and PaymentSchedulePricingTerm
+                      for term in accepted_terms:
+                          for term_type, term_data in term.items():
+                              if term_data and isinstance(term_data, dict):
+                                  if term_type == 'legalTerm':
+                                      # LegalTerm - extract documents
+                                      documents = term_data.get('documents', [])
+                                      for doc in documents:
+                                          if doc.get('type') in ['StandardEula', 'CustomEula', 'EnterpriseEula']:
+                                              term_row = {
+                                                  'agreement_id': str(agreement_id),
+                                                  'term_type': str('LegalTerm'),
+                                                  'documents_url': str(doc.get('url', '')),
+                                                  'documents_type': str(doc.get('type', '')),
+                                                  'currencyCode': str(''),
+                                                  'chargeAmount': str(''),
+                                                  'chargeDate': str('')
+                                              }
+                                              terms_rows.append(term_row)
+                                  
+                                  elif term_type == 'paymentScheduleTerm':
+                                      # PaymentSchedulePricingTerm - extract schedule details
+                                      currency_code = term_data.get('currencyCode', '')
+                                      schedule = term_data.get('schedule', [])
+                                      for schedule_item in schedule:
+                                          term_row = {
+                                              'agreement_id': str(agreement_id),
+                                              'term_type': str('PaymentSchedulePricingTerm'),
+                                              'documents_url': str(''),
+                                              'documents_type': str(''),
+                                              'currencyCode': str(currency_code),
+                                              'chargeAmount': str(schedule_item.get('chargeAmount', '')),
+                                              'chargeDate': str(schedule_item.get('chargeDate', ''))
+                                          }
+                                          terms_rows.append(term_row)
+                                  break  # Only one field populated in union
+                  except Exception as e:
+                      logger.warning("[getAgreementTerms] %s failed: %s", agreement_id, e)
+
+                  # Get agreement charges (remove this section since we're not using charges anymore)
+
+                  rows.append(base)
+
+              # Only create CSVs if there are agreements
+              if not rows:
+                  logger.info(f"No agreements found for account {account_id}, skipping CSV creation")
+                  return
+
+              key = f"{MODULE_NAME}/agreements/data/agreements_{account_id}.jsonl"
+              s3_put_jsonl(BUCKET, key, rows)
+              logger.info("Wrote %d rows to s3://%s/%s", len(rows), BUCKET, key)
+              
+              # Save terms data to separate CSV only if there are terms
+              if terms_rows:
+                  terms_fieldnames = [
+                      'agreement_id', 'term_type', 'documents_url', 'documents_type',
+                      'currencyCode', 'chargeAmount', 'chargeDate'
+                  ]
+                  
+                  terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.jsonl"
+                  s3_put_jsonl(BUCKET, terms_key, terms_rows)
+                  logger.info("Wrote %d term rows to s3://%s/%s", len(terms_rows), BUCKET, terms_key)
+              else:
+                  logger.info(f"No terms found for account {account_id}, skipping terms CSV creation")
+              
+              # Trigger crawler after data upload
+              ensure_and_trigger_crawlers()
+              
+              # Create QuickSight datasets (will wait for crawlers to complete)
+              create_quicksight_datasets()
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ResourcePrefix}${CFDataName}-Lambda"
+      RetentionInDays: 14
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt AgreementsLambda.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-crawler"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: !Sub 'Scheduler for the ${CFDataName} module'
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Schedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  ModuleSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AgreementsLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ModuleSchedule.Arn
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ResourcePrefix}${CFDataName}-crawler"
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_EVERYTHING
