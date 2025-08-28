@@ -1,6 +1,6 @@
-# https://github.com/awslabs/cid-data-collection-framework/blob/main/data-collection/v3.12.1/deploy/deploy-data-read-permissions.yaml
+# https://github.com/awslabs/cid-data-collection-framework/blob/main/data-collection/v3.13.1/deploy/deploy-data-read-permissions.yaml
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CID Data Collection - All-in-One for Management Account v3.12.1 - AWS Solution SO9011
+Description: CID Data Collection - All-in-One for Management Account v3.13.1 - AWS Solution SO9011
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -206,7 +206,7 @@ Resources:
   DataCollectorMgmtAccountReadStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.12.1/deploy-in-management-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/deploy-in-management-account.yaml"
       Parameters:
         DataCollectionAccountID: !Ref DataCollectionAccountID
         ManagementAccountRole: !Ref ManagementAccountRole
@@ -223,7 +223,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployModuleReadInMgmt
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.12.1/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/deploy-in-linked-account.yaml"
       Parameters:
         DataCollectionAccountID: !Ref DataCollectionAccountID
         MultiAccountRoleName: !Ref MultiAccountRoleName
@@ -243,7 +243,7 @@ Resources:
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
     Properties:
-      Description: "StackSet in charge of deploying read roles across organization accounts v3.12.1"
+      Description: "StackSet in charge of deploying read roles across organization accounts v3.13.1"
       PermissionModel: SERVICE_MANAGED
       AutoDeployment:
         Enabled: true
@@ -292,4 +292,4 @@ Resources:
         - CAPABILITY_IAM
         - CAPABILITY_NAMED_IAM
       StackSetName: !Sub "StackSet-${AWS::AccountId}-OptimizationDataRole"
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.12.1/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/deploy-in-linked-account.yaml"

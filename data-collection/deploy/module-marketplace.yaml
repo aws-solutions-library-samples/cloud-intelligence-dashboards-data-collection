@@ -103,6 +103,22 @@ Resources:
               - Effect: "Allow"
                 Action: "sts:AssumeRole"
                 Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:PutObjectAcl"
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}/*'
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}'
 
 
   AgreementsLambda:
@@ -125,8 +141,9 @@ Resources:
           DATABASE_NAME: !Ref DatabaseName
       Code:
         ZipFile: |
-          import os, json, csv, io, logging, boto3, urllib3, time, re
+          import os, json, csv, io, logging, boto3, urllib3, time, re, tempfile
           from datetime import datetime, timezone
+          from contextlib import contextmanager
           from botocore.auth import SigV4Auth
           from botocore.awsrequest import AWSRequest
           from botocore.credentials import Credentials
@@ -228,6 +245,33 @@ Resources:
                   credentials
               )
 
+          @contextmanager
+          def s3_csv_file(s3_client, bucket, s3_path, fieldnames):
+              temp_file = None
+              try:
+                  # Create temporary file
+                  temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
+                  writer = csv.DictWriter(temp_file, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+                  writer.writeheader()
+                  yield writer.writerow
+                  if not temp_file.closed:
+                      temp_file.close()
+                  s3_client.upload_file(temp_file.name, bucket, s3_path)
+                  logger.info(f"Uploaded CSV to s3://{bucket}/{s3_path}")
+
+              except Exception as e:
+                  logger.error(f"Error during CSV S3 upload s3://{bucket}/{s3_path}: {str(e)}")
+                  raise
+
+              finally:
+                  if temp_file and not temp_file.closed:
+                      temp_file.close()
+                  if temp_file and os.path.exists(temp_file.name):
+                      try:
+                          os.unlink(temp_file.name)
+                      except OSError as e:
+                          logger.info(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+
           # ---------- handler ----------
           def lambda_handler(event, context):
               if 'account' not in event:
@@ -273,9 +317,10 @@ Resources:
                   if not agreement_id:
                       continue
                   
-                  # Only process ACTIVE agreements
-                  if summary.get('status') != 'ACTIVE':
+                  # Only process agreements with valid agreement ID
+                  if not summary.get('agreementId'):
                       continue
+                  
                   agreement_id = summary.get('agreementId')
                   base = {
                       'acceptance_time': str(summary.get('acceptanceTime','')),
@@ -389,15 +434,37 @@ Resources:
 
                   rows.append(base)
 
-              # Only log if there are agreements
+              # Write data to S3 if there are agreements
               if not rows:
                   logger.info(f"No agreements found for account {account_id}")
                   return
 
+              # Write marketplace data as CSV
+              s3_client = boto3.client('s3')
+              marketplace_key = f"{MODULE_NAME}/marketplace/data/marketplace_{account_id}.csv"
+              marketplace_fieldnames = [
+                  'acceptance_time','acceptor_account_id','agreement_id','agreement_type','agreement_value',
+                  'collection_timestamp','currency_code','end_time','offer_id','party_type',
+                  'product_deployedOnAws','product_id','product_manufacturer_displayName',
+                  'product_productId','product_productName','product_shortDescription',
+                  'proposer_account_id','source_account_id','status','eula_url'
+              ]
+              with s3_csv_file(s3_client, BUCKET, marketplace_key, marketplace_fieldnames) as write_row:
+                  for row in rows:
+                      write_row(row)
+              
               logger.info(f"Collected {len(rows)} marketplace agreements for account {account_id}")
               
-              # Log terms data collection
+              # Write terms data as CSV if available
               if terms_rows:
+                  terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.csv"
+                  terms_fieldnames = [
+                      'agreement_id', 'term_type', 'documents_url', 'documents_type',
+                      'currencyCode', 'chargeAmount', 'chargeDate'
+                  ]
+                  with s3_csv_file(s3_client, BUCKET, terms_key, terms_fieldnames) as write_row:
+                      for term_row in terms_rows:
+                          write_row(term_row)
                   logger.info(f"Collected {len(terms_rows)} agreement terms for account {account_id}")
               else:
                   logger.info(f"No terms found for account {account_id}")
