@@ -145,15 +145,14 @@ Resources:
           def _clean_text(s, maxlen=8192):
               if not s:
                   return ''
-              # remove newlines/tabs and collapse whitespace
-              s = str(s).replace('\r', ' ').replace('\n', ' ').replace('\t', ' ')
-              s = re.sub(r'\s+', ' ', s).strip()
+              # collapse all whitespace into single spaces
+              s = re.sub(r'\s+', ' ', str(s)).strip()
               return s[:maxlen]
 
           def safe_str(value):
               if value is None:
                   return ''
-              return str(value)
+              return str(value or '')
 
           BUCKET = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
