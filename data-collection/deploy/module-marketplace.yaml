@@ -103,18 +103,7 @@ Resources:
               - Effect: "Allow"
                 Action: "sts:AssumeRole"
                 Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
-        - PolicyName: "Marketplace-Discovery-GetProduct"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "aws-marketplace:GetProduct"   # Discovery (signed HTTP)
-                  - "aws-marketplace:GetAgreementTerms"  # Agreement service
-                  - "aws-marketplace:ListAgreementCharges"  # Agreement service
-                  - "marketplace-agreement:GetAgreementTerms"  # Agreement service
-                  - "marketplace-agreement:ListAgreementCharges"  # Agreement service
-                Resource: "*"
+
 
   AgreementsLambda:
     Type: AWS::Lambda::Function
