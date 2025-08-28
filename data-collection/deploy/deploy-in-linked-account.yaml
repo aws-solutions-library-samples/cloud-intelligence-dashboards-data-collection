@@ -503,7 +503,6 @@ Resources:
               - "marketplace-agreement:GetAgreementTerms"
               - "marketplace-agreement:ListAgreementCharges"
               - "marketplace-agreement:SearchAgreements"
-              - "sts:GetCallerIdentity"
             Resource: "*"
       Roles:
         - Ref: LambdaRole

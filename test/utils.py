@@ -174,15 +174,6 @@ def deploy_stack(cloudformation, stack_name: str, url: str, parameters: list[dic
         except cloudformation.exceptions.ClientError as exc:
             if 'No updates are to be performed.' in str(exc):
                 logger.info(f'No updates are to be performed for {stack_name}')
-            elif 'DELETE_COMPLETE state and can not be updated' in str(exc):
-                logger.info(f'{stack_name} is in DELETE_COMPLETE state, creating new stack')
-                res = cloudformation.create_stack(
-                    EnableTerminationProtection=False,
-                    OnFailure='DELETE',
-                    TimeoutInMinutes=60,
-                    **options,
-                )
-                logger.info(f'{stack_name} creation started {res}')
             else:
                 logger.error(exc)
     except Exception as exc:
