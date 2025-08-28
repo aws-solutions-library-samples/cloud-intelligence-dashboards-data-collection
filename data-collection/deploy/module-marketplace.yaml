@@ -103,27 +103,6 @@ Resources:
               - Effect: "Allow"
                 Action: "sts:AssumeRole"
                 Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
-        - PolicyName: "S3-Access"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "s3:PutObject"
-                  - "s3:GetObject"
-                  - "s3:PutObjectAcl"
-                Resource: 
-                  - !Sub "${DestinationBucketARN}/*"
-              - Effect: "Allow"
-                Action:
-                  - "s3:ListBucket"
-                Resource:
-                  - !Sub "${DestinationBucketARN}"
-              - Effect: "Allow"
-                Action:
-                  - "s3:GetBucketLocation"
-                Resource:
-                  - !Sub "${DestinationBucketARN}"
         - PolicyName: "Marketplace-Discovery-GetProduct"
           PolicyDocument:
             Version: "2012-10-17"
@@ -260,43 +239,6 @@ Resources:
                   region,
                   credentials
               )
-
-          def s3_put_jsonl(bucket, key, rows):
-              s3 = boto3.client('s3')
-              buf = io.StringIO()
-              for r in rows:
-                  # ensure every value is a string
-                  r_str = {k: safe_str(v) for k, v in r.items()}
-                  buf.write(json.dumps(r_str, ensure_ascii=False))
-                  buf.write('\n')
-              try:
-                  s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'), ContentType='application/json')
-                  logger.info(f"Successfully wrote to s3://{bucket}/{key}")
-              except Exception as e:
-                  logger.error(f"Failed to write to s3://{bucket}/{key}: {e}")
-                  raise
-
-          def s3_put_csv(bucket, key, rows):
-              s3 = boto3.client('s3')
-              buf = io.StringIO()
-              if rows:
-                  # EXACT header order requested
-                  fieldnames = [
-                      'acceptance_time','acceptor_account_id','agreement_id','agreement_type','agreement_value',
-                      'collection_timestamp','currency_code','end_time','offer_id','party_type',
-                      'product_deployedOnAws','product_id','product_manufacturer_displayName',
-                      'product_productId','product_productName','product_shortDescription',
-                      'proposer_account_id','source_account_id','status','eula_url'
-                  ]
-                  w = csv.DictWriter(buf, fieldnames=fieldnames, quoting=csv.QUOTE_ALL, lineterminator='\n')
-                  w.writeheader()
-                  w.writerows(rows)
-              try:
-                  s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'))
-                  logger.info(f"Successfully wrote to s3://{bucket}/{key}")
-              except Exception as e:
-                  logger.error(f"Failed to write to s3://{bucket}/{key}: {e}")
-                  raise
 
           # ---------- handler ----------
           def lambda_handler(event, context):
@@ -459,25 +401,18 @@ Resources:
 
                   rows.append(base)
 
-              # Only create CSVs if there are agreements
+              # Only log if there are agreements
               if not rows:
-                  logger.info(f"No agreements found for account {account_id}, skipping CSV creation")
+                  logger.info(f"No agreements found for account {account_id}")
                   return
 
-              key = f"{MODULE_NAME}/marketplace/data/marketplace_{account_id}.jsonl"
-              s3_put_jsonl(BUCKET, key, rows)
+              logger.info(f"Collected {len(rows)} marketplace agreements for account {account_id}")
               
-              # Save terms data to separate CSV only if there are terms
+              # Log terms data collection
               if terms_rows:
-                  terms_fieldnames = [
-                      'agreement_id', 'term_type', 'documents_url', 'documents_type',
-                      'currencyCode', 'chargeAmount', 'chargeDate'
-                  ]
-                  
-                  terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.jsonl"
-                  s3_put_jsonl(BUCKET, terms_key, terms_rows)
+                  logger.info(f"Collected {len(terms_rows)} agreement terms for account {account_id}")
               else:
-                  logger.info(f"No terms found for account {account_id}, skipping terms CSV creation")
+                  logger.info(f"No terms found for account {account_id}")
 
   LogGroup:
     Type: AWS::Logs::LogGroup
