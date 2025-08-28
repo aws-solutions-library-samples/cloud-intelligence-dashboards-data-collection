@@ -85,17 +85,6 @@ Resources:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
       Path: /
       Policies:
-        - !If 
-          - NeedDataBucketsKms
-          - PolicyName: "KMS"
-            PolicyDocument:
-              Version: "2012-10-17"
-              Statement:
-                - Effect: "Allow"
-                  Action:
-                    - "kms:GenerateDataKey"
-                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
-          - !Ref AWS::NoValue
         - PolicyName: "AssumeMultiAccountRole"
           PolicyDocument:
             Version: "2012-10-17"
