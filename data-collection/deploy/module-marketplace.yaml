@@ -130,9 +130,18 @@ Resources:
           DATABASE_NAME: !Ref DatabaseName
       Code:
         ZipFile: |
-          import os, json, csv, io, logging, boto3, urllib3, time, re, tempfile
-          from datetime import datetime, timezone
+          import io
+          import json
+          import logging
+          import os
+          import re
+          import tempfile
+          import time
           from contextlib import contextmanager
+          from datetime import datetime, timezone
+          from functools import partial
+          import boto3
+          import urllib3
           from botocore.auth import SigV4Auth
           from botocore.awsrequest import AWSRequest
           from botocore.credentials import Credentials
@@ -234,32 +243,18 @@ Resources:
                   credentials
               )
 
-          @contextmanager
-          def s3_csv_file(s3_client, bucket, s3_path, fieldnames):
-              temp_file = None
-              try:
-                  # Create temporary file
-                  temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
-                  writer = csv.DictWriter(temp_file, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
-                  writer.writeheader()
-                  yield writer.writerow
-                  if not temp_file.closed:
-                      temp_file.close()
-                  s3_client.upload_file(temp_file.name, bucket, s3_path)
-                  logger.info(f"Uploaded CSV to s3://{bucket}/{s3_path}")
+          def s3_put_jsonl(bucket, key, rows):
+              s3 = boto3.client('s3')
+              buf = io.StringIO()
+              for r in rows:
+                  buf.write(json.dumps(r, default=json_converter, ensure_ascii=False))
+                  buf.write('\n')
+              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().encode('utf-8'), ContentType='application/json')
 
-              except Exception as e:
-                  logger.error(f"Error during CSV S3 upload s3://{bucket}/{s3_path}: {str(e)}")
-                  raise
-
-              finally:
-                  if temp_file and not temp_file.closed:
-                      temp_file.close()
-                  if temp_file and os.path.exists(temp_file.name):
-                      try:
-                          os.unlink(temp_file.name)
-                      except OSError as e:
-                          logger.info(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+          def json_converter(obj):
+              if isinstance(obj, datetime):
+                  return obj.isoformat()
+              raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
           # ---------- handler ----------
           def lambda_handler(event, context):
@@ -428,33 +423,16 @@ Resources:
                   logger.info(f"No agreements found for account {account_id}")
                   return
 
-              # Write marketplace data as CSV
-              s3_client = boto3.client('s3')
-              marketplace_key = f"{MODULE_NAME}/marketplace/data/marketplace_{account_id}.csv"
-              marketplace_fieldnames = [
-                  'acceptance_time','acceptor_account_id','agreement_id','agreement_type','agreement_value',
-                  'collection_timestamp','currency_code','end_time','offer_id','party_type',
-                  'product_deployedOnAws','product_id','product_manufacturer_displayName',
-                  'product_productId','product_productName','product_shortDescription',
-                  'proposer_account_id','source_account_id','status','eula_url'
-              ]
-              with s3_csv_file(s3_client, BUCKET, marketplace_key, marketplace_fieldnames) as write_row:
-                  for row in rows:
-                      write_row(row)
+              # Write marketplace data as JSONL file per account (matching agreements structure)
+              key = f"{MODULE_NAME}/agreements/data/agreements_{account_id}.jsonl"
+              s3_put_jsonl(BUCKET, key, rows)
+              logger.info("Wrote %d rows to s3://%s/%s", len(rows), BUCKET, key)
               
-              logger.info(f"Collected {len(rows)} marketplace agreements for account {account_id}")
-              
-              # Write terms data as CSV if available
+              # Write terms data as JSONL file per account if available
               if terms_rows:
-                  terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.csv"
-                  terms_fieldnames = [
-                      'agreement_id', 'term_type', 'documents_url', 'documents_type',
-                      'currencyCode', 'chargeAmount', 'chargeDate'
-                  ]
-                  with s3_csv_file(s3_client, BUCKET, terms_key, terms_fieldnames) as write_row:
-                      for term_row in terms_rows:
-                          write_row(term_row)
-                  logger.info(f"Collected {len(terms_rows)} agreement terms for account {account_id}")
+                  terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.jsonl"
+                  s3_put_jsonl(BUCKET, terms_key, terms_rows)
+                  logger.info("Wrote %d term rows to s3://%s/%s", len(terms_rows), BUCKET, terms_key)
               else:
                   logger.info(f"No terms found for account {account_id}")
 

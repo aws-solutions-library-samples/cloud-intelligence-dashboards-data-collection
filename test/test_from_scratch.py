@@ -267,7 +267,7 @@ def test_resilience_hub_application_details(athena):
     assert len(data) > 0, 'resiliencehub_daily_assessments is empty'
 
 def test_marketplace_data(athena): #marketplace - specific
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."marketplace" LIMIT 10;')
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."agreements" LIMIT 10;')
     assert len(data) > 0, 'marketplace data is empty'
 
 def test_content_of_summary_not_empty(s3):
