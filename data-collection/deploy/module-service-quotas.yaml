@@ -301,7 +301,9 @@ Resources:
             }
           }
         }
-
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:

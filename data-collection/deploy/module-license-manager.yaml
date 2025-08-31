@@ -276,7 +276,25 @@ Resources:
       Targets:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-${GrantDataPrefix}/"
-
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   LicensesCrawler:
     Type: AWS::Glue::Crawler
     Properties:
@@ -286,7 +304,25 @@ Resources:
       Targets:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-${LicenseDataPrefix}/"
-
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:

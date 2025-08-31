@@ -341,12 +341,18 @@ Resources:
             "TableGroupingPolicy": "CombineCompatibleSchemas"
           },
           "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
             "Tables": {
-              "TableThreshold": 1
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
             }
           }
         }
-
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   ModuleGlueTable:
     Type: Custom::ManageGlueTable
     Properties:

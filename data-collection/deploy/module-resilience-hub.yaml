@@ -399,21 +399,25 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-compliance_drifts_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_assessment_latest/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-app_version_resources_latest/"
-
-      SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
-        DeleteBehavior: DEPRECATE_IN_DATABASE
       Configuration: |
         {
           "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
           "CrawlerOutput": {
             "Partitions": {
               "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 10,
+              "AddOrUpdateBehavior": "MergeNewColumns"
             }
           }
         }
-
-  # Resilience Hub Table Definitions
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   ResilienceHubApplicationDetailsTable:
     Type: AWS::Glue::Table
     Properties:

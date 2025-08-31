@@ -361,12 +361,25 @@ Resources:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-priority-data/"
-      Configuration: "{\"Version\":1.0,\"Grouping\":{\"TableGroupingPolicy\":\"CombineCompatibleSchemas\"},\"CrawlerOutput\":{\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 2,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: LOG
-
-  # Add glue table based on existing TAO columns
   TADataTable:
     Type: Custom::ManageGlueTable
     Properties:
