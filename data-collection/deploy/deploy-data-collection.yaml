@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-collection/deploy/deploy-data-collection.yaml
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CID Data Collection Stack v3.13.1 - AWS Solution SO9011
+Description: CID Data Collection Stack v3.14.0 - AWS Solution SO9011
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -135,10 +135,10 @@ Mappings:
     us-west-1:      {CodeBucket: aws-managed-cost-intelligence-dashboards-us-west-1 }
     us-west-2:      {CodeBucket: aws-managed-cost-intelligence-dashboards-us-west-2 }
   StepFunctionCode:
-    main-state-machine:           {TemplatePath: cfn/data-collection/v3.13.1/source/step-functions/main-state-machine.json}
-    crawler-state-machine:        {TemplatePath: cfn/data-collection/v3.13.1/source/step-functions/crawler-state-machine.json}
-    standalone-state-machine:     {TemplatePath: cfn/data-collection/v3.13.1/source/step-functions/standalone-state-machine.json}
-    health-detail-state-machine:  {TemplatePath: cfn/data-collection/v3.13.1/source/step-functions/health-detail-state-machine.json}
+    main-state-machine:           {TemplatePath: cfn/data-collection/v3.14.0/source/step-functions/main-state-machine.json}
+    crawler-state-machine:        {TemplatePath: cfn/data-collection/v3.14.0/source/step-functions/crawler-state-machine.json}
+    standalone-state-machine:     {TemplatePath: cfn/data-collection/v3.14.0/source/step-functions/standalone-state-machine.json}
+    health-detail-state-machine:  {TemplatePath: cfn/data-collection/v3.14.0/source/step-functions/health-detail-state-machine.json}
 
 Parameters:
   DestinationBucket:
@@ -1042,7 +1042,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployTAModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-trusted-advisor.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-trusted-advisor.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1064,7 +1064,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployRightsizingModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-cost-explorer-rightsizing.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-cost-explorer-rightsizing.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1085,7 +1085,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployCostAnomalyModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-cost-anomaly.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-cost-anomaly.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1107,7 +1107,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeploySupportCasesModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-support-cases.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-support-cases.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1128,7 +1128,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployBackupModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-backup.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-backup.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1149,7 +1149,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployInventoryCollectorModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-inventory.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-inventory.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1176,7 +1176,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployPricingModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-pricing.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-pricing.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1199,7 +1199,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployComputeOptimizerModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-compute-optimizer.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-compute-optimizer.yaml"
       Parameters:
         DestinationBucket: !Ref S3Bucket
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
@@ -1224,7 +1224,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployEcsChargebackModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-ecs-chargeback.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-ecs-chargeback.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1250,7 +1250,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployRDSUtilizationModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-rds-usage.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-rds-usage.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1276,7 +1276,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployEUCUtilizationModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-workspaces-metrics.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-workspaces-metrics.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1302,7 +1302,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployOrgDataModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-organization.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-organization.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1323,7 +1323,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployBudgetsModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-budgets.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-budgets.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1344,7 +1344,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployTransitGatewayModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-transit-gateway.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-transit-gateway.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1370,7 +1370,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployAWSFeedsModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-aws-feeds.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-aws-feeds.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1389,7 +1389,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployISVFeedsModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-isv-feeds.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-isv-feeds.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1407,7 +1407,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployHealthEventsModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-health-events.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-health-events.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1429,7 +1429,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployLicenseManagerModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-license-manager.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-license-manager.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1450,7 +1450,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployServiceQuotasModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-service-quotas.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-service-quotas.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1476,7 +1476,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployQuickSightModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-quicksight.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-quicksight.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1495,7 +1495,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployResilienceHubModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-resilience-hub.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-resilience-hub.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
@@ -1546,7 +1546,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployIncludeReferenceModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-reference.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-reference.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1570,7 +1570,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployAccountCollector
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/account-collector.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/account-collector.yaml"
       Parameters:
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         ManagementAccountID: !Ref ManagementAccountID

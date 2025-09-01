@@ -1,3 +1,8 @@
+# NOTE:
+# This CloudFormation template uses certain internal functionality that is subject to change in future.
+# AWS reserves the right to deprecate the use of the CloudFormation template at any stage which may affect the
+# intended functionality.
+
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Retrieves AWS Marketplace data with full GetProduct API data
 
@@ -138,17 +143,15 @@ Resources:
       Code:
         ZipFile: |
           import io
-          import json
-          import logging
           import os
           import re
-          import tempfile
+          import json
           import time
-          from contextlib import contextmanager
-          from datetime import datetime, timezone
-          from functools import partial
-          import boto3
+          import logging
+          from datetime import datetime, timezone  # pylint: disable=wrong-import-order
           import urllib3
+
+          import boto3
           from botocore.auth import SigV4Auth
           from botocore.awsrequest import AWSRequest
           from botocore.credentials import Credentials
@@ -161,8 +164,6 @@ Resources:
               return s[:maxlen]
 
           def safe_str(value):
-              if value is None:
-                  return ''
               return str(value or '')
 
           BUCKET = os.environ['BUCKET_NAME']
@@ -171,7 +172,6 @@ Resources:
 
           logger = logging.getLogger(__name__)
           logger.setLevel(logging.INFO)
-          urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
           # ---------- helpers ----------
           def assume_and_client(account_id, service, region='us-east-1'):
@@ -181,7 +181,7 @@ Resources:
                   RoleSessionName=f"{MODULE_NAME}-session-{int(time.time())}"
               )
               creds = resp['Credentials']
-              return boto3.client(
+              return boto3.client(  # pylint: disable=too-few-public-methods
                   service,
                   region_name=region,
                   aws_access_key_id=creds['AccessKeyId'],
@@ -189,12 +189,12 @@ Resources:
                   aws_session_token=creds['SessionToken'],
               ), creds
 
-          def signed_post(host, path, payload, region, credentials, service='aws-marketplace', timeout=30):
+          def signed_post(host, path, payload, region, credentials, service='aws-marketplace', timeout=30): # pylint: disable=too-many-arguments
               # Discovery calls (GetProduct) use SigV4 with service 'aws-marketplace'
               url = f"https://{host}{path}"
               # normalize STS dict to object if needed
               if isinstance(credentials, dict):
-                  class _Shim:
+                  class _Shim: # pylint: disable=too-few-public-methods
                       def __init__(self, d):
                           self.access_key = d['AccessKeyId']
                           self.secret_key = d['SecretAccessKey']
@@ -207,7 +207,7 @@ Resources:
                   headers={'Content-Type': 'application/json'}
               )
               SigV4Auth(credentials, service, region).add_auth(req)
-              http = urllib3.PoolManager(cert_reqs='CERT_NONE')
+              http = urllib3.PoolManager()
               resp = http.request('POST', req.url, headers=dict(req.headers), body=req.body, timeout=timeout)
               if resp.status != 200:
                   raise RuntimeError(f"{host}{path} -> HTTP {resp.status}: {resp.data[:256]!r}")
@@ -223,21 +223,21 @@ Resources:
                       credentials,
                       service='aws-marketplace'
                   )
-              except Exception as e:
+              except Exception as e:  # pylint: disable=broad-exception-caught
                   logger.warning(f"[getOfferTerms] {offer_id} failed: {e}")
                   return None
 
           def get_agreement_charges(agr_client, agreement_id):
               try:
                   return agr_client.list_agreement_charges(agreementId=agreement_id)
-              except Exception as e:
+              except Exception as e:  # pylint: disable=broad-exception-caught
                   logger.warning(f"[listAgreementCharges] {agreement_id} failed: {e}")
                   return None
 
           def get_agreement_terms(agr_client, agreement_id):
               try:
                   return agr_client.get_agreement_terms(agreementId=agreement_id)
-              except Exception as e:
+              except Exception as e:  # pylint: disable=broad-exception-caught
                   logger.warning(f"[getAgreementTerms] {agreement_id} failed: {e}")
                   return None
 
@@ -264,14 +264,14 @@ Resources:
               raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
           # ---------- handler ----------
-          def lambda_handler(event, context):
+          def lambda_handler(event, context):  # pylint: disable=unused-argument
               if 'account' not in event:
                   raise RuntimeError(f"Missing 'account' in event for {MODULE_NAME}")
               account = json.loads(event['account'])
               run_for_account(account['account_id'])
               return {'statusCode': 200}
 
-          def run_for_account(account_id):
+          def run_for_account(account_id):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
               agr, sts_creds = assume_and_client(account_id, 'marketplace-agreement', region='us-east-1')
               credentials = Credentials(
                   access_key=sts_creds['AccessKeyId'],
@@ -303,15 +303,15 @@ Resources:
               terms_rows = []  # Separate list for terms data
               now_iso = datetime.now(timezone.utc).isoformat()
 
-              for summary in agreements:
+              for summary in agreements:  # pylint: disable=too-many-nested-blocks
                   agreement_id = summary.get('agreementId')
                   if not agreement_id:
                       continue
-                  
+
                   # Only process agreements with valid agreement ID
                   if not summary.get('agreementId'):
                       continue
-                  
+
                   agreement_id = summary.get('agreementId')
                   base = {
                       'acceptance_time': str(summary.get('acceptanceTime','')),
@@ -361,7 +361,7 @@ Resources:
                           if 'deployedOnAws' in prod:
                               base['product_deployedOnAws'] = str(prod['deployedOnAws'])
                           # base['product_shortDescription'] = _clean_text((prod.get('shortDescription') or ''))[:8192]
-                  except Exception as e:
+                  except Exception as e:  # pylint: disable=broad-exception-caught
                       logger.warning("[describe_agreement/getProduct] %s failed: %s", agreement_id, e)
 
                   # Get agreement terms using agreement_id
@@ -370,7 +370,7 @@ Resources:
                       terms = get_agreement_terms(agr, agreement_id) or {}
                       accepted_terms = terms.get('acceptedTerms', [])
                       logger.info(f"getAgreementTerms returned {len(accepted_terms)} terms")
-                      
+
                       # Extract EULA for main agreements CSV
                       for term in accepted_terms:
                           for term_type, term_data in term.items():
@@ -381,7 +381,7 @@ Resources:
                                           base['eula_url'] = doc.get('url', '')
                                           break
                                   break
-                      
+
                       # Create simplified terms rows - only LegalTerm and PaymentSchedulePricingTerm
                       for term in accepted_terms:
                           for term_type, term_data in term.items():
@@ -401,7 +401,7 @@ Resources:
                                                   'chargeDate': str('')
                                               }
                                               terms_rows.append(term_row)
-                                  
+
                                   elif term_type == 'paymentScheduleTerm':
                                       # PaymentSchedulePricingTerm - extract schedule details
                                       currency_code = term_data.get('currencyCode', '')
@@ -418,7 +418,7 @@ Resources:
                                           }
                                           terms_rows.append(term_row)
                                   break  # Only one field populated in union
-                  except Exception as e:
+                  except Exception as e:  # pylint: disable=broad-exception-caught
                       logger.warning("[getAgreementTerms] %s failed: %s", agreement_id, e)
 
                   # Get agreement charges (remove this section since we're not using charges anymore)
@@ -434,7 +434,7 @@ Resources:
               key = f"{MODULE_NAME}/agreements/data/agreements_{account_id}.jsonl"
               s3_put_jsonl(BUCKET, key, rows)
               logger.info("Wrote %d rows to s3://%s/%s", len(rows), BUCKET, key)
-              
+
               # Write terms data as JSONL file per account if available
               if terms_rows:
                   terms_key = f"{MODULE_NAME}/terms/data/agreement_terms_{account_id}.jsonl"
