@@ -122,7 +122,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}account-collector-Lambda'
       Description: "Lambda function to retrieve the account list"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Code:
           ZipFile: |

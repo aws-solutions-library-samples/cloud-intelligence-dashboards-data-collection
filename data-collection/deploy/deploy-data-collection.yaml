@@ -279,7 +279,7 @@ Parameters:
     Default: 'no'
   IncludeQuickSightModule:
     Type: String
-    Description: Collects Marketplace Licenses and Grants
+    Description: Collects Amazon QuickSight users and gropus details
     AllowedValues: ['yes', 'no']
     Default: 'no'
   IncludeServiceQuotasModule:
@@ -540,7 +540,7 @@ Resources:
   LambdaAnalytics:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}analytics-Lambda
       Description: "Lambda function to collect general deployment metrics"
       Handler: index.lambda_handler
@@ -641,7 +641,7 @@ Resources:
   LambdaInit:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}init-Lambda
       Description: "Lambda function to initialize the stack"
       Handler: index.lambda_handler
@@ -768,7 +768,7 @@ Resources:
   LambdaManageGlueTable:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: python3.12
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}ManageGlueTable-Lambda
       Description: "Lambda function to manage glue tables"
       Handler: index.lambda_handler
@@ -1058,6 +1058,7 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
 
   RightsizeModule:
     Type: AWS::CloudFormation::Stack

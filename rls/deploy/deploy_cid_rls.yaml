@@ -48,7 +48,7 @@ Resources:
         - 'CIDRLS_${Id}'
         - Id: !Select [0, !Split ['-', !Ref 'AWS::StackName']]
       Description: LambdaFunction of python3.8.
-      Runtime: python3.9
+      Runtime: python3.13
       Code:
         S3Bucket: !Sub '${CodeBucket}-${AWS::Region}'
         S3Key: !Ref CodeKey
@@ -147,7 +147,7 @@ Resources:
   LambdaAnalytics:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: python3.9
+      Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}RLS-Analytics
       Handler: index.lambda_handler
       MemorySize: 128

@@ -419,7 +419,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-TransformationLambda'
       Description: "Lambda function to transform Security Hub events"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Code:
         ZipFile: |
@@ -530,7 +530,7 @@ Resources:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-BackfillLambda'
       Description: !Sub "Lambda function to Backfill SecurityHub Active & Archived findings for last 90days ${CFDataName}"
       Role: !GetAtt BackfillLambdaRole.Arn
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Environment:
         Variables:
@@ -715,7 +715,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Description: "Custom Resource for Triggering Backfill of Security Hub Data Collection "
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       MemorySize: 2688
       Timeout: 60
