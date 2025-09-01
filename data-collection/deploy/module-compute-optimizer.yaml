@@ -373,7 +373,7 @@ Resources:
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
       Description: "LambdaFunction to start ComputeOptimizer export jobs"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [x86_64]
       Environment:
         Variables:
@@ -523,7 +523,7 @@ Resources:
       Role: !GetAtt 'FinalizeLambdaExecutionRole.Arn'
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda-FinalizeSetup-DoNotRun'
       Description: "Lambda to Finalize Setup (call trigger lambda) or Start teardown (Cleanup buckets)"
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [ arm64 ]
       Code:
         ZipFile: |
