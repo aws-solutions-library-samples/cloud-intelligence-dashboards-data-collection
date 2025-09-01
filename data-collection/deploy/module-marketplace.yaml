@@ -1,3 +1,8 @@
+# NOTE:
+# This CloudFormation template uses certain internal functionality that is subject to change in future.
+# AWS reserves the right to deprecate the use of the CloudFormation template at any stage which may affect the
+# intended functionality.
+
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Retrieves AWS Marketplace data with full GetProduct API data
 
