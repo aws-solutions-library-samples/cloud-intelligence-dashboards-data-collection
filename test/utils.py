@@ -66,9 +66,16 @@ def athena_query(athena, sql_query, sleep_duration=1, database: str=None, catalo
     context = {}
     if database: context['Database'] = database
     if catalog: context['Catalog'] = catalog
+    
+    # Set up S3 output location for Athena query results
+    result_configuration = {
+        'OutputLocation': f's3://{BUCKET_PREFIX}{account_id}/athena-results/'
+    }
+    
     response = athena.start_query_execution(
         QueryString=sql_query,
         QueryExecutionContext=context,
+        ResultConfiguration=result_configuration,
         WorkGroup=workgroup,
     )
     query_id = response.get('QueryExecutionId')
@@ -203,6 +210,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeLicenseManagerModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
+           {'ParameterKey': 'IncludeMarketplaceModule',         'ParameterValue': "yes"},
        ]
     )
 
@@ -240,6 +248,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeServiceQuotasModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeMarketplaceModule',         'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
         ]
     )
@@ -410,6 +419,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}service-quotas-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}workspaces-metrics-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}resilience-hub-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
     ]
     lambda_arns = []

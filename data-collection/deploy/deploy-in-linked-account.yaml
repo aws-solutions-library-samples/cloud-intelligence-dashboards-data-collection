@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CID Data Collection - Role for Linked Account v3.13.1
+Description: CID Data Collection - Role for Linked Account v3.14.0
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -22,6 +22,7 @@ Metadata:
         - IncludeTransitGatewayModule
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
+        - IncludeMarketplaceModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -49,6 +50,8 @@ Metadata:
         default: 'Include Service Quotas Module'
       IncludeResilienceHubModule:
         default: 'Include Resilience Hub Module'
+      IncludeMarketplaceModule:
+        default: 'Include Marketplace Agreements Module'
 
 Parameters:
   DataCollectionAccountID:
@@ -112,6 +115,11 @@ Parameters:
     Description: Collects Resilience Hub data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeMarketplaceModule:
+    Type: String
+    Description: Collects Marketplace Agreement data from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -124,6 +132,7 @@ Conditions:
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
+  IncludeMarketplaceModulePolicy:         !Equals [!Ref IncludeMarketplaceModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -155,6 +164,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}support-cases-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -466,3 +476,45 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+  # Marketplace Agreements policy
+  AgreementsPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeMarketplaceModulePolicy
+    Properties:
+      PolicyName: AgreementsPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "organizations:ListAccounts"
+              - "organizations:DescribeOrganization"
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "aws-marketplace:DescribeAgreement"
+              - "aws-marketplace:DescribeEntity"
+              - "aws-marketplace:GetAgreementTerms"
+              - "aws-marketplace:GetProduct"
+              - "aws-marketplace:ListAgreementCharges"
+              - "aws-marketplace:ListEntities"
+              - "aws-marketplace:SearchAgreements"
+              - "aws-marketplace:SearchEntities"
+              - "marketplace-agreement:DescribeAgreement"
+              - "marketplace-agreement:GetAgreementTerms"
+              - "marketplace-agreement:ListAgreementCharges"
+              - "marketplace-agreement:SearchAgreements"
+            Resource: "*"
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of marketplace resources"
+          - id: W3037
+            reason: "GetProduct and SearchEntities are beta marketplace APIs not yet in cfn-lint validation"
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037  # Beta marketplace APIs (GetProduct, SearchEntities, marketplace-agreement service) not yet in cfn-lint validation
