@@ -1,6 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Retrieves AWS Marketplace data with full GetProduct API data
 
+Metadata:
+  cfn_nag:
+    rules_to_suppress:
+      - id: W2001
+        reason: "Parameters DestinationBucketARN, LambdaAnalyticsARN, and RegionsInScope are required by deployment framework but not used internally by this module"
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001  # Parameters required by deployment framework but not used internally
+
 Parameters:
   DatabaseName:
     Type: String
@@ -9,10 +19,6 @@ Parameters:
   DataBucketsKmsKeysArns:
     Type: String
     Description: KMS Key ARNs used for encrypting data in S3 buckets (comma separated)
-  DataCollectionBucket:
-    Type: String
-    Description: Name of the S3 Bucket in the data collection account where data will be stored
-    Default: cid-data-359484663501
   DestinationBucket:
     Type: String
     Description: Name of the S3 Bucket to be created to hold AWS Marketplace information
@@ -57,16 +63,13 @@ Parameters:
     Description: Common role for module Scheduler execution
   RegionsInScope:
     Type: String
-    Description: Comma-delimited list of regions in scope for data collection
-    Default: ""
+    Description: Comma Delimited list of AWS regions from which data about resources will be collected. GLOBAL will be replaced by us-east-1
+    Default: "GLOBAL"
 
 Outputs:
   StepFunctionARN:
     Description: ARN for the module's Step Function
     Value: !GetAtt ModuleStepFunction.Arn
-
-Conditions:
-  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
 
 Resources:
   LambdaRole:
@@ -108,7 +111,11 @@ Resources:
                   - "s3:ListBucket"
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:s3:::${DestinationBucket}'
-
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
 
   AgreementsLambda:
     Type: AWS::Lambda::Function

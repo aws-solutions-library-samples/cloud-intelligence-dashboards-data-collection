@@ -511,3 +511,9 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of marketplace resources"
+          - id: W3037
+            reason: "GetProduct and SearchEntities are beta marketplace APIs not yet in cfn-lint validation"
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037  # Beta marketplace APIs (GetProduct, SearchEntities, marketplace-agreement service) not yet in cfn-lint validation

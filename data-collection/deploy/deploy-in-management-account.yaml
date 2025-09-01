@@ -1,6 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: CID Data Collection - Role for Management Account v3.13.1
 Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001  # IncludeMarketplaceModule parameter exists for future marketplace module integration
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -104,7 +108,7 @@ Conditions:
   EnableHealthEventsModule: !Equals [!Ref IncludeHealthEventsModule, "yes"]
   EnableLicenseManagerModule: !Equals [!Ref IncludeLicenseManagerModule, "yes"]
   EnableServiceQuotasModule: !Equals [!Ref IncludeServiceQuotasModule, "yes"]
-  EnableMarketplaceModule: !Equals [!Ref IncludeMarketplaceModule, "yes"]
+  # EnableMarketplaceModule: !Equals [!Ref IncludeMarketplaceModule, "yes"]  # Currently unused
 
 Outputs:
   LambdaRole:
