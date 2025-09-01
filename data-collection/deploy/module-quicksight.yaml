@@ -312,7 +312,25 @@ Resources:
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-groupmembership-data/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-group-data/"
           - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-user-data/"
-
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 3,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:

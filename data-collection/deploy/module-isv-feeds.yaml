@@ -763,8 +763,25 @@ Resources:
           - Path: !Sub s3://${DestinationBucket}/isv-feeds/databricks-feeds-whats-new/
           - Path: !Sub s3://${DestinationBucket}/isv-feeds/gitlab-feeds-whats-new/
           - Path: !Sub s3://${DestinationBucket}/isv-feeds/circle-ci-feeds-whats-new/
-      Configuration: '{"Version":1.0,"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"}}}'
-
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 9,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
   StepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:
