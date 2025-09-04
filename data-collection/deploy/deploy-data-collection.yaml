@@ -1520,7 +1520,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployMarketplaceModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.13.1/module-marketplace.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.0/module-marketplace.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
