@@ -315,6 +315,8 @@ Resources:
                               resource_data.update({
                                   'awsResourceDetails': json.dumps(metadata_dict) if metadata_dict else json.dumps({}),
                                   'exclusionStatus': resource.get('exclusionStatus', 'N/A'),
+                                  'recommResourceId': resource.get('id', 'N/A'),
+                                  'recommResourceArn': resource.get('arn', 'N/A'),
                                   'regionCode': resource.get('regionCode', 'N/A'),
                                   'resourceStatus': resource.get('status', 'N/A')
                               })
@@ -948,6 +950,10 @@ Resources:
             - Name: accountName
               Type: string
             - Name: awsResourceDetails
+              Type: string
+            - Name: recommResourceId
+              Type: string
+            - Name: recommResourceArn
               Type: string
             - Name: exclusionStatus
               Type: string
