@@ -81,6 +81,12 @@ Resources:
                   - s3:PutObject
                 Resource:
                   - !Sub ${DestinationBucketARN}/*
+      Tags:
+        - Key: Environment
+          Value: Prod
+        - Key: Team
+          Value: Cloud FinOps
+          
     Metadata:
       cfn_nag:
         rules_to_suppress:
