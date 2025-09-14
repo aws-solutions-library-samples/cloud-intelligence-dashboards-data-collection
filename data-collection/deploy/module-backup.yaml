@@ -203,6 +203,25 @@ Resources:
               dates_iterator = map(lambda obj: obj['LastModified'].date(), s3_content_iterator)
               return max(itertools.chain([start_date], dates_iterator))
 
+          def check_region_has_backups(backup_client, name, start_date, end_date):
+              """Check if region has any backup records without fetching all data"""
+              try:
+                  paginator = backup_client.get_paginator('list_' + name.replace("-", "_"))
+                  page_iterator = paginator.paginate(
+                      ByCompleteAfter=str(start_date),
+                      ByCompleteBefore=str(end_date),
+                      ByAccountId='*',
+                      PaginationConfig={'MaxItems': 1}  # Only check first item
+                  )
+                  for page in page_iterator:
+                      jobs_key = name.title().replace("-", "")
+                      if page.get(jobs_key):
+                          return True
+                  return False
+              except Exception as exc:
+                  logger.warning(f"Error checking region for backups: {exc}")
+                  return True  # Assume has backups if check fails
+
           def lambda_handler(event, context): #pylint: disable=unused-argument
               """ this lambda collects backup copy and restore jobs
               and must be called from the corresponding Step Function to orchestrate
@@ -223,6 +242,30 @@ Resources:
               target_region = event.get('region', boto3.session.Session().region_name)
               partition = boto3.session.Session().get_partition_for_region(region_name=target_region)
               
+              # Check if this is a region check request
+              if event.get('check_only', False):
+                  try:
+                      creds = boto3.client('sts').assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                          RoleSessionName="cross_acct_lambda"
+                      )['Credentials']
+                      backup = boto3.client(
+                          "backup",
+                          target_region,
+                          aws_access_key_id=creds['AccessKeyId'],
+                          aws_secret_access_key=creds['SecretAccessKey'],
+                          aws_session_token=creds['SessionToken'],
+                      )
+                      s3_prefix = f'{PREFIX}/{PREFIX}-{name}-data/payer_id={payer_id}'
+                      start_date = last_updated_date(s3_prefix)
+                      end_date = datetime.now().date()
+                      has_backups = check_region_has_backups(backup, name, start_date, end_date)
+                      return {'hasBackups': has_backups, 'region': target_region}
+                  except Exception as exc:
+                      logger.warning(f"Region check failed for {target_region}: {exc}")
+                      return {'hasBackups': True, 'region': target_region}  # Proceed if check fails
+              
+              # Normal data collection flow
               creds = boto3.client('sts').assume_role(
                   RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
                   RoleSessionName="cross_acct_lambda"
@@ -305,7 +348,7 @@ Resources:
   'Fn::ForEach::Object':
     - AwsObject
     - !Ref AwsObjects
-      'StepFunction${AwsObject}':
+    - 'StepFunction${AwsObject}':
         Type: AWS::StepFunctions::StateMachine
         Properties:
           StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-${AwsObject}-StateMachine'
