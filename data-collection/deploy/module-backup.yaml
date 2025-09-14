@@ -234,7 +234,7 @@ Resources:
                   aws_secret_access_key=creds['SecretAccessKey'],
                   aws_session_token=creds['SessionToken'],
               )
-              s3_prefix = f'{PREFIX}/{PREFIX}-{name}-data/payer_id={payer_id}/region={target_region}'
+              s3_prefix = f'{PREFIX}/{PREFIX}-{name}-data/payer_id={payer_id}'
               start_date = last_updated_date(s3_prefix)
               end_date = datetime.now().date()
               data_iterator = iterate_paginated_results(
