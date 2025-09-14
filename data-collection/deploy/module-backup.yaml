@@ -234,7 +234,12 @@ Resources:
                   )
               params = [p for p in event.get('params', '').split() if p]
               name = params[0]
-              account = json.loads(event["account"])
+              # Handle account data in different formats
+              account_data = event["account"]
+              if isinstance(account_data, str):
+                  account = json.loads(account_data)
+              else:
+                  account = account_data
               account_id = account["account_id"]
               payer_id = account["payer_id"]
               
