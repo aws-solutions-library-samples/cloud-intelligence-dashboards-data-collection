@@ -189,10 +189,27 @@ Resources:
 
           def assume_role(account_id, service, region, role):
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
-              assumed = boto3.client('sts', region_name=region).assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{role}",
-                  RoleSessionName='data_collection'
-              )
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  assumed = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{role}",
+                      RoleSessionName='data_collection'
+                  )
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      assumed = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{role}",
+                          RoleSessionName='data_collection'
+                      )
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+              
               creds = assumed['Credentials']
               return boto3.client(service, region_name=region,
                   aws_access_key_id=creds['AccessKeyId'],
@@ -207,6 +224,9 @@ Resources:
           def read_ta(account_id, account_name):
               with open(TMP_FILE, "w", encoding='utf-8') as f:
                   support = assume_role(account_id, "support", REGIONS[0], ROLE_NAME)
+                  if not support:
+                      logger.warning(f"Skipping Trusted Advisor for account {account_id} due to STS failure.")
+                      return
                   checks = support.describe_trusted_advisor_checks(language="en")["checks"]
                   for check in checks:
                       #print(json.dumps(check))
@@ -243,6 +263,9 @@ Resources:
               """ Read recommendations and write to a file
               """
               trustedadvisor = assume_role(account_id, "trustedadvisor", REGIONS[0], ROLE_NAME)
+              if not trustedadvisor:
+                  logger.warning(f"Skipping Trusted Advisor Priority for account {account_id} due to STS failure.")
+                  return
               try:
                   # Get all checks metadata first for dynamic field mapping
                   checks_metadata = {}

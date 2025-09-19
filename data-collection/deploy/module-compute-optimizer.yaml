@@ -388,7 +388,7 @@ Resources:
           import json
           import logging
           from datetime import date
-          from functools import partial
+          from functools import partial, lru_cache
 
           BUCKET_PREFIX = os.environ["BUCKET_PREFIX"]
           INCLUDE_MEMBER_ACCOUNTS = os.environ.get("INCLUDE_MEMBER_ACCOUNTS", 'yes').lower() == 'yes'
@@ -405,6 +405,37 @@ Resources:
           sys.path.insert(0,'/tmp/')
           import boto3 #pylint: disable=wrong-import-position
 
+          @lru_cache(maxsize=100)
+          def assume_session(account_id, region):
+              """Assume role in account with fallback to global STS only if region is disabled"""
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      credentials = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
+                          RoleSessionName="data_collection"
+                      )['Credentials']
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+
+              return boto3.session.Session(
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken']
+              )
+
           def lambda_handler(event, context): #pylint: disable=unused-argument
               logger.info(f"Event data {json.dumps(event)}")
               if 'account' not in event:
@@ -414,56 +445,61 @@ Resources:
                   )
               account = json.loads(event["account"])
               payer_id = account["account_id"]
-              try:
-                  result_messages = []
-                  error_messages = []
-                  for region in REGIONS:
-                      partition = boto3.session.Session().get_partition_for_region(region_name=region)
-                      credentials = boto3.client('sts', region_name=region).assume_role(
-                          RoleArn=f"arn:{partition}:iam::{payer_id}:role/{ROLE_NAME}",
-                          RoleSessionName="data_collection"
-                      )["Credentials"]
-                      co = boto3.client(
-                          "compute-optimizer",
-                          region_name=region,
-                          aws_access_key_id=credentials['AccessKeyId'],
-                          aws_secret_access_key=credentials['SecretAccessKey'],
-                          aws_session_token=credentials['SessionToken'],
-                      )
-                      export_funcs = {
-                          'ec2_instance': partial(co.export_ec2_instance_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
-                          'auto_scale':   partial(co.export_auto_scaling_group_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
-                          'lambda':       co.export_lambda_function_recommendations,
-                          'ebs_volume':   co.export_ebs_volume_recommendations,
-                          'ecs_service':  co.export_ecs_service_recommendations,
-                          'license':      co.export_license_recommendations,
-                          'rds_database': partial(co.export_rds_database_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
-                          'idle':         co.export_idle_recommendations,
-                      }
-                      bucket = BUCKET_PREFIX + '.' + region
-                      logger.info(f"INFO: bucket={bucket}")
-                      for name, func in export_funcs.items():
-                          try:
-                              res = func(
-                                  includeMemberAccounts=INCLUDE_MEMBER_ACCOUNTS,
-                                  s3DestinationConfig={
-                                      'bucket': bucket,
-                                      'keyPrefix': date.today().strftime(
-                                          f'compute_optimizer/compute_optimizer_{name}/payer_id={payer_id}/year=%Y/month=%-m'
-                                      ),
-                                  }
-                              )
-                              result_messages.append(f"{region} {name} export queued. JobId: {res['jobId']}")
-                          except co.exceptions.LimitExceededException:
-                              result_messages.append(f"{region} {name} export is already in progress.")
-                          except Exception as exc: #pylint: disable=broad-exception-caught
-                              error_messages.append(f"ERROR: {region} {name} - {exc}")
-                  if result_messages:
-                      logger.info("Success:\n"+"\n".join(result_messages))
-                  if error_messages:
-                      raise Exception(f"There were {len(error_messages)} errors, out of {len(result_messages) + len(error_messages)} exports: \n" + "\n".join(error_messages)) #pylint: disable=broad-exception-raised
-              except Exception as exc: #pylint: disable=broad-exception-caught
-                  logger.error(f"Error {type(exc).__name__} with message {exc}")
+              
+              result_messages = []
+              error_messages = []
+              
+              for region in REGIONS:
+                  logger.info(f"Processing region: {region}")
+                  session = assume_session(payer_id, region)
+                  if not session:
+                      logger.warning(f"Skipping region {region} due to STS failure.")
+                      continue
+
+                  try:
+                      co = session.client("compute-optimizer", region_name=region)
+                  except Exception as co_init_exc:
+                      logger.error(f"Failed to initialise Compute Optimizer client in {region}: {co_init_exc}")
+                      error_messages.append(f"{region} - Compute Optimizer client init failed: {co_init_exc}")
+                      continue
+
+                  export_funcs = {
+                      'ec2_instance': partial(co.export_ec2_instance_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
+                      'auto_scale':   partial(co.export_auto_scaling_group_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
+                      'lambda':       co.export_lambda_function_recommendations,
+                      'ebs_volume':   co.export_ebs_volume_recommendations,
+                      'ecs_service':  co.export_ecs_service_recommendations,
+                      'license':      co.export_license_recommendations,
+                      'rds_database': partial(co.export_rds_database_recommendations, recommendationPreferences={'cpuVendorArchitectures': ARCH}),
+                      'idle':         co.export_idle_recommendations,
+                  }
+                  
+                  bucket = BUCKET_PREFIX + '.' + region
+                  logger.info(f"INFO: bucket={bucket}")
+                  
+                  for name, func in export_funcs.items():
+                      try:
+                          res = func(
+                              includeMemberAccounts=INCLUDE_MEMBER_ACCOUNTS,
+                              s3DestinationConfig={
+                                  'bucket': bucket,
+                                  'keyPrefix': date.today().strftime(
+                                      f'compute_optimizer/compute_optimizer_{name}/payer_id={payer_id}/year=%Y/month=%-m'
+                                  ),
+                              }
+                          )
+                          result_messages.append(f"{region} {name} export queued. JobId: {res['jobId']}")
+                      except co.exceptions.LimitExceededException:
+                          result_messages.append(f"{region} {name} export is already in progress.")
+                      except Exception as exc: #pylint: disable=broad-exception-caught
+                          error_messages.append(f"ERROR: {region} {name} - {exc}")
+              
+              if result_messages:
+                  logger.info("Success:\n"+"\n".join(result_messages))
+              if error_messages:
+                  logger.warning(f"There were {len(error_messages)} errors out of {len(result_messages) + len(error_messages)} exports.")
+                  for msg in error_messages:
+                      logger.warning(msg)
       Handler: index.lambda_handler
       MemorySize: 2688
       Timeout: 300

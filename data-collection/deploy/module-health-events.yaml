@@ -144,6 +144,7 @@ Resources:
           import jmespath
           import socket
           from datetime import date, datetime, timedelta, timezone
+          from functools import lru_cache
 
           import boto3
           from botocore.config import Config
@@ -324,6 +325,37 @@ Resources:
               active_region = split_active_endpoint[1]
               return active_region
 
+          @lru_cache(maxsize=100)
+          def assume_session(account_id, region):
+              """Assume role in account with fallback to global STS only if region is disabled"""
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      credentials = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                          RoleSessionName="data_collection"
+                      )['Credentials']
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+
+              return boto3.session.Session(
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken']
+              )
+
           def lambda_handler(event, context): #pylint: disable=unused-argument
               """ this lambda collects AWS Health Events data
               and must be called from the corresponding Step Function to orchestrate
@@ -343,19 +375,13 @@ Resources:
               account = account if isinstance(account, dict) else json.loads(account)
               account_id = account["account_id"]
               region = get_active_health_region()
-              partition = boto3.session.Session().get_partition_for_region(region_name=region)
-              creds = boto3.client('sts').assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
-                  RoleSessionName="data_collection"
-              )['Credentials']
-              health_client = boto3.client(
-                  'health',
-                  config=config,
-                  region_name=region,
-                  aws_access_key_id=creds['AccessKeyId'],
-                  aws_secret_access_key=creds['SecretAccessKey'],
-                  aws_session_token=creds['SessionToken'],
-              )
+              
+              session = assume_session(account_id, region)
+              if not session:
+                  logger.warning(f"Skipping Health Events for account {account_id} due to STS failure.")
+                  return
+              
+              health_client = session.client('health', config=config, region_name=region)
 
               count = 0
               if is_summary_mode:
