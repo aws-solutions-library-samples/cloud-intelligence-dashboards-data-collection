@@ -145,7 +145,7 @@ Resources:
           import tempfile
           from datetime import datetime, timedelta
           from contextlib import contextmanager
-          from functools import partial
+          from functools import partial, lru_cache
 
           import boto3
 
@@ -206,6 +206,37 @@ Resources:
                           os.unlink(temp_file.name)
                       except OSError as e:
                           logger.info(f"Warning: Could not delete temporary file {temp_file.name}: {e}")
+
+          @lru_cache(maxsize=100)
+          def assume_session(account_id, region):
+              """Assume role in account with fallback to global STS only if region is disabled"""
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      credentials = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
+                          RoleSessionName="data_collection"
+                      )['Credentials']
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+
+              return boto3.session.Session(
+                  aws_access_key_id=credentials['AccessKeyId'],
+                  aws_secret_access_key=credentials['SecretAccessKey'],
+                  aws_session_token=credentials['SessionToken']
+              )
 
           def lambda_handler(event, context): #pylint: disable=unused-argument,too-many-branches,too-many-locals,too-many-statements
               logger.info(f"Event: {event}")
