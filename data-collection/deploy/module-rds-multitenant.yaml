@@ -458,6 +458,65 @@ Resources:
         Name: rds_performance_insights_db
         Description: Database for CloudWatch Database Insights multi-tenant cost allocation data
 
+  # Glue Table for RDS multitenant data
+  RDSMultitenantTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: hourly_rds_multitenant
+        Description: Table for RDS Performance Insights multi-tenant cost allocation data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: account_id
+            Type: string
+          - Name: region
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: metric
+              Type: string
+            - Name: resourcearn
+              Type: string
+            - Name: instance_id
+              Type: string
+            - Name: engine
+              Type: string
+            - Name: num_vcpus
+              Type: double
+            - Name: dimension_type
+              Type: string
+            - Name: db_user_name
+              Type: string
+            - Name: db_database_name
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: value
+              Type: double
+            - Name: "db.user.name"
+              Type: string
+            - Name: "db.database.name"
+              Type: int
+          Location: !Sub "s3://${DestinationBucket}/rds-multitenant/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+
 
 
   GlueServiceRole:
@@ -544,6 +603,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - glue:GetDatabase
+                  - glue:GetDatabases
                   - glue:GetTable
                   - glue:CreateTable
                   - glue:UpdateTable
@@ -589,59 +649,75 @@ Resources:
                       print("Starting Athena view creation")
                       athena = boto3.client('athena')
                       
-                      view_sql = f"""
-                      create or replace view "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."pi_data_view" as 
-                          WITH aggregate_load_data AS (
+                      # Check if table exists first
+                      glue = boto3.client('glue')
+                      try:
+                          glue.get_table(
+                              DatabaseName=event['ResourceProperties']['GlueDatabase'],
+                              Name='hourly_rds_multitenant'
+                          )
+                          table_exists = True
+                      except glue.exceptions.EntityNotFoundException:
+                          table_exists = False
+                          print("Table hourly_rds_multitenant does not exist yet, skipping view creation")
+                      
+                      if table_exists:
+                          view_sql = f"""
+                          create or replace view "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."pi_data_view" as 
+                              WITH aggregate_load_data AS (
+                                  SELECT 
+                                      timestamp,
+                                      resourcearn,
+                                      dimension_type,
+                                      AVG(num_vcpus) AS num_vcpus,
+                                      SUM(value) AS total_db_load,
+                                      greatest(AVG(num_vcpus), SUM(value)) total_compute_power,
+                                      count(1) AS num_entities
+                                  FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" 
+                                  GROUP BY 1, 2, 3
+                              ) 
                               SELECT 
-                                  timestamp,
-                                  resourcearn,
-                                  dimension_type,
-                                  AVG(num_vcpus) AS num_vcpus,
-                                  SUM(value) AS total_db_load,
-                                  greatest(AVG(num_vcpus), SUM(value)) total_compute_power,
-                                  count(1) AS num_entities
-                              FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" 
-                              GROUP BY 1, 2, 3
-                          ) 
-                          SELECT 
-                              b.timestamp,
-                              b.account_id, 
-                              b.resourcearn,
-                              b.engine,
-                              b.num_vcpus,
-                              b.dimension_type,
-                              CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
-                              CASE WHEN b.dimension_type = 'database' THEN b.db_database_name END as database_name,
-                              b.value db_load, 
-                              a.total_db_load,
-                              a.total_compute_power,
-                              a.num_entities,
-                              case when a.total_db_load = 0 then 0 else  b.value / a.total_db_load end AS perc_utilization,
-                              (b.value / a.total_compute_power) perc_utilization_rebased
-                          FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" b
-                          JOIN aggregate_load_data a 
-                              ON a.timestamp = b.timestamp AND a.resourcearn = b.resourcearn AND a.dimension_type = b.dimension_type
-                      """
-                      
-                      response = athena.start_query_execution(
-                          QueryString=view_sql,
-                          QueryExecutionContext={'Database': event['ResourceProperties']['GlueDatabase']},
-                          ResultConfiguration={'OutputLocation': event['ResourceProperties']['S3OutputLocation']}
-                      )
-                      
-                      # Wait for completion
-                      query_id = response['QueryExecutionId']
-                      while True:
-                          result = athena.get_query_execution(QueryExecutionId=query_id)
-                          status = result['QueryExecution']['Status']['State']
-                          if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                              break
-                          time.sleep(2)
-                      
-                      if status != 'SUCCEEDED':
-                          raise Exception(f"Query failed: {result['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')}")
-                      
-                      response_data['Message'] = 'Views created successfully'
+                                  b.timestamp,
+                                  b.account_id, 
+                                  b.resourcearn,
+                                  b.engine,
+                                  b.num_vcpus,
+                                  b.dimension_type,
+                                  CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
+                                  CASE WHEN b.dimension_type = 'database' THEN b.db_database_name END as database_name,
+                                  b.value db_load, 
+                                  a.total_db_load,
+                                  a.total_compute_power,
+                                  a.num_entities,
+                                  case when a.total_db_load = 0 then 0 else  b.value / a.total_db_load end AS perc_utilization,
+                                  (b.value / a.total_compute_power) perc_utilization_rebased
+                              FROM "AwsDataCatalog"."{event['ResourceProperties']['GlueDatabase']}"."hourly_rds_multitenant" b
+                              JOIN aggregate_load_data a 
+                                  ON a.timestamp = b.timestamp AND a.resourcearn = b.resourcearn AND a.dimension_type = b.dimension_type
+                          """
+                          
+                          response = athena.start_query_execution(
+                              QueryString=view_sql,
+                              QueryExecutionContext={'Database': event['ResourceProperties']['GlueDatabase']},
+                              ResultConfiguration={'OutputLocation': event['ResourceProperties']['S3OutputLocation']}
+                          )
+                          
+                          # Wait for completion
+                          query_id = response['QueryExecutionId']
+                          while True:
+                              result = athena.get_query_execution(QueryExecutionId=query_id)
+                              status = result['QueryExecution']['Status']['State']
+                              if status in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                                  break
+                              time.sleep(2)
+                          
+                          if status != 'SUCCEEDED':
+                              raise Exception(f"Query failed: {result['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')}")
+                          
+                          response_data['Message'] = 'Views created successfully'
+                      else:
+                          response_data['Message'] = 'Table does not exist yet, view creation skipped'
+
                   elif event['RequestType'] == 'Delete':
                       response_data['Message'] = 'Views deleted successfully'
               except Exception as e:
