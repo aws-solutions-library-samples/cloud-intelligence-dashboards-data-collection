@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-exports/deploy/data-exports-aggregation.yaml
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS Billing Data Export Aggregation v0.6.0 - AWS Solution SO9011
+Description: AWS Billing Data Export Aggregation v0.7.0 - AWS Solution SO9011
 Metadata:
 
   AWS::CloudFormation::Interface:
@@ -220,7 +220,7 @@ Mappings:
         FROM COST_OPTIMIZATION_RECOMMENDATIONS
     Carbon:
       DefaultQuery: >-
-        SELECT last_refresh_timestamp, location, model_version, payer_account_id, product_code, region_code, total_mbm_emissions_unit, total_mbm_emissions_value, total_lbm_emissions_unit, total_lbm_emissions_value, usage_account_id, usage_period_end, usage_period_start
+        SELECT last_refresh_timestamp, location, model_version, payer_account_id, product_code, region_code, total_mbm_emissions_unit, total_mbm_emissions_value, total_lbm_emissions_unit, total_lbm_emissions_value, total_scope_1_emissions_unit, total_scope_1_emissions_value, total_scope_2_lbm_emissions_unit, total_scope_2_lbm_emissions_value, total_scope_2_mbm_emissions_unit, total_scope_2_mbm_emissions_value, total_scope_3_lbm_emissions_unit, total_scope_3_lbm_emissions_value, total_scope_3_mbm_emissions_unit, total_scope_3_mbm_emissions_value, usage_account_id, usage_period_end, usage_period_start
         FROM CARBON_EMISSIONS
 
 Resources:
@@ -1650,6 +1650,16 @@ Resources:
             - {"Name": "total_mbm_emissions_unit", "Type": "string"}
             - {"Name": "total_lbm_emissions_value", "Type": "double"}
             - {"Name": "total_lbm_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_1_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_1_emissions_value", "Type": "double"}
+            - {"Name": "total_scope_2_lbm_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_2_lbm_emissions_value", "Type": "double"}
+            - {"Name": "total_scope_2_mbm_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_2_mbm_emissions_value", "Type": "double"}
+            - {"Name": "total_scope_3_lbm_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_3_lbm_emissions_value", "Type": "double"}
+            - {"Name": "total_scope_3_mbm_emissions_unit", "Type": "string"}
+            - {"Name": "total_scope_3_mbm_emissions_value", "Type": "double"}
             - {"Name": "model_version", "Type": "string"}
             - {"Name": "product_code", "Type": "string"}
             - {"Name": "usage_period_start", "Type": "timestamp"}
