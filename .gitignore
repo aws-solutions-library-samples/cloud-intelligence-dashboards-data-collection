@@ -161,6 +161,7 @@ cython_debug/
 
 .DS_Store
 .vscode
+.kiro
 
 # Packaged modules
 fof.zip
