@@ -297,7 +297,7 @@ Resources:
                 except Exception: #pylint: disable=broad-exception-caught
                     return None
 
-            def format_account(account_id, account_name, payer_id='', region='', payload=''):
+            def format_account(account_id, account_name, payer_id='', region='*', payload=''):
                 return {
                     "account": json.dumps({
                         'account_id': account_id,
