@@ -303,9 +303,9 @@ Resources:
                         'account_id': account_id,
                         'account_name': account_name,
                         'payer_id': payer_id,
-                    }),
-                    "region": region,
-                    "payload": payload
+                        "region": region,
+                        "payload": payload
+                    })
                 }
 
 
