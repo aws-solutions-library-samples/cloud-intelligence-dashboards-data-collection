@@ -1158,7 +1158,7 @@ Mappings:
             OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
             SerdeInfo:
               Parameters:
-                paths: WorkspaceId,UserName,ComputeType,DirectoryId,DirectoryName,DirectoryType,DirectoryAlias,DirectoryMaintenance,State,ConnectionStatus,LastConnected,LastInventoryRun,RunningMode,OperatingSystemName,Protocol,ComputerName,IPAddress,accountid,collection_date,region
+                paths: WorkspaceId,UserName,ComputeType,DirectoryId,DirectoryName,DirectoryType,DirectoryAlias,DirectoryMaintenance,State,ConnectionStatus,LastConnected,LastInventoryRun,RunningMode,OperatingSystem,Protocol,ComputerName,IPAddress,accountid,collection_date,region
               SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
           TableType: EXTERNAL_TABLE
 
@@ -1356,22 +1356,41 @@ Resources:
               return []
 
           def workspaces_scan(account_id, region):
-              """Special function to scan AWS WorkSpaces resources"""
+              """Special function to scan AWS WorkSpaces resources with rate limiting"""
+              import time
+              from botocore.config import Config
+
               # Skip if region is not supported by WorkSpaces
               if region not in WORKSPACES_REGIONS:
                   logger.info(f"WorkSpaces not supported in region {region}. Skipping.")
                   return
               try:
                   session = assume_session(account_id, region)
-                  client = session.client('workspaces', region_name=region)
-                  # Get WorkSpaces data
-                  workspaces_data = list(client.get_paginator('describe_workspaces').paginate().search('Workspaces[*]'))
+                  config = Config(retries={'max_attempts': 10, 'mode': 'adaptive'})
+                  client = session.client('workspaces', region_name=region, config=config)
+                  
+                  # Get WorkSpaces data with delays
+                  workspaces_data = []
+                  for page in client.get_paginator('describe_workspaces').paginate():
+                      workspaces_data.extend(page.get('Workspaces', []))
+                      time.sleep(0.2)
+
                   if not workspaces_data:
                       logger.info(f"No WorkSpaces found in {account_id}/{region}")
                       return
-                  # Get connection status and directories for lookup
-                  connection_status = list(client.get_paginator('describe_workspaces_connection_status').paginate().search('WorkspacesConnectionStatus'))
-                  directories = list(client.get_paginator('describe_workspace_directories').paginate().search('Directories'))
+                     
+                  # Get connection status with delays
+                  connection_status = []
+                  for page in client.get_paginator('describe_workspaces_connection_status').paginate():
+                      connection_status.extend(page.get('WorkspacesConnectionStatus', []))
+                      time.sleep(0.2)
+                      
+                  # Get directories with delays
+                  directories = []
+                  for page in client.get_paginator('describe_workspace_directories').paginate():
+                      directories.extend(page.get('Directories', []))
+                      time.sleep(0.2)
+
                   # Create lookup dictionaries
                   connection_lookup = {conn['WorkspaceId']: conn for conn in connection_status}
                   directory_lookup = {d['DirectoryId']: d for d in directories}
@@ -1545,7 +1564,7 @@ Resources:
 
       Handler: 'index.lambda_handler'
       MemorySize: 5376
-      Timeout: 300
+      Timeout: 600
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
