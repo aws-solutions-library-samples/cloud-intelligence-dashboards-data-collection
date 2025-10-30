@@ -543,11 +543,6 @@ Resources:
       Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}analytics-Lambda
       Description: "Lambda function to collect general deployment metrics"
-    Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_363
-            comment: "Using latest available Python runtime"
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt LambdaAnalyticsRole.Arn
@@ -578,7 +573,11 @@ Resources:
               except Exception as exc:
                   print(f"Exception occurred: {exc}")
               cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Reason': 'success'})
-
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_363
+            comment: "Using latest available Python runtime"
   LambdaInitRole: #Execution role for the custom resource for Init Lambda
     Type: AWS::IAM::Role
     Properties:
