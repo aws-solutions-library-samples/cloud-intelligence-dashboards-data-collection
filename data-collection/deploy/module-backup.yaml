@@ -276,6 +276,11 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
       RetentionInDays: 60
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Using default AWS managed encryption for cost optimization"
 
   'Fn::ForEach::Object':
     - AwsObject

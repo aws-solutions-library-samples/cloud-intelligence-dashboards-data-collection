@@ -573,7 +573,11 @@ Resources:
               except Exception as exc:
                   print(f"Exception occurred: {exc}")
               cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Reason': 'success'})
-
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_363
+            comment: "Using latest available Python runtime"
   LambdaInitRole: #Execution role for the custom resource for Init Lambda
     Type: AWS::IAM::Role
     Properties:
