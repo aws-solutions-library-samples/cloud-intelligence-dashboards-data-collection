@@ -543,6 +543,11 @@ Resources:
       Runtime: python3.13
       FunctionName: !Sub ${ResourcePrefix}analytics-Lambda
       Description: "Lambda function to collect general deployment metrics"
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_363
+            comment: "Using latest available Python runtime"
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt LambdaAnalyticsRole.Arn

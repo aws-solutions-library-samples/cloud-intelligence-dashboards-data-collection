@@ -228,7 +228,7 @@ Resources:
         Statement:
           - Effect: "Allow"
             Action:
-              - "budgets:ViewBudget"
+              - "budgets:DescribeBudgets"
               - "budgets:ListTagsForResource"
             Resource: !Sub "arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/*"
       Roles:
