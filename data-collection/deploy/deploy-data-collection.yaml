@@ -1541,7 +1541,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployRdsMultitenantModule
     Properties:
-      TemplateURL: "https://dcoccia-test-static-website.s3.eu-central-1.amazonaws.com/module-rds-multitenant.yaml" 
+      TemplateURL: !Sub "https://dcoccia-test-static-website.s3.eu-central-1.amazonaws.com/cfn/data-collection/v3.12.1/module-rds-multitenant.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns

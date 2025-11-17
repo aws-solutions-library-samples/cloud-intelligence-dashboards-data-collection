@@ -177,3 +177,14 @@ migration_log.csv
 data-collection/lambda-layers/python/
 data-collection/lambda-layers/layer.zip
 data-collection/test/clean-html.py
+
+# Test deployment scripts
+test-deployment-*.sh
+get-all-sql-metrics.sh
+
+# Temporary parameter files
+*-params.json
+*-schema.json
+import-resources.json
+lambda-test-payload.json
+packaged-template.yaml

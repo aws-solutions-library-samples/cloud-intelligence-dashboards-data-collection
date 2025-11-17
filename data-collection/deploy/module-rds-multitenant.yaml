@@ -68,7 +68,22 @@ Parameters:
   
   AccountCollectorLambdaARN:
     Type: String
-    Description: Arn of the Account Collector Lambda
+  
+  DimensionsToTrack:
+    Type: String
+    Description: |
+      Comma-delimited list of Performance Insights dimensions to track for db.load metrics. 
+      Options: user,database,host,sql,waits
+      Default: user,database,host,sql,waits
+      
+      Dimension limitations by engine:
+      - 'database': Only supported for PostgreSQL, MySQL, and MariaDB (not Oracle or SQL Server)
+      - 'user', 'sql', 'waits': Not supported for Amazon DocumentDB
+      - 'host': Supported for all engines
+      
+      Note: More dimensions = higher data collection costs and storage requirements.
+    Default: "user,database,host,sql,waits"
+    AllowedPattern: ^(user|database|host|sql|waits)(,(user|database|host|sql|waits))*$
 
 Resources:
   # IAM Role for the Lambda function to collect CloudWatch Database Insights metrics
@@ -244,20 +259,66 @@ Resources:
               return instances
 
 
-          def should_collect_database_metrics(engine):
+          # Dimension configuration based on AWS Performance Insights API documentation
+          # https://docs.aws.amazon.com/performance-insights/latest/APIReference/API_DimensionGroup.html
+          DIMENSION_CONFIG = {
+              'user': {
+                  'group': 'db.user',
+                  'dimensions': ['db.user.name', 'db.user.id'],
+                  'excluded_engines': ['docdb']  # DocumentDB
+              },
+              'database': {
+                  'group': 'db',
+                  'dimensions': ['db.name'],
+                  'excluded_engines': ['oracle-ee', 'oracle-se2', 'oracle-se1', 'oracle-se', 
+                                      'sqlserver-ee', 'sqlserver-se', 'sqlserver-ex', 'sqlserver-web', 'docdb']
+              },
+              'host': {
+                  'group': 'db.host',
+                  'dimensions': ['db.host.name', 'db.host.id'],
+                  'excluded_engines': []  # Supported by all engines
+              },
+              'sql': {
+                  'group': 'db.sql_tokenized',
+                  'dimensions': ['db.sql_tokenized.id','db.sql_tokenized.db_id','db.sql_tokenized.statement'],
+                  'excluded_engines': ['docdb']  # DocumentDB
+              },
+              'waits': {
+                  'group': 'db.wait_event',
+                  'dimensions': ['db.wait_event.name', 'db.wait_event.type'],
+                  'excluded_engines': ['docdb']  # DocumentDB
+              }
+          }
+
+          def is_dimension_supported(dimension_name, engine):
               """
-              Determines if database dimension metrics are supported for the given engine.
-              Oracle and SQL Server engines don't support db.name dimension in CloudWatch Database Insights.
-              https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.UsingDashboard.Components.html#USER_PerfInsights.UsingDashboard.Components.AvgActiveSessions
+              Determines if a dimension is supported for the given engine.
+              
+              Args:
+                  dimension_name: Name of the dimension (user, database, host, sql, waits)
+                  engine: Database engine type
+              
+              Returns:
+                  bool: True if dimension is supported for the engine
               """
-              excluded_engines = ['oracle-ee', 'oracle-se2', 'oracle-se1', 'oracle-se', 
-                                'sqlserver-ee', 'sqlserver-se', 'sqlserver-ex', 'sqlserver-web']
+              if dimension_name not in DIMENSION_CONFIG:
+                  return False
+              
+              excluded_engines = DIMENSION_CONFIG[dimension_name]['excluded_engines']
               return engine.lower() not in excluded_engines
 
           def get_performance_metrics(pi_client, instance_id, engine):
               """
               Retrieves CloudWatch Database Insights metrics for the specified RDS instance.
-              Collects CPU metrics and db.load metrics grouped by user and database dimensions.
+              Collects CPU metrics and db.load metrics grouped by configured dimensions.
+              
+              Args:
+                  pi_client: Performance Insights boto3 client
+                  instance_id: RDS instance DBI resource ID
+                  engine: Database engine type
+              
+              Returns:
+                  list: Performance Insights metric data
               """
               current_time = datetime.utcnow()
               end_time = current_time.replace(minute=0, second=0, microsecond=0)  # Round to top of hour
@@ -267,37 +328,64 @@ Resources:
               metric_queries = [
                   {
                       'Metric': 'os.general.numVCPUs.avg'  # Used for cost allocation calculations
-                  },
-                  {
-                      'Metric': 'db.load.avg',  # Database load by user (tenant)
-                      'GroupBy': {
-                          'Group': 'db.user',
-                          'Dimensions': ['db.user.name']
-                      }
                   }
               ]
               
-              # Add database dimension if supported by engine
-              # Oracle and SQL Server don't support database-level grouping
-              if should_collect_database_metrics(engine):
+              # Get dimensions to track from environment variable
+              dimensions_to_track = os.environ.get('DIMENSIONS_TO_TRACK', 'user,database').split(',')
+              dimensions_to_track = [d.strip() for d in dimensions_to_track if d.strip()]
+              
+              print(f"Configured dimensions to track: {dimensions_to_track}")
+              
+              # Add db.load metrics for each configured dimension
+              for dimension_name in dimensions_to_track:
+                  if dimension_name not in DIMENSION_CONFIG:
+                      print(f"Warning: Unknown dimension '{dimension_name}', skipping")
+                      continue
+                  
+                  # Check if dimension is supported for this engine
+                  if not is_dimension_supported(dimension_name, engine):
+                      print(f"Dimension '{dimension_name}' not supported for engine '{engine}', skipping")
+                      continue
+                  
+                  dimension_config = DIMENSION_CONFIG[dimension_name]
                   metric_queries.append({
-                      'Metric': 'db.load.avg',  # Database load by database name
+                      'Metric': 'db.load.avg',
                       'GroupBy': {
-                          'Group': 'db',
-                          'Dimensions': ['db.name']
+                          'Group': dimension_config['group'],
+                          'Dimensions': dimension_config['dimensions']
                       }
                   })
+                  print(f"Added dimension '{dimension_name}' with group '{dimension_config['group']}'")
 
-              response = pi_client.get_resource_metrics(
-                  ServiceType='RDS',
-                  Identifier=instance_id,
-                  MetricQueries=metric_queries,
-                  StartTime=start_time,
-                  EndTime=end_time,
-                  PeriodInSeconds=metrics_period_in_seconds
-              )
-
-              return response['MetricList']
+              # Collect all metrics with pagination support
+              all_metrics = []
+              next_token = None
+              
+              while True:
+                  params = {
+                      'ServiceType': 'RDS',
+                      'Identifier': instance_id,
+                      'MetricQueries': metric_queries,
+                      'StartTime': start_time,
+                      'EndTime': end_time,
+                      'PeriodInSeconds': metrics_period_in_seconds
+                  }
+                  
+                  if next_token:
+                      params['NextToken'] = next_token
+                  
+                  response = pi_client.get_resource_metrics(**params)
+                  all_metrics.extend(response['MetricList'])
+                  
+                  next_token = response.get('NextToken')
+                  if not next_token:
+                      break
+                  
+                  print(f"Fetching next page of metrics (current count: {len(all_metrics)})")
+              
+              print(f"Total metrics fetched: {len(all_metrics)}")
+              return all_metrics
 
 
           def process_metrics(instance_id, instance_arn, metrics, region, engine):
@@ -321,28 +409,46 @@ Resources:
                           if num_cpus != '':
                               break
 
-                  # Process metrics with dimensions (user or database level)
+                  # Process metrics with dimensions
                   if "Dimensions" in metric["Key"]:
                       dimensions = metric["Key"]["Dimensions"]
                       
-                      # Determine dimension type for multi-tenant cost allocation
-                      if 'db.user.name' in dimensions:
-                          dimension_type = 'user'      # Cost allocation by database user
+                      # Determine dimension type based on which dimensions are present
+                      dimension_type = 'unknown'
+                      if 'db.user.name' in dimensions or 'db.user.id' in dimensions:
+                          dimension_type = 'user'
                       elif 'db.name' in dimensions:
-                          dimension_type = 'database'  # Cost allocation by database name
-                      else:
-                          dimension_type = 'unknown'
+                          dimension_type = 'database'
+                      elif 'db.host.name' in dimensions or 'db.host.id' in dimensions:
+                          dimension_type = 'host'
+                      elif 'db.sql_tokenized.id' in dimensions or 'db.sql_tokenized.db_id' in dimensions or 'db.sql_tokenized.statement' in dimensions:
+                          dimension_type = 'sql'
+                      elif 'db.wait_event.name' in dimensions or 'db.wait_event.type' in dimensions:
+                          dimension_type = 'waits'
                       
                       # Create base record with all metadata
                       base_entry = {
                           "metric": metric["Key"]["Metric"],
                           "resourcearn": instance_arn,
                           "instance_id": instance_id,
-                          "engine": engine,                    # Database engine type
-                          "num_vcpus": num_cpus,              # For cost calculations
-                          "dimension_type": dimension_type,   # user|database|unknown
-                          "db_user_name": dimensions.get('db.user.name', None),     # Tenant user
-                          "db_database_name": dimensions.get('db.name', None)       # Database name
+                          "engine": engine,
+                          "num_vcpus": num_cpus,
+                          "dimension_type": dimension_type,
+                          # User dimension
+                          "db_user_name": dimensions.get('db.user.name', None),
+                          "db_user_id": dimensions.get('db.user.id', None),
+                          # Database dimension
+                          "db_database_name": dimensions.get('db.name', None),
+                          # Host dimension
+                          "db_host_name": dimensions.get('db.host.name', None),
+                          "db_host_id": dimensions.get('db.host.id', None),
+                          # SQL dimension (using tokenized for better aggregation)
+                          "db_sql_id": dimensions.get('db.sql_tokenized.id', None),
+                          "db_sql_db_id": dimensions.get('db.sql_tokenized.db_id', None),
+                          "db_sql_statement": dimensions.get('db.sql_tokenized.statement', None),
+                          # Waits dimension
+                          "db_wait_event_name": dimensions.get('db.wait_event.name', None),
+                          "db_wait_event_type": dimensions.get('db.wait_event.type', None)
                       }
 
                       for datapoint in metric["DataPoints"]:
@@ -432,6 +538,7 @@ Resources:
           METRICS_S3_PREFIX: 'rds-multitenant'
           ROLENAME: !Ref MultiAccountRoleName
           REGIONS_IN_SCOPE: !Ref RegionsInScope
+          DIMENSIONS_TO_TRACK: !Ref DimensionsToTrack
 
   # EventBridge Scheduler to run the data collection hourly
   ModuleRefreshSchedule:
@@ -499,18 +606,35 @@ Resources:
               Type: double
             - Name: dimension_type
               Type: string
-            - Name: db_user_name
-              Type: string
-            - Name: db_database_name
-              Type: string
             - Name: timestamp
               Type: string
             - Name: value
               Type: double
-            - Name: "db.user.name"
+            # User dimension columns
+            - Name: db_user_name
               Type: string
-            - Name: "db.database.name"
-              Type: int
+            - Name: db_user_id
+              Type: string
+            # Database dimension columns
+            - Name: db_database_name
+              Type: string
+            # Host dimension columns
+            - Name: db_host_name
+              Type: string
+            - Name: db_host_id
+              Type: string
+            # SQL dimension columns
+            - Name: db_sql_id
+              Type: string
+            - Name: db_sql_db_id
+              Type: string
+            - Name: db_sql_statement
+              Type: string
+            # Waits dimension columns
+            - Name: db_wait_event_name
+              Type: string
+            - Name: db_wait_event_type
+              Type: string
           Location: !Sub "s3://${DestinationBucket}/rds-multitenant/"
           InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
@@ -546,33 +670,38 @@ Resources:
   # Glue Crawler to automatically discover and catalog the Parquet data schema
   PerformanceInsightsRDSCrawler:
     Type: AWS::Glue::Crawler
+    DependsOn: RDSMultitenantTable
     Properties:
       Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawler"
       Role: !GetAtt GlueServiceRole.Arn
       DatabaseName: !Ref GlueDatabase
       Targets:
-        S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/rds-multitenant/"
+        CatalogTargets:
+          - DatabaseName: !Ref GlueDatabase
+            Tables:
+              - hourly_rds_multitenant
       Schedule:
         ScheduleExpression: cron(50 */12 * * ? *)
       SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
+        UpdateBehavior: LOG
         DeleteBehavior: LOG
 
   PerformanceInsightsRDSCrawlerHourly:
     Type: AWS::Glue::Crawler
+    DependsOn: RDSMultitenantTable
     Properties:
       Name: !Sub "${ResourcePrefix}PerformanceInsightsRDSCrawlerHourly"
       Role: !GetAtt GlueServiceRole.Arn
       DatabaseName: !Ref GlueDatabase
       TablePrefix: "hourly_"
+      Configuration: '{"Version":1.0,"CrawlerOutput":{"Tables":{"AddOrUpdateBehavior":"MergeNewColumns"}},"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"}}'
       Targets:
         S3Targets:
           - Path: !Sub "s3://${DestinationBucket}/rds-multitenant/"
       Schedule:
         ScheduleExpression: cron(50 */12 * * ? *)
       SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
+        UpdateBehavior: LOG
         DeleteBehavior: LOG
 
 
@@ -683,8 +812,22 @@ Resources:
                                   b.engine,
                                   b.num_vcpus,
                                   b.dimension_type,
+                                  -- User dimension
                                   CASE WHEN b.dimension_type = 'user' THEN b.db_user_name END as user_name,
+                                  CASE WHEN b.dimension_type = 'user' THEN b.db_user_id END as user_id,
+                                  -- Database dimension
                                   CASE WHEN b.dimension_type = 'database' THEN b.db_database_name END as database_name,
+                                  -- Host dimension
+                                  CASE WHEN b.dimension_type = 'host' THEN b.db_host_name END as host_name,
+                                  CASE WHEN b.dimension_type = 'host' THEN b.db_host_id END as host_id,
+                                  -- SQL dimension
+                                  CASE WHEN b.dimension_type = 'sql' THEN b.db_sql_id END as sql_id,
+                                  CASE WHEN b.dimension_type = 'sql' THEN b.db_sql_db_id END as sql_db_id,
+                                  CASE WHEN b.dimension_type = 'sql' THEN b.db_sql_statement END as sql_statement,
+                                  -- Waits dimension
+                                  CASE WHEN b.dimension_type = 'waits' THEN b.db_wait_event_name END as wait_event_name,
+                                  CASE WHEN b.dimension_type = 'waits' THEN b.db_wait_event_type END as wait_event_type,
+                                  -- Metrics
                                   b.value db_load, 
                                   a.total_db_load,
                                   a.total_compute_power,
