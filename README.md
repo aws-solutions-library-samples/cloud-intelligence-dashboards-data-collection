@@ -11,6 +11,7 @@
 - [Cost](#cost)
 - [Prerequisites](#prerequisites)
 - [Regions](#regions)
+- [S3 Bucket Encryption Configuration](#s3-bucket-encryption-configuration)
 - [Deployment and Cleanup Steps](#deployment-and-cleanup-steps)
 - [Changelogs](#changelogs)
 - [Feedback](#feedback)
@@ -116,10 +117,22 @@ Make sure you are installing data collection in the same region where you are go
 | US West (Oregon) | us-west-2 |  :heavy_check_mark: |
 
 
+## S3 Bucket Encryption Configuration
+
+The data collection modules support flexible S3 bucket encryption options:
+
+- **S3-Managed Encryption (Default)** - Simplest option, no setup required
+- **Customer-Managed KMS Keys** - For compliance requirements, uses key aliases across regions
+- **External Management** - For advanced users with AWS Config automation
+
+**[Read the Encryption Guide](data-collection/docs/ENCRYPTION.md)** for detailed configuration options.
+
+**Important:** If you plan to manage encryption outside CloudFormation, read the [Encryption Warning Guide](data-collection/docs/ENCRYPTION_WARNING.md) first.
+
 ## Deployment and Cleanup Steps
 Reference to folders.
 * [data-exports](/data-exports)
-* [data-collection](/data-collection)
+* [data-collection](/data-collection) - See also [Encryption Configuration](data-collection/docs/ENCRYPTION.md)
 * [case-summarization](/case-summarization)
 * [rls](/rls)
 * [security-hub](/security-hub)

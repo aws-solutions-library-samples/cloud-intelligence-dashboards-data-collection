@@ -17,6 +17,11 @@ Metadata:
           - Schedule
           - ScheduleFrequent
           - CFNSourceBucket
+      - Label:
+          default: 'Encryption Configuration (Advanced)'
+        Parameters:
+          - KMSKeyAlias
+          - ManageBucketEncryption
           - DataBucketsKmsKeysArns
       - Label:
           default: 'Available modules'
@@ -68,8 +73,12 @@ Metadata:
         default: "Role Prefix"
       CFNSourceBucket:
         default: "DO NOT CHANGE - A bucket that contains WA-Labs CloudFormation templates. Must be always 'aws-managed-cost-intelligence-dashboards'"
+      KMSKeyAlias:
+        default: "KMS Key Alias (Recommended for customer-managed keys)"
+      ManageBucketEncryption:
+        default: "Let CloudFormation manage bucket encryption? (Recommended: yes)"
       DataBucketsKmsKeysArns:
-        default: ""
+        default: "Legacy: KMS Key ARNs for IAM permissions only"
       IncludeTAModule:
         default: 'Include AWS Trusted Advisor Data Collection Module'
       IncludeRightsizingModule:
@@ -184,10 +193,19 @@ Parameters:
     Type: String
     Description: "DO NOT CHANGE - A bucket that contains WA-Labs CloudFormation templates. Must be always 'aws-managed-cost-intelligence-dashboards'"
     Default: "aws-managed-cost-intelligence-dashboards"
+  KMSKeyAlias:
+    Type: String
+    Default: ""
+    Description: "Preferred: KMS key alias name (same across all regions). Example: cid-data-collection-key. This will configure both IAM permissions and S3 bucket encryption."
   DataBucketsKmsKeysArns:
     Type: String
-    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Description: "Legacy: Comma separated KMS key ARNs for IAM permissions only. Does NOT configure S3 bucket encryption."
     Default: ""
+  ManageBucketEncryption:
+    Type: String
+    Description: "IMPORTANT: Set to 'no' ONLY if you manage encryption via AWS Config, bucket policies, or other automation. When 'no', this stack will NOT configure encryption - you are responsible for ensuring buckets are encrypted per your compliance requirements. CloudFormation drift detection will NOT report encryption changes. Recommended: 'yes' (default)."
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
   IncludeTAModule:
     Type: String
     Description: Collects AWS Trusted Advisor recommendations data
@@ -354,7 +372,10 @@ Conditions:
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
-  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  HasKMSAlias: !Not [!Equals [!Ref KMSKeyAlias, ""]]
+  HasLegacyKMSArns: !Not [!Equals [!Ref DataBucketsKmsKeysArns, ""]]
+  NeedDataBucketsKms: !Or [!Condition HasKMSAlias, !Condition HasLegacyKMSArns]
+  ManageBucketEncryption: !Equals [!Ref ManageBucketEncryption, 'yes']
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
   
 Resources:
@@ -364,10 +385,16 @@ Resources:
       BucketName: !Sub "${DestinationBucket}${AWS::AccountId}"
       VersioningConfiguration:
         Status: Enabled
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
+      BucketEncryption: !If
+        - ManageBucketEncryption
+        - ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: !If [HasKMSAlias, "aws:kms", "AES256"]
+                KMSMasterKeyID: !If
+                  - HasKMSAlias
+                  - !Sub "alias/${KMSKeyAlias}"
+                  - !Ref "AWS::NoValue"
+        - !Ref "AWS::NoValue"
       PublicAccessBlockConfiguration:
             BlockPublicAcls : true
             BlockPublicPolicy : true
@@ -474,7 +501,10 @@ Resources:
                 - Effect: "Allow"
                   Action:
                     - "kms:Decrypt"
-                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+                  Resource: !If
+                    - HasKMSAlias
+                    - !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:alias/${KMSKeyAlias}"
+                    - !Split [ ',', !Ref DataBucketsKmsKeysArns ]
           - !Ref AWS::NoValue
         - PolicyName: "Glue"
           PolicyDocument:
@@ -618,7 +648,10 @@ Resources:
                 - Effect: "Allow"
                   Action:
                     - "kms:Decrypt"
-                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+                  Resource: !If
+                    - HasKMSAlias
+                    - !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:alias/${KMSKeyAlias}"
+                    - !Split [ ',', !Ref DataBucketsKmsKeysArns ]
           - !Ref AWS::NoValue
 
   KmsPolicyForCidResources:
@@ -632,7 +665,10 @@ Resources:
           - Effect: Allow
             Action:
               - 'kms:Decrypt'
-            Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+            Resource: !If
+              - HasKMSAlias
+              - !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:alias/${KMSKeyAlias}"
+              - !Split [ ',', !Ref DataBucketsKmsKeysArns ]
       Roles:
         - !Ref StepFunctionExecutionRole
         - !Ref LambdaManageGlueTableRole
@@ -1204,7 +1240,9 @@ Resources:
         DestinationBucket: !Ref S3Bucket
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         ManagementAccountID: !Ref ManagementAccountID
+        KMSKeyAlias: !Ref KMSKeyAlias
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        ManageBucketEncryption: !Ref ManageBucketEncryption
         Schedule: !Ref Schedule
         ResourcePrefix: !Ref ResourcePrefix
         BucketPrefix:  !Ref DestinationBucket

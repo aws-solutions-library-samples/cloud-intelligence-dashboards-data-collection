@@ -60,5 +60,47 @@ For deployment and further information please reference to this [documentation](
 [![Documentation](/.images/documentation.svg)](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/data-exports.html)
 
 
+## S3 Bucket Encryption Configuration
+
+This module supports three encryption options for S3 buckets:
+
+1. **S3-Managed Encryption (Default)** - Simplest option, no setup required
+2. **Customer-Managed KMS Keys** - For compliance requirements, uses key aliases across regions
+3. **External Management** - For advanced users with AWS Config automation
+
+**[Read the Complete Encryption Guide](docs/ENCRYPTION.md)** for detailed configuration options and decision tree.
+
+**Important:** If you plan to manage encryption outside CloudFormation, read the [Encryption Warning Guide](docs/ENCRYPTION_WARNING.md) first.
+
+### Quick Start - Encryption Options
+
+**Option 1: Default (Recommended for Most Users)**
+```yaml
+# No parameters needed - uses S3-managed encryption (AES256)
+# This is the default behavior
+```
+
+**Option 2: Customer-Managed KMS Keys**
+```yaml
+Parameters:
+  KMSKeyAlias: "my-key-alias"  # Same alias name in all regions
+  ManageBucketEncryption: "yes"  # Default
+```
+Prerequisites: Create KMS keys with the same alias in each region. [See guide](docs/ENCRYPTION.md#option-2-kms-with-alias)
+
+**Option 3: External Management (Advanced)**
+```yaml
+Parameters:
+  ManageBucketEncryption: "no"  # CloudFormation will NOT manage encryption
+  DataBucketsKmsKeysArns: "arn:aws:kms:us-east-1:123456789012:key/abc-123,..."
+```
+**[Read warnings first](docs/ENCRYPTION_WARNING.md)** - You are responsible for ensuring buckets are encrypted.
+
+### Documentation
+
+- [Complete Encryption Guide](docs/ENCRYPTION.md) - Decision tree, all options explained
+- [Encryption Warning Guide](docs/ENCRYPTION_WARNING.md) - Critical warnings for external management
+- [Quick Reference](docs/ENCRYPTION_REFERENCE.md) - Fast lookup, common commands
+
 ### Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md)

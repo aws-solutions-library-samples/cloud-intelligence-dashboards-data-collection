@@ -54,15 +54,30 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
+  KMSKeyAlias:
+    Type: String
+    Default: ""
+    Description: "Preferred: KMS key alias name (same across all regions). Example: cid-data-collection-key. This will configure both IAM permissions and S3 bucket encryption."
   DataBucketsKmsKeysArns:
     Type: String
-    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Description: "Legacy: Comma separated KMS key ARNs for IAM permissions only. Does NOT configure S3 bucket encryption."
     Default: ""
+  ManageBucketEncryption:
+    Type: String
+    Description: "IMPORTANT: Set to 'no' ONLY if you manage encryption via AWS Config, bucket policies, or other automation. When 'no', this stack will NOT configure encryption - you are responsible for ensuring buckets are encrypted. Recommended: 'yes' (default)."
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
 
 Outputs:
   StepFunctionARN:
     Description: ARN for the module's Step Function
     Value: !GetAtt ModuleStepFunction.Arn
+
+Conditions:
+  HasKMSAlias: !Not [!Equals [!Ref KMSKeyAlias, ""]]
+  HasLegacyKMSArns: !Not [!Equals [!Ref DataBucketsKmsKeysArns, ""]]
+  NeedKMSPermissions: !Or [!Condition HasKMSAlias, !Condition HasLegacyKMSArns]
+  ManageBucketEncryption: !Equals [!Ref ManageBucketEncryption, 'yes']
 
 Resources:
   StackSetAdminRole:
@@ -169,8 +184,12 @@ Resources:
           ParameterValue: !Ref ManagementAccountID
         - ParameterKey: ResourcePrefix
           ParameterValue: !Ref ResourcePrefix
+        - ParameterKey: KMSKeyAlias
+          ParameterValue: !Ref KMSKeyAlias
         - ParameterKey: DataBucketsKmsKeysArns
           ParameterValue: !Ref DataBucketsKmsKeysArns
+        - ParameterKey: ManageBucketEncryption
+          ParameterValue: !Ref ManageBucketEncryption
       StackInstancesGroup:
         - DeploymentTargets:
             Accounts:
@@ -198,12 +217,24 @@ Resources:
           ResourcePrefix:
             Type: String
             Description: Resource Prefix
+          KMSKeyAlias:
+            Type: String
+            Description: "KMS key alias name for bucket encryption"
+            Default: ""
           DataBucketsKmsKeysArns:
             Type: String
-            Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+            Description: "ARNs of KMS Keys for IAM permissions only"
             Default: ""
+          ManageBucketEncryption:
+            Type: String
+            Description: "IMPORTANT: Set to 'no' ONLY if you manage encryption externally. When 'no', this stack will NOT configure encryption."
+            AllowedValues: ['yes', 'no']
+            Default: 'yes'
         Conditions:
-          NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+          HasKMSAlias: !Not [!Equals [!Ref KMSKeyAlias, ""]]
+          HasLegacyKMSArns: !Not [!Equals [!Ref DataBucketsKmsKeysArns, ""]]
+          NeedKMSPermissions: !Or [!Condition HasKMSAlias, !Condition HasLegacyKMSArns]
+          ManageBucketEncryption: !Equals [!Ref ManageBucketEncryption, 'yes']
         Resources:
           BucketPolicy:
             Type: AWS::S3::BucketPolicy
@@ -279,25 +310,35 @@ Resources:
                     Effect: 'Allow'
                     Resource: !Sub arn:${AWS::Partition}:s3:::${DestinationBucket}/*
               - !If
-                - NeedDataBucketsKms
+                - NeedKMSPermissions
                 - PolicyName: "KMS"
                   PolicyDocument:
                     Version: "2012-10-17"
                     Statement:
                       - Effect: "Allow"
                         Action:
+                          - "kms:Decrypt"
                           - "kms:GenerateDataKey"
-                        Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+                        Resource: !If
+                          - HasKMSAlias
+                          - !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:alias/${KMSKeyAlias}"
+                          - !Split [ ',', !Ref DataBucketsKmsKeysArns ]
                 - !Ref AWS::NoValue
           S3Bucket:
             Type: AWS::S3::Bucket
             DeletionPolicy: Delete
             Properties:
               BucketName: !Sub ${Name}.${AWS::Region}
-              BucketEncryption:
-                ServerSideEncryptionConfiguration:
-                  - ServerSideEncryptionByDefault:
-                      SSEAlgorithm: AES256
+              BucketEncryption: !If
+                - ManageBucketEncryption
+                - ServerSideEncryptionConfiguration:
+                    - ServerSideEncryptionByDefault:
+                        SSEAlgorithm: !If [HasKMSAlias, "aws:kms", "AES256"]
+                        KMSMasterKeyID: !If
+                          - HasKMSAlias
+                          - !Sub "alias/${KMSKeyAlias}"
+                          - !Ref "AWS::NoValue"
+                - !Ref "AWS::NoValue"
               ReplicationConfiguration:
                 Role: !GetAtt [RegionalBucketReplicaRole, Arn]
                 Rules:
