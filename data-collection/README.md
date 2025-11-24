@@ -87,13 +87,18 @@ The RDS Multi-Tenant module enables cost allocation for multi-tenant RDS workloa
 
 Deploy a **new** CID Foundation Stack in your designated beta Data Collection Account using the **public repository**. This creates the necessary infrastructure without affecting your existing production setup.
 
-**Use the public CloudFormation template:** [Cloud Intelligence Dashboards Deployment in Global Regions](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/deployment-in-global-regions.html)
+**Follow the instructions provided in the public documentation:** [Cloud Intelligence Dashboards Deployment in Global Regions](https://docs.aws.amazon.com/guidance/latest/cloud-intelligence-dashboards/deployment-in-global-regions.html)
 
-**Key points:**
-- Deploy from the **official public repository** (not this beta repository)
-- Select a **different Data Collection Account** than your production environment
-- This creates IAM roles, S3 buckets, and Glue databases needed for data collection
-- Note the S3 bucket name and database name created - you'll need these for the next steps
+**When deploying the stacks:**
+- In Step 1
+   - Choose a **different Data Collection Account** than the one you already use for your CID deployment.
+   - Change the Resource Prefix value from the default ("cid") to a different value e.g. "rds-data"
+   - Insert your management account ID(s) in "Source Account Ids"
+   - Leave the other options at their default value
+- In Step 2
+   - Use the same Data Collection account as in step 1
+   - Use the same Resource Prefix value as in step 1, e.g. "rds-data"
+   - Leave the other options at their default value
 
 #### Step 2: Prepare Your Environment
 
@@ -101,7 +106,7 @@ Before deploying the beta module, you need to upload the custom CloudFormation t
 
 1. **Clone this repository:**
    ```bash
-   git clone <this-repository-url>
+   git clone -b add-rds-multitenant-module --single-branch https://github.com/davidecoccia/cloud-intelligence-dashboards-data-collection.git
    cd cloud-intelligence-dashboards-data-collection
    ```
 
@@ -109,11 +114,6 @@ Before deploying the beta module, you need to upload the custom CloudFormation t
    ```bash
    # Create a new bucket (if needed)
    aws s3 mb s3://your-cfn-templates-bucket --region <your-region>
-   
-   # Enable versioning (recommended)
-   aws s3api put-bucket-versioning \
-     --bucket your-cfn-templates-bucket \
-     --versioning-configuration Status=Enabled
    ```
 
 #### Step 3: Deploy Read Permissions Stack (Management Account)
@@ -133,11 +133,11 @@ Deploy the read permissions stack in your **Management Account** to allow the Da
    - Upload: `data-collection/deploy/deploy-data-read-permissions.yaml` from the cloned repository
    
    c. **Stack details:**
-   - Stack name: `cid-data-read-permissions-beta` (use a different name than production)
+   - Stack name: `cid-data-read-permissions-beta` (use a different name than the one in CID)
    
    d. **Parameters:**
    - **DataCollectionAccountId**: Your beta Data Collection Account ID
-   - **RolePrefix**: `CID-DC-Beta-` (use a different prefix than production)
+   - **RolePrefix**: `CID-DC-Beta-` (use a different prefix)
    
    e. **Configure stack options:** (use defaults or customize as needed)
    
@@ -250,8 +250,7 @@ Deploy the Data Collection Stack with **only** the RDS Multi-Tenant module enabl
    
    d. **Parameters:**
    - **Module Selection:**
-     - ✅ Set **IncludeRdsMultitenantModule** = `yes`
-     - ❌ Set all other `Include*Module` parameters = `no`
+     - Set **IncludeRdsMultitenantModule** = `yes` and all other `Include*Module` parameters = `no`
    
    - **Key Parameters:**
      - **ManagementAccountID**: Your AWS Organization management account ID
