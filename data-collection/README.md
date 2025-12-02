@@ -411,13 +411,4 @@ The module automatically skips unsupported dimensions for each engine.
 
 #### Feedback and Support
 
-This is a beta feature. Please provide feedback through:
-- GitHub Issues: [cloud-intelligence-dashboards](https://github.com/aws-samples/aws-cudos-framework-deployment)
-- AWS Support (if you have a support plan)
-
-**What to include in feedback:**
-- RDS engine types and versions
-- Number of instances and accounts
-- Dimensions being tracked
-- Any errors or unexpected behavior
-- Feature requests or improvements
+This is a beta feature. Please provide feedback by opening an issue on this repo.
