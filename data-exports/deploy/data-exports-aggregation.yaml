@@ -764,6 +764,8 @@ Resources:
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
+          TableConfigurations:
+            FOCUS_1_2_AWS: {}
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
@@ -789,6 +791,8 @@ Resources:
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
+          TableConfigurations:
+            FOCUS_1_2_AWS: {}
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
