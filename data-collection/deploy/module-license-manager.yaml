@@ -149,6 +149,7 @@ Resources:
           S3_GRANTS_PREFIX = os.environ['S3_GRANTS_PREFIX']
           S3_LICENSES_PREFIX = os.environ['S3_LICENSES_PREFIX']
           PREFIX = os.environ['PREFIX']
+          USE_ORG = 'local' != os.environ.get('API', 'org')
 
           def store_data_to_s3(data, prefix, payer_id):
               if not data:
@@ -168,10 +169,16 @@ Resources:
               licenses = []
               pagination_token = '' #nosec
               while True: #Operation list_received_licenses cannot be paginated
-                  response = license_manager.list_received_licenses(
-                      MaxResults=100,
-                      NextToken=pagination_token
-                  )
+                  if USE_ORG:
+                      response = license_manager.list_received_licenses_for_organization(
+                          MaxResults=100,
+                          NextToken=pagination_token
+                      )
+                  else:
+                      response = license_manager.list_received_licenses(
+                          MaxResults=100,
+                          NextToken=pagination_token
+                      )
                   licenses.extend(response.get('Licenses', []))
                   pagination_token = response.get('NextToken', '')
                   if not pagination_token:
