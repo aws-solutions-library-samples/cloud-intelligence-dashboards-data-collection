@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-exports/deploy/data-exports-aggregation.yaml
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS Billing Data Export Aggregation v0.7.0 - AWS Solution SO9011
+Description: AWS Billing Data Export Aggregation v0.8.0 - AWS Solution SO9011
 Metadata:
 
   AWS::CloudFormation::Interface:
@@ -1282,6 +1282,8 @@ Resources:
             - {"Name": "bill_payer_account_name", "Type": "string" }
             - {"Name": "cost_category", "Type": "map<string,string>" }
             - {"Name": "discount", "Type": "map<string,double>" }
+            - {"Name": "discount_bundled_discount", "Type": "double" }
+            - {"Name": "discount_total_discount", "Type": "double" }
             - {"Name": "identity_line_item_id", "Type": "string" }
             - {"Name": "identity_time_interval", "Type": "string" }
             - {"Name": "line_item_availability_zone", "Type": "string" }
