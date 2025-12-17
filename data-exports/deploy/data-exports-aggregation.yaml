@@ -1282,6 +1282,8 @@ Resources:
             - {"Name": "bill_payer_account_name", "Type": "string" }
             - {"Name": "cost_category", "Type": "map<string,string>" }
             - {"Name": "discount", "Type": "map<string,double>" }
+            - {"Name": "discount_bundled_discount", "Type": "double" }
+            - {"Name": "discount_total_discount", "Type": "double" }
             - {"Name": "identity_line_item_id", "Type": "string" }
             - {"Name": "identity_time_interval", "Type": "string" }
             - {"Name": "line_item_availability_zone", "Type": "string" }
