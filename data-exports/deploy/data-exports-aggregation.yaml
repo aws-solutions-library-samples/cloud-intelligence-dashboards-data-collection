@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-exports/deploy/data-exports-aggregation.yaml
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS Billing Data Export Aggregation v0.7.0 - AWS Solution SO9011
+Description: AWS Billing Data Export Aggregation v0.8.0 - AWS Solution SO9011
 Metadata:
 
   AWS::CloudFormation::Interface:
