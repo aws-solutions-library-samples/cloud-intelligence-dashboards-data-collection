@@ -212,8 +212,8 @@ Mappings:
         FROM COST_AND_USAGE_REPORT
     FOCUS:
       DefaultQuery: >-
-        SELECT AvailabilityZone, BilledCost, BillingAccountId, BillingAccountName, BillingCurrency, BillingPeriodEnd, BillingPeriodStart, ChargeCategory, ChargeClass, ChargeDescription, ChargeFrequency, ChargePeriodEnd, ChargePeriodStart, CommitmentDiscountCategory, CommitmentDiscountId, CommitmentDiscountName, CommitmentDiscountType, CommitmentDiscountStatus, ConsumedQuantity, ConsumedUnit, ContractedCost, ContractedUnitPrice, EffectiveCost, InvoiceIssuerName, ListCost, ListUnitPrice, PricingCategory, PricingQuantity, PricingUnit, ProviderName, PublisherName, RegionId, RegionName, ResourceId, ResourceName, ResourceType, ServiceCategory, ServiceName, SkuId, SkuPriceId, SubAccountId, SubAccountName, Tags, x_CostCategories, x_Discounts, x_Operation, x_ServiceCode, x_UsageType
-        FROM FOCUS_1_0_AWS
+        SELECT AvailabilityZone, BilledCost, BillingAccountId, BillingAccountName, BillingAccountType, BillingCurrency, BillingPeriodEnd, BillingPeriodStart, CapacityReservationId, CapacityReservationStatus, ChargeCategory, ChargeClass, ChargeDescription, ChargeFrequency, ChargePeriodEnd, ChargePeriodStart, CommitmentDiscountCategory, CommitmentDiscountId, CommitmentDiscountName, CommitmentDiscountQuantity, CommitmentDiscountType, CommitmentDiscountUnit, CommitmentDiscountStatus, ConsumedQuantity, ConsumedUnit, ContractedCost, ContractedUnitPrice, EffectiveCost, InvoiceId, InvoiceIssuerName, ListCost, ListUnitPrice, PricingCategory, PricingCurrency, PricingCurrencyContractedUnitPrice, PricingCurrencyEffectiveCost, PricingCurrencyListUnitPrice, PricingQuantity, PricingUnit, ProviderName, PublisherName, RegionId, RegionName, ResourceId, ResourceName, ResourceType, ServiceCategory, ServiceName, ServiceSubcategory, SkuId, SkuMeter, SkuPriceId, SkuPriceDetails, SubAccountId, SubAccountName, SubAccountType, Tags, x_Discounts, x_Operation, x_ServiceCode
+        FROM FOCUS_1_2_AWS
     COH:
       DefaultQuery: >-
         SELECT account_id, action_type, currency_code, current_resource_details, current_resource_summary, current_resource_type, estimated_monthly_cost_after_discount, estimated_monthly_cost_before_discount, estimated_monthly_savings_after_discount, estimated_monthly_savings_before_discount, estimated_savings_percentage_after_discount, estimated_savings_percentage_before_discount, implementation_effort, last_refresh_timestamp, recommendation_id, recommendation_lookback_period_in_days, recommendation_source, recommended_resource_details, recommended_resource_summary, recommended_resource_type, region, resource_arn, restart_needed, rollback_possible, tags
@@ -764,6 +764,8 @@ Resources:
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
+          TableConfigurations:
+            FOCUS_1_2_AWS: {}
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
@@ -789,6 +791,8 @@ Resources:
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
+          TableConfigurations:
+            FOCUS_1_2_AWS: {}
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
@@ -1424,9 +1428,12 @@ Resources:
             - {"Name": "billedcost", "Type": "double" }
             - {"Name": "billingaccountid", "Type": "string" }
             - {"Name": "billingaccountname", "Type": "string" }
+            - {"Name": "billingaccounttype", "Type": "string" }
             - {"Name": "billingcurrency", "Type": "string" }
             - {"Name": "billingperiodend", "Type": "timestamp" }
             - {"Name": "billingperiodstart", "Type": "timestamp" }
+            - {"Name": "capacityreservationid", "Type": "string" }
+            - {"Name": "capacityreservationstatus", "Type": "string" }
             - {"Name": "chargecategory", "Type": "string" }
             - {"Name": "chargeclass", "Type": "string" }
             - {"Name": "chargedescription", "Type": "string" }
@@ -1436,17 +1443,24 @@ Resources:
             - {"Name": "commitmentdiscountcategory", "Type": "string" }
             - {"Name": "commitmentdiscountid", "Type": "string" }
             - {"Name": "commitmentdiscountname", "Type": "string" }
+            - {"Name": "commitmentdiscountquantity", "Type": "double" }
             - {"Name": "commitmentdiscounttype", "Type": "string" }
+            - {"Name": "commitmentdiscountunit", "Type": "string" }
             - {"Name": "commitmentdiscountstatus", "Type": "string" }
             - {"Name": "consumedquantity", "Type": "double" }
             - {"Name": "consumedunit", "Type": "string" }
             - {"Name": "contractedcost", "Type": "double" }
             - {"Name": "contractedunitprice", "Type": "double" }
             - {"Name": "effectivecost", "Type": "double" }
+            - {"Name": "invoiceid", "Type": "string" }
             - {"Name": "invoiceissuername", "Type": "string" }
             - {"Name": "listcost", "Type": "double" }
             - {"Name": "listunitprice", "Type": "double" }
             - {"Name": "pricingcategory", "Type": "string" }
+            - {"Name": "pricingcurrency", "Type": "string" }
+            - {"Name": "pricingcurrencycontractedunitprice", "Type": "double" }
+            - {"Name": "pricingcurrencyeffectivecost", "Type": "double" }
+            - {"Name": "pricingcurrencylistunitprice", "Type": "double" }
             - {"Name": "pricingquantity", "Type": "double" }
             - {"Name": "pricingunit", "Type": "string" }
             - {"Name": "providername", "Type": "string" }
@@ -1458,11 +1472,18 @@ Resources:
             - {"Name": "resourcetype", "Type": "string" }
             - {"Name": "servicecategory", "Type": "string" }
             - {"Name": "servicename", "Type": "string" }
+            - {"Name": "servicesubcategory", "Type": "string" }
             - {"Name": "skuid", "Type": "string" }
+            - {"Name": "skumeter", "Type": "string" }
             - {"Name": "skupriceid", "Type": "string" }
+            - {"Name": "skupricedetails", "Type": "map<string,string>" }
             - {"Name": "subaccountid", "Type": "string" }
             - {"Name": "subaccountname", "Type": "string" }
+            - {"Name": "subaccounttype", "Type": "string" }
             - {"Name": "tags", "Type": "map<string,string>" }
+            - {"Name": "x_discounts", "Type": "map<string,double>" }
+            - {"Name": "x_operation", "Type": "string" }
+            - {"Name": "x_servicecode", "Type": "string" }
         PartitionKeys:
           - {"Name": "source_account_id", "Type": "string" }
           - {"Name": "report_name", "Type": "string" }
