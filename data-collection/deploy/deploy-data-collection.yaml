@@ -47,9 +47,15 @@ Metadata:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
           - EUCAccountIDs
+      - Label:
+          default: 'Technical Parameters. Please do not change.'
+        Parameters:
+          - DestinationBucketFullName
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
+      DestinationBucketFullName:
+        default: 'Full S3 bucket name (only specify if instructed by support)'
       ManagementAccountRole:
         default: 'Management account role'
       ManagementAccountID:
@@ -361,11 +367,12 @@ Conditions:
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
   UseExistingBucket: !Not [ !Equals [ !Ref DestinationBucketFullName, "" ] ]
+  CreateNewBucket: !Equals [ !Ref DestinationBucketFullName, "" ]
   
 Resources:
   S3Bucket:
     Type: 'AWS::S3::Bucket'
-    Condition: !Not [!Condition UseExistingBucket]
+    Condition: CreateNewBucket
     Properties:
       BucketName: !Sub "${DestinationBucket}${AWS::AccountId}"
       VersioningConfiguration:
@@ -406,7 +413,7 @@ Resources:
 
   S3DataBucketPolicy:
     Type: AWS::S3::BucketPolicy
-    Condition: !Not [!Condition UseExistingBucket]
+    Condition: CreateNewBucket
     Properties:
       Bucket: !Ref S3Bucket
       PolicyDocument:
