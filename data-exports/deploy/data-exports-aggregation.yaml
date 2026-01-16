@@ -1209,7 +1209,7 @@ Resources:
                       print('deleted:', json.dumps(res))
                   except client.exceptions.ResourceNotFoundException:
                       print('Not Found. Nothing to delete')
-                  except:
+                  except Exception as exc:
                       print('Exception on deletion:', str(exc))
               else:
                   raise Exception("Unknown operation: " + event['RequestType'])
