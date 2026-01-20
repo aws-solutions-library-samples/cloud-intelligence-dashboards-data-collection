@@ -142,6 +142,10 @@ Parameters:
     Default: '0 3 * * ? *'
     AllowedPattern: '^[0-9*,\-/\s?]+$'
     ConstraintDescription: Must be a valid cron expression
+  BucketsKmsKeyArn:
+    Type: String
+    Description: "ARN of KMS CMK to use for S3 buckets. Keep empty if using the default S3 managed keys"
+    Default: ""
 
 Conditions:
   EmptySourceAccountIds: !Equals [ !Ref SourceAccountIds, '']
@@ -199,6 +203,7 @@ Conditions:
     Fn::And:
       - !Condition IsDestinationAccount
       - !Equals [!Ref AddScheduleForBlockingWrite, "yes"]
+  UseCustomKMSKey: !Not [!Equals [!Ref BucketsKmsKeyArn, ""]]  
 
 Mappings:
   DataExports:
@@ -246,10 +251,9 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256 ## Use AWS managed KMS
-              ## If you need Customer managed KMS key, yoy can do that using following parameters:
-              # SSEAlgorithm: aws:kms
-              # KMSMasterKeyID: "REPLACE_WITH_YOUR_KEY_ARN"
+              SSEAlgorithm: !If [UseCustomKMSKey, "aws:kms", "AES256"]
+              KMSMasterKeyID: !If [UseCustomKMSKey, !Ref BucketsKmsKeyArn, ""]
+            BucketKeyEnabled: !If [UseCustomKMSKey, true, false]
       AccessControl: BucketOwnerFullControl
       OwnershipControls:
         Rules:
@@ -356,10 +360,9 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256 ## Use AWS managed KMS
-              ## If you need Customer managed KMS key, yoy can do that using following parameters:
-              # SSEAlgorithm: aws:kms
-              # KMSMasterKeyID: "REPLACE_WITH_YOUR_KEY_ARN"
+              SSEAlgorithm: !If [UseCustomKMSKey, "aws:kms", "AES256"]
+              KMSMasterKeyID: !If [UseCustomKMSKey, !Ref BucketsKmsKeyArn, ""]
+            BucketKeyEnabled: !If [UseCustomKMSKey, true, false]
       AccessControl: BucketOwnerFullControl
       OwnershipControls:
         Rules:
