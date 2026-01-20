@@ -26,7 +26,8 @@ Metadata:
         Parameters:
           - EnableSCAD
           - RolePath
-          - TimeGranularity
+          - CUR2TimeGranularity
+          - FOCUSTimeGranularity
           - SecondaryDestinationBucket
 
     ParameterLabels:
@@ -46,8 +47,10 @@ Metadata:
         default: "Source Account Ids (Comma separated list)"
       EnableSCAD:
         default: "Enable Split Cost Allocation Data (SCAD) in CUR 2.0"
-      TimeGranularity:
+      CUR2TimeGranularity:
         default: "CUR 2.0 Granularity. Do not change."
+      FOCUSTimeGranularity:
+        default: "FOCUS Granularity. Do not change."
       LakeFormationEnabled:
         default: "I have LakeFormation permission model in place for this account & my CFN deployment credentials have administrative rights on LakeFormation"
       SecondaryDestinationBucket:
@@ -111,7 +114,12 @@ Parameters:
     Type: String
     Description: Path for roles where PermissionBoundaries can limit location
     Default: '/'
-  TimeGranularity:
+  CUR2TimeGranularity:
+    Type: String
+    Description: Changing of this parameter will require redeployment of this Stack, purging of data in Destination and then additional Backfill request. HOURLY is a recommended option unless your AWS invoice is more then $50M (in this case contact your TAM when installing).
+    Default: "HOURLY"
+    AllowedValues: ["HOURLY", "DAILY", "MONTHLY"]
+  FOCUSTimeGranularity:
     Type: String
     Description: Changing of this parameter will require redeployment of this Stack, purging of data in Destination and then additional Backfill request. HOURLY is a recommended option unless your AWS invoice is more then $50M (in this case contact your TAM when installing).
     Default: "HOURLY"
@@ -702,7 +710,7 @@ Resources:
           QueryStatement: !If [EnableSCAD, !FindInMap [DataExports, CUR2, SCADQuery], !FindInMap [DataExports, CUR2, DefaultQuery]]
           TableConfigurations:
             COST_AND_USAGE_REPORT:
-              TIME_GRANULARITY: !Ref TimeGranularity
+              TIME_GRANULARITY: !Ref CUR2TimeGranularity
               INCLUDE_RESOURCES: "TRUE"
               INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY: "FALSE"
               INCLUDE_SPLIT_COST_ALLOCATION_DATA: !If [EnableSCAD, "TRUE", "FALSE"]
@@ -733,7 +741,7 @@ Resources:
           QueryStatement: !If [EnableSCAD, !FindInMap [DataExports, CUR2, SCADQuery], !FindInMap [DataExports, CUR2, DefaultQuery]]
           TableConfigurations:
             COST_AND_USAGE_REPORT:
-              TIME_GRANULARITY: !Ref TimeGranularity
+              TIME_GRANULARITY: !Ref CUR2TimeGranularity
               INCLUDE_RESOURCES: "TRUE"
               INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY: "FALSE"
               INCLUDE_SPLIT_COST_ALLOCATION_DATA: !If [EnableSCAD, "TRUE", "FALSE"]
@@ -765,7 +773,8 @@ Resources:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
           TableConfigurations:
-            FOCUS_1_2_AWS: {}
+            FOCUS_1_2_AWS:
+              TIME_GRANULARITY: !Ref FOCUSTimeGranularity
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
@@ -792,7 +801,8 @@ Resources:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
           TableConfigurations:
-            FOCUS_1_2_AWS: {}
+            FOCUS_1_2_AWS:
+              TIME_GRANULARITY: !Ref FOCUSTimeGranularity
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
