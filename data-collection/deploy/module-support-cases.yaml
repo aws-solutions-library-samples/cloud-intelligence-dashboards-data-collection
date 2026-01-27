@@ -140,6 +140,7 @@ Resources:
           import json
           import logging
           from datetime import date, timedelta, datetime
+          from functools import lru_cache
 
           import boto3
 
@@ -175,20 +176,46 @@ Resources:
                   'statusCode': 200
               }
 
-          def get_client_with_role(role_name, account_id, service, region):
-              logger.debug(f"Attempting to get '{service}' client with role '{role_name}' from account '{account_id}' in region '{region}'")
-              credentials = boto3.client('sts').assume_role(
-                  RoleArn=f"arn:aws:iam::{account_id}:role/{role_name}",
-                  RoleSessionName="data_collection"
-              )['Credentials']
-              logger.debug("Successfully assumed role, now getting client")
-              client = boto3.client(
-                  service,
-                  region_name = region,
+          @lru_cache(maxsize=100)
+          def assume_session(account_id, region, role_name):
+              """Assume role in account with fallback to global STS only if region is disabled"""
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{role_name}",
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      credentials = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{role_name}",
+                          RoleSessionName="data_collection"
+                      )['Credentials']
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+
+              return boto3.session.Session(
                   aws_access_key_id=credentials['AccessKeyId'],
                   aws_secret_access_key=credentials['SecretAccessKey'],
-                  aws_session_token=credentials['SessionToken'],
+                  aws_session_token=credentials['SessionToken']
               )
+
+          def get_client_with_role(role_name, account_id, service, region):
+              logger.debug(f"Attempting to get '{service}' client with role '{role_name}' from account '{account_id}' in region '{region}'")
+              session = assume_session(account_id, region, role_name)
+              if not session:
+                  logger.warning(f"Skipping {service} client creation for account {account_id} due to STS failure.")
+                  return None
+              
+              logger.debug("Successfully assumed role, now getting client")
+              client = session.client(service, region_name=region)
               logger.debug(f"Successfully created '{service}' client with role '{role_name}' from account '{account_id}' in region '{region}'")
               return client
 
@@ -207,6 +234,9 @@ Resources:
               account_name = account.get("account_name", None)
               logger.debug(f"==> account_name: '{account.get("account_name", None)}'")
               support = get_client_with_role(role_name, account_id, region="us-east-1", service="support")
+              if not support:
+                  logger.warning(f"Skipping Support Cases for account {account_id} due to STS failure.")
+                  return
               s3 = boto3.client('s3')
 
               default_start_date = (datetime.now().date() - timedelta(days=365)).strftime('%Y-%m-%d') # Case communications are available for 12 months after creation.

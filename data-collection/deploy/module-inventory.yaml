@@ -1263,12 +1263,29 @@ Resources:
 
           @lru_cache(maxsize=100)
           def assume_session(account_id, region):
-              """assume role in account"""
+              """Assume role in account with fallback to global STS only if region is disabled"""
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
-              credentials = boto3.client('sts', region_name=region).assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}" ,
-                  RoleSessionName="data_collection"
-              )['Credentials']
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except sts_client.exceptions.RegionDisabledException as region_exc:
+                  logger.warning(f"STS region disabled for {region}, falling back to global STS: {region_exc}")
+                  try:
+                      global_sts = boto3.client('sts', region_name='us-east-1')
+                      credentials = global_sts.assume_role(
+                          RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                          RoleSessionName="data_collection"
+                      )['Credentials']
+                  except Exception as fallback_exc:
+                      logger.error(f"Global STS fallback failed for {account_id}: {fallback_exc}")
+                      return None
+              except Exception as exc:
+                  logger.error(f"STS assume_role failed for {account_id} in {region}: {exc}")
+                  return None
+
               return boto3.session.Session(
                   aws_access_key_id=credentials['AccessKeyId'],
                   aws_secret_access_key=credentials['SecretAccessKey'],
@@ -1279,6 +1296,9 @@ Resources:
               """ paginated scan """
               obj_name = obj_name or function_name.split('_')[-1].capitalize() + '[*]'
               session = assume_session(account_id, region)
+              if not session:
+                  logger.warning(f"Skipping {service}/{function_name} in {region} due to STS failure.")
+                  return
               client = session.client(service, region_name=region)
               try:
                   yield from client.get_paginator(function_name).paginate(**(params or {})).search(obj_name)
@@ -1289,6 +1309,9 @@ Resources:
               """ special treatment for opensearch_scan """
               service = 'opensearch'
               session = assume_session(account_id, region)
+              if not session:
+                  logger.warning(f"Skipping {service} in {region} due to STS failure.")
+                  return
               client = session.client(service, region_name=region)
               try:
                   domain_names = [name.get('DomainName') for name in client.list_domain_names().get('DomainNames', [])]
@@ -1308,6 +1331,9 @@ Resources:
               """special function to scan EKS clusters"""
               service = "eks"
               session = assume_session(account_id, region)
+              if not session:
+                  logger.warning(f"Skipping {service} in {region} due to STS failure.")
+                  return
               client = session.client(service, region_name=region)
               try:
                   for cluster_name in (
@@ -1363,6 +1389,9 @@ Resources:
                   return
               try:
                   session = assume_session(account_id, region)
+                  if not session:
+                      logger.warning(f"Skipping WorkSpaces in {region} due to STS failure.")
+                      return
                   client = session.client('workspaces', region_name=region)
                   # Get WorkSpaces data
                   workspaces_data = list(client.get_paginator('describe_workspaces').paginate().search('Workspaces[*]'))
