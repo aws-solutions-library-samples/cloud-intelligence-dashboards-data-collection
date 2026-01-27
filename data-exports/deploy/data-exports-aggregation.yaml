@@ -1241,6 +1241,20 @@ Resources:
         Name: !Join [ '_', !Split [ '-', !Sub '${ResourcePrefix}_data_export' ] ] # replace '-' to '_'
       CatalogId: !Sub "${AWS::AccountId}"
 
+  LakeFormationCrawlerForDatabase:
+    Type: AWS::LakeFormation::TagAssociation
+    Condition: NeedLakeFormationEnabledDB
+    Properties:
+      Principal: !GetAtt CidDataExportCrawlerRole.Arn
+      Resource:
+        Database:
+          CatalogId: !Ref "AWS::AccountId"
+          Name: !Ref CIDDatabase
+      Permissions:
+        - DESCRIBE
+      PermissionsWithGrantOption: []
+
+
 ###########################################################################
 # CUR2
 ###########################################################################
@@ -1389,6 +1403,25 @@ Resources:
           }
         }
 
+  CURCrawlerTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: NeedLakeFormationEnabledCUR2
+    Properties:
+      Principal: !GetAtt CidDataExportCrawlerRole.Arn
+      Resource:
+        TableResource:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref CIDDatabase
+          Name: !Ref CURTable
+      Permissions:
+        - SELECT
+        - DESCRIBE
+        - ALTER
+        - INSERT
+        - DELETE
+      PermissionsWithGrantOption: []
+
+
 ###########################################################################
 # FOCUS
 ###########################################################################
@@ -1511,6 +1544,25 @@ Resources:
           }
         }
 
+  FOCUSCrawlerTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: NeedLakeFormationEnabledFOCUS
+    Properties:
+      Principal: !GetAtt CidDataExportCrawlerRole.Arn
+      Resource:
+        TableResource:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref CIDDatabase
+          Name: !Ref FOCUSTable
+      Permissions:
+        - SELECT
+        - DESCRIBE
+        - ALTER
+        - INSERT
+        - DELETE
+      PermissionsWithGrantOption: []
+
+
 ###########################################################################
 # COH
 ###########################################################################
@@ -1615,6 +1667,24 @@ Resources:
           }
         }
 
+  COHCrawlerTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: NeedLakeFormationEnabledCOH
+    Properties:
+      Principal: !GetAtt CidDataExportCrawlerRole.Arn
+      Resource:
+        TableResource:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref CIDDatabase
+          Name: !Ref COHTable
+      Permissions:
+        - SELECT
+        - DESCRIBE
+        - ALTER
+        - INSERT
+        - DELETE
+      PermissionsWithGrantOption: []
+
 ###########################################################################
 # Carbon emissions
 ###########################################################################
@@ -1716,6 +1786,28 @@ Resources:
             }
           }
         }
+
+  CarbonCrawlerTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: NeedLakeFormationEnabledCarbon
+    Properties:
+      Principal: !GetAtt CidDataExportCrawlerRole.Arn
+      Resource:
+        TableResource:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref CIDDatabase
+          Name: !Ref CarbonTable
+      Permissions:
+        - SELECT
+        - DESCRIBE
+        - ALTER
+        - INSERT
+        - DELETE
+      PermissionsWithGrantOption: []
+
+###########################################################################
+# Lake Formation for tags
+###########################################################################
 
   LakeFormationTagsForDatabase:
     Type: AWS::LakeFormation::TagAssociation
