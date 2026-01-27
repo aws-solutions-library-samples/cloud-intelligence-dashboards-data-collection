@@ -425,6 +425,8 @@ Resources:
               - "servicequotas:GetServiceQuota"
               - "servicequotas:GetAWSDefaultServiceQuota"
               - "servicequotas:ListServices"
+              - "servicequotas:ListServiceQuotas"
+              - "servicequotas:ListAWSDefaultServiceQuotas"
               - "rds:DescribeAccountAttributes"
               - "elasticloadbalancing:DescribeAccountLimits"
               - "dynamodb:DescribeLimits"
@@ -433,6 +435,8 @@ Resources:
               - "autoscaling:DescribeAccountLimits"
               - "route53:GetAccountLimit"
               - "datapipeline:GetAccountLimits"
+              - "cloudwatch:GetMetricStatistics"
+              - "cloudwatch:GetMetricData"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole
