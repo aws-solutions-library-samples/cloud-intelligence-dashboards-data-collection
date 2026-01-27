@@ -1,11 +1,64 @@
 #https://github.com/awslabs/cid-data-collection-framework/blob/main/rls/deploy/deploy_cid_rls.yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Lambda to collect AWS Organization and Amazon QuickSight data and store in S3 for RLS implementation v0.2.0 - AWS Solution SO9011
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "RLS common configuration parameters"
+        Parameters:
+          - ManagementAccountID
+          - DestinationBucket
+          - QuickSightUser
+      - Label:
+          default: "Default RLS System Configuration. Do not change if not needed"
+        Parameters:
+          - DeployLambdaResources
+          - ManagementAccountRole
+          - ResourcePrefix
+          - DatabaseName
+          - AthenaWorkGroup
+          - CodeKey
+          - CidRlsLocation
+          - CodeBucket
+          - Schedule
+
+    ParameterLabels:
+        Parameters:
+          ManagementAccountRole:
+            Default: Lambda-Assume-Role-Management-Account
+          ResourcePrefix:
+            Default: CID-DC-
+          DatabaseName:
+            Default: "cid_cur"
+          AthenaWorkGroup:
+            Default: "CID"
+          Schedule:
+            Default: "rate(1 hour)"
+          CodeKey:
+            Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+          CidRlsLocation:
+            Default: "cid_rls"
+          CodeBucket:
+            Default: "aws-managed-cost-intelligence-dashboards"
+          DeployLambdaResources:
+            Default: Yes
 Parameters:
+  DeployLambdaResources:
+    Type: String
+    Description: "Yes: Deploy RLS Lambdaor. No: only create RLS Athena Table and DataSet"
+    AllowedValues:
+      - Yes
+      - No
+    Default: Yes
   DestinationBucket:
     Type: String
     Description: Name of the S3 Bucket that is created to hold org data
     AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  QuickSightUser:
+    Type: String
+    Description: QuickSight user that will own DataSet and DataSource resources, use the same as in CID deployment.
+    MinLength: 1
   ManagementAccountRole:
     Type: String
     Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
@@ -18,34 +71,143 @@ Parameters:
     Type: String
     AllowedPattern: ([a-z0-9\-, ]*?$)
     Description: "(Ex: 123456789,098654321,789054312) List of Payer IDs you wish to collect data for. Can just be one Accounts"
+  DatabaseName:
+    Type: String
+    Description: Existing Athena Database where to deploy RLS table, should be same as CID database
+    Default: "cid_cur"
+  AthenaWorkGroup:
+    Type: String
+    Description: Existing Athena Workgroup, keep the same as for CID Dashboards. 
+    Default: "CID"
   Schedule:
     Type: String
     Description: Cron job to trigger the lambda using cloudwatch event
     Default: "rate(1 hour)"
   CodeBucket:
-      Type: String
-      Description: S3 Bucket with RLS code,this coverts to CodeBucket-Region e.g. for us-east-1 this will be aws-managed-cost-intelligence-dashboards-us-east-1
-      Default: aws-managed-cost-intelligence-dashboards
+    Type: String
+    Description: S3 Bucket with RLS code,this coverts to CodeBucket-Region e.g. for us-east-1 this will be aws-managed-cost-intelligence-dashboards-us-east-1
+    Default: "aws-managed-cost-intelligence-dashboards"
   CodeKey:
-      Type: String
-      Description: file name of ZipFile with data code
-      Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+    Type: String
+    Description: file name of ZipFile with data code
+    Default: cfn/rls/create_rls.zip # RLS Folder to be updated, once the LAB will be created
+  CidRlsLocation:
+    Type: String
+    Description: location of the RLS files in the S3 bucket
+    Default: "cid_rls"
 Outputs:
   LambdaFunctionName:
+    Condition: DeployLambda
     Value:
-      Ref: CIDRLS
+      Ref: LambdaCIDRLS
   LambdaFunctionARN:
+    Condition: DeployLambda
     Description: Lambda function ARN.
     Value:
       Fn::GetAtt:
-        - CIDRLS
+        - LambdaCIDRLS
         - Arn
+Conditions:
+  DeployLambda: !Equals [ !Ref DeployLambdaResources, Yes ]
 Resources:
-  CIDRLS:
+  CidRlsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: cid_rls
+        TableType: EXTERNAL_TABLE
+        StorageDescriptor:
+          Columns:
+            - Name: UserName
+              Type: string
+            - Name: GroupName
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: payer_account_id
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CidRlsLocation}/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              escapeChar: \
+              quoteChar: '"'
+              separatorChar: ','
+              skip.header.line.count: 1
+  CidRlsDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: cid-rls-datasource
+      Name: cid-rls-datasource
+      Type: ATHENA
+      DataSourceParameters:
+        AthenaParameters:
+          WorkGroup: !Ref AthenaWorkGroup
+      Permissions:
+        - Principal: !Sub 'arn:${AWS::Partition}:quicksight:${AWS::Region}:${AWS::AccountId}:user/default/${QuickSightUser}'
+          Actions:
+              - quicksight:PassDataSource
+              - quicksight:DescribeDataSourcePermissions
+              - quicksight:UpdateDataSource
+              - quicksight:UpdateDataSourcePermissions
+              - quicksight:DescribeDataSource
+              - quicksight:DeleteDataSource
+
+  CidRlsDataSet:
+    Type: AWS::QuickSight::DataSet
+    DependsOn: CidRlsDataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSetId: cid_rls
+      Name: cid_rls
+      ImportMode: DIRECT_QUERY
+      UseAs: RLS_RULES
+      LogicalTableMap:
+        A-Map-ID:
+          Alias: cid_rls
+          Source:
+            PhysicalTableId: RlsAthenaTable
+      PhysicalTableMap:
+        RlsAthenaTable:
+          RelationalTable:
+            Catalog: AwsDataCatalog
+            DataSourceArn: !GetAtt CidRlsDataSource.Arn
+            Name: cid_rls
+            Schema: default
+            InputColumns:
+              - Name: username
+                Type: STRING
+              - Name: groupname
+                Type: STRING
+              - Name: account_id
+                Type: STRING
+              - Name: payer_account_id
+                Type: STRING
+      Permissions:
+        - Principal: !Sub 'arn:${AWS::Partition}:quicksight:${AWS::Region}:${AWS::AccountId}:user/default/${QuickSightUser}'
+          Actions:
+            - quicksight:PassDataSet
+            - quicksight:DescribeIngestion
+            - quicksight:CreateIngestion
+            - quicksight:UpdateDataSet
+            - quicksight:DeleteDataSet
+            - quicksight:DescribeDataSet
+            - quicksight:CancelIngestion
+            - quicksight:DescribeDataSetPermissions
+            - quicksight:ListIngestions
+            - quicksight:UpdateDataSetPermissions
+
+  LambdaCIDRLS:
     Type: AWS::Lambda::Function
+    Condition: DeployLambda
     Properties:
       FunctionName: !Sub
-        - 'CIDRLS_${Id}'
+        - 'LambdaCIDRLS_${Id}'
         - Id: !Select [0, !Split ['-', !Ref 'AWS::StackName']]
       Description: LambdaFunction of python3.8.
       Runtime: python3.13
@@ -64,6 +226,7 @@ Resources:
           QS_REGION: !Ref AWS::Region
   LambdaRole:
     Type: AWS::IAM::Role
+    Condition: DeployLambda
     Properties:
       RoleName: !Sub "${ResourcePrefix}RLS-LambdaRole"
       AssumeRolePolicyDocument:
@@ -96,7 +259,7 @@ Resources:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
                   - "logs:DescribeLogStreams"
-                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/CID-RLS*"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/Lambda-CID-RLS*"
               - Effect: "Allow"
                 Action:
                   - "s3:PutObject"
@@ -110,20 +273,22 @@ Resources:
                 Resource: "*" # Cannot restrict this
   CloudWatchTrigger:
     Type: AWS::Events::Rule
+    Condition: DeployLambda
     Properties:
       Description: Scheduler
       Name: !Sub
-        - 'Scheduler_ForCIDRLS_${Id}'
+        - 'Scheduler_ForLambdaCIDRLS_${Id}'
         - Id: !Select [0, !Split ['-', !Ref 'AWS::StackName']]
       ScheduleExpression: !Ref Schedule
       State: ENABLED
       Targets:
-        - Arn: !GetAtt CIDRLS.Arn
-          Id: TriggerForCIDRLS
+        - Arn: !GetAtt LambdaCIDRLS.Arn
+          Id: TriggerForLambdaCIDRLS
   EventPermission:
+    Condition: DeployLambda
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !GetAtt CIDRLS.Arn
+      FunctionName: !GetAtt LambdaCIDRLS.Arn
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceAccount: !Ref 'AWS::AccountId'
