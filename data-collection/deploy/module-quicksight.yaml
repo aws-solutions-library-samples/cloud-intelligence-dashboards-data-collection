@@ -42,6 +42,9 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
   DataBucketsKmsKeysArns:
     Type: String
     Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
@@ -333,10 +336,9 @@ Resources:
         DeleteBehavior: LOG
 
   QuickSightUserDataTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: quicksight_user_data
         TableType: EXTERNAL_TABLE
@@ -373,10 +375,9 @@ Resources:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
 
   QuickSightGroupDataTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: quicksight_group_data
         TableType: EXTERNAL_TABLE
@@ -407,10 +408,9 @@ Resources:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
 
   QuickSightGroupMembershipDataTable:
-    Type: AWS::Glue::Table
+    Type: Custom::ManageGlueTable
     Properties:
-      DatabaseName: !Ref DatabaseName
-      CatalogId: !Ref AWS::AccountId
+      ServiceToken: !Ref LambdaManageGlueTableARN
       TableInput:
         Name: quicksight_groupmembership_data
         TableType: EXTERNAL_TABLE

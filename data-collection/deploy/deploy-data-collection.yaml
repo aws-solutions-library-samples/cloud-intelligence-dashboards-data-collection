@@ -1494,6 +1494,7 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
 
   ResilienceHubModule:
     Type: AWS::CloudFormation::Stack
