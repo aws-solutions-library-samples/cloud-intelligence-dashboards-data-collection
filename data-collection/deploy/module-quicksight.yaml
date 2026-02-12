@@ -331,6 +331,114 @@ Resources:
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: LOG
+
+  QuickSightUserDataTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: quicksight_user_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          compressionType: none
+        StorageDescriptor:
+          Columns:
+            - Name: arn
+              Type: string
+            - Name: username
+              Type: string
+            - Name: email
+              Type: string
+            - Name: role
+              Type: string
+            - Name: identitytype
+              Type: string
+            - Name: active
+              Type: boolean
+            - Name: principalid
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: namespace
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-user-data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  QuickSightGroupDataTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: quicksight_group_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          compressionType: none
+        StorageDescriptor:
+          Columns:
+            - Name: arn
+              Type: string
+            - Name: groupname
+              Type: string
+            - Name: description
+              Type: string
+            - Name: principalid
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: namespace
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-group-data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  QuickSightGroupMembershipDataTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        Name: quicksight_groupmembership_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          compressionType: none
+        StorageDescriptor:
+          Columns:
+            - Name: arn
+              Type: string
+            - Name: membername
+              Type: string
+            - Name: groupname
+              Type: string
+            - Name: grouparn
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: namespace
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-groupmembership-data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:
