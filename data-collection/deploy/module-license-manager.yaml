@@ -134,9 +134,12 @@ Resources:
           """
           import os
           import json
+          import time
           import logging
           from datetime import date
           import boto3
+          from botocore.config import Config
+
           # Initialize AWS clients
 
           s3 = boto3.client('s3')
@@ -150,6 +153,10 @@ Resources:
           S3_LICENSES_PREFIX = os.environ['S3_LICENSES_PREFIX']
           PREFIX = os.environ['PREFIX']
           USE_ORG = 'local' != os.environ.get('API', 'org')
+          MAX_RETRIES = int(os.environ.get('MAX_RETRIES', "10"))
+          EXTRA_PAUSE = float(os.environ.get('EXTRA_PAUSE', '0'))
+
+          config = Config(retries={"max_attempts": MAX_RETRIES, "mode": "adaptive"})
 
           def store_data_to_s3(data, prefix, payer_id):
               if not data:
@@ -181,6 +188,7 @@ Resources:
                       )
                   licenses.extend(response.get('Licenses', []))
                   pagination_token = response.get('NextToken', '')
+                  time.sleep(EXTRA_PAUSE)
                   if not pagination_token:
                       break
               return licenses
@@ -195,7 +203,8 @@ Resources:
               )['Credentials']
               license_manager = boto3.client(
                   'license-manager',
-                  "us-east-1", # Must be "us-east-1"
+                  config=config,
+                  region_name="us-east-1", # Must be "us-east-1"
                   aws_access_key_id=cred['AccessKeyId'],
                   aws_secret_access_key=cred['SecretAccessKey'],
                   aws_session_token=cred['SessionToken'],
@@ -215,6 +224,7 @@ Resources:
                       license_arn = license_['LicenseArn']
                       try:
                           grants_for_license = license_manager.list_received_grants_for_organization(LicenseArn=license_arn)['Grants']
+                          time.sleep(EXTRA_PAUSE)
                       except license_manager.exceptions.AccessDeniedException:
                           print(
                               'ERROR: AccessDenied when getting grants for ', license_arn,
