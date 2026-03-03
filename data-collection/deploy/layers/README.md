@@ -50,60 +50,6 @@ The script will:
 7. Display installed versions and package size
 8. Clean up temporary files
 
-### Build Output
-
-The script provides detailed output including:
-
-```
-Lambda Layer Build Summary
-==========================================
-Output file:      data-collection/deploy/layers/boto3-layer.zip
-File size:        15M
-boto3 version:    1.35.0
-botocore version: 1.35.0
-Python version:   3.13
-==========================================
-```
-
-## Deploying the Layer
-
-### Step 1: Upload to S3
-
-After building the layer package, upload it to your S3 bucket:
-
-```bash
-aws s3 cp data-collection/deploy/layers/boto3-layer.zip \
-  s3://YOUR-BUCKET/cfn/data-collection/VERSION/layers/
-```
-
-Replace:
-- `YOUR-BUCKET` with your CloudFormation source bucket name
-- `VERSION` with your deployment version (e.g., v3.14.3)
-
-### Step 2: Deploy CloudFormation Stack
-
-The Lambda layer is automatically deployed when you deploy the main CloudFormation stack with the Health Events module enabled:
-
-```bash
-aws cloudformation deploy \
-  --template-file data-collection/deploy/deploy-data-collection.yaml \
-  --stack-name cid-data-collection \
-  --parameter-overrides \
-    DeployHealthEventsModule=yes \
-    # ... other parameters
-```
-
-The layer deploys automatically when `DeployHealthEventsModule=yes` - no additional configuration needed.
-
-### Step 3: Verify Deployment
-
-Check that the layer was created:
-
-```bash
-aws lambda list-layer-versions \
-  --layer-name CID-DC-Boto3-Layer \
-  --region us-east-1
-```
 
 ## Module Integration
 
@@ -140,7 +86,7 @@ To use the Lambda layer in a new module:
 Parameters:
   Boto3LayerArn:
     Type: String
-    Description: "ARN of the Boto3 Lambda Layer (optional)"
+    Description: "ARN of the Boto3 Lambda Layer"
     Default: ""
 ```
 
