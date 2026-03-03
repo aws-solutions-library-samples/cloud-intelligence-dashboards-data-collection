@@ -8,6 +8,7 @@
   - [Multi-cloud data](#multi-cloud-data)
 - [Architecture of Data Exports](#architecture-of-data-exports)
 - [Architecture of Data Collection](#architecture-of-data-collection)
+- [Lambda Layer for Boto3](#lambda-layer-for-boto3)
 - [Cost](#cost)
 - [Prerequisites](#prerequisites)
 - [Regions](#regions)
@@ -63,6 +64,51 @@ See more in [data-exports](/data-exports).
 5. Advanced Cloud Intelligence Dashboards leverage [Amazon Athena](https://aws.amazon.com/athena/) and [Amazon QuickSight](https://aws.amazon.com/quicksight/) for comprehensive data analysis.
 
 See more details in [data-collection](/data-collection).
+
+## Lambda Layer for Boto3
+
+The data collection system includes a centralized Lambda layer containing the latest boto3 and botocore libraries. This layer is shared across Lambda functions in the data collection modules, providing several benefits:
+
+- **Reduced deployment package sizes**: Lambda functions don't need to bundle boto3, reducing package size and deployment time
+- **Consistent AWS SDK versions**: All functions use the same boto3 version, ensuring consistent behavior
+- **Simplified updates**: Update boto3 once in the layer rather than in each function
+- **Latest AWS features**: Access to the newest AWS service features and APIs
+
+### Automatic Deployment
+
+The Lambda layer deploys automatically when the Health Events module is enabled. No additional configuration is required - simply set `DeployHealthEventsModule=yes` when deploying the main CloudFormation stack.
+
+### Build Process
+
+To build the Lambda layer package with the latest boto3 version:
+
+```bash
+# From the project root directory
+./data-collection/utils/build-boto3-layer.sh
+```
+
+The build script:
+1. Creates the required directory structure for Lambda layers
+2. Installs the latest boto3 and botocore packages
+3. Removes unnecessary files to optimize package size
+4. Creates a zip file at `data-collection/deploy/layers/boto3-layer.zip`
+5. Displays installed versions and package details
+
+After building, upload the layer package to your S3 bucket before deploying the CloudFormation stack:
+
+```bash
+aws s3 cp data-collection/deploy/layers/boto3-layer.zip \
+  s3://YOUR-BUCKET/cfn/data-collection/VERSION/layers/
+```
+
+### Module Integration
+
+The Health Events module uses the Lambda layer by default. Other modules can integrate the layer by:
+1. Adding a `Boto3LayerArn` parameter to the module template
+2. Referencing the layer ARN in the Lambda function's `Layers` property
+3. Passing the layer ARN from the main template when deploying the module
+
+For detailed integration instructions, see [data-collection/deploy/layers/README.md](/data-collection/deploy/layers/README.md).
 
 
 ## Cost

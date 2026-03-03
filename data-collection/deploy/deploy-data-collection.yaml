@@ -324,6 +324,7 @@ Conditions:
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
+  DeployBoto3Layer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -1042,6 +1043,24 @@ Resources:
           projection.enabled: 'true'
           storage.location.template: !Sub "s3://${DestinationBucket}${AWS::AccountId}/logs/modules/${!logdate}"
 
+  Boto3LayerVersion:
+    Type: AWS::Lambda::LayerVersion
+    Condition: DeployBoto3Layer
+    Properties:
+      LayerName: !Sub "${ResourcePrefix}Boto3-Layer"
+      Description: "Boto3 and Botocore libraries for Python"
+      Content:
+        S3Bucket: !If [ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket]
+        S3Key: "cfn/data-collection/v3.14.3/layers/boto3-layer.zip"
+      CompatibleRuntimes:
+        - python3.10
+        - python3.11
+        - python3.12
+        - python3.13
+        - python3.14
+      CompatibleArchitectures:
+        - x86_64
+
   TrustedAdvisorModule:
     Type: AWS::CloudFormation::Stack
     Condition: DeployTAModule
@@ -1640,3 +1659,9 @@ Outputs:
     Description: "Access Policy for CID Data Collection"
     Value: !Ref DataCollectionReadAccess
     Export: { Name: "cid-DataCollection-ReadAccessPolicyARN" }
+  Boto3LayerArn:
+    Condition: DeployBoto3Layer
+    Description: "ARN of the Boto3 Lambda Layer"
+    Value: !Ref Boto3LayerVersion
+    Export:
+      Name: !Sub "${AWS::StackName}-Boto3LayerArn"
