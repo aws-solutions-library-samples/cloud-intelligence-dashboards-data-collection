@@ -178,4 +178,5 @@ migration_log.csv
 
 data-collection/lambda-layers/python/
 data-collection/lambda-layers/layer.zip
+data-collection/deploy/layers/boto3-layer.zip
 data-collection/test/clean-html.py
