@@ -174,8 +174,11 @@ sandbox/
 scratch/
 migration_log.csv
 # Pylint custom script temporal folder
-.tmp
 
-data-collection/lambda-layers/python/
-data-collection/lambda-layers/layer.zip
+
+# Lambda layer build artifacts
+.tmp
+data-collection/deploy/layers/boto3-layer.zip
+
 data-collection/test/clean-html.py
+
