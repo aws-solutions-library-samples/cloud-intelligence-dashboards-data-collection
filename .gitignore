@@ -182,3 +182,5 @@ data-collection/deploy/layers/boto3-layer.zip
 
 data-collection/test/clean-html.py
 
+# Local testing suites
+local-test
