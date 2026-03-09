@@ -161,6 +161,10 @@ cython_debug/
 
 .DS_Store
 .vscode
+
+
+# AI guidance - local/personal files
+.ai/local/
 .kiro
 sqlite_mcp_server.db
 
