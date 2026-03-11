@@ -1,0 +1,436 @@
+---
+inclusion: manual
+---
+
+# Module Template
+# This is a reference template for creating new data collection modules
+# Copy this structure and customize for your specific AWS service
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves [SERVICE_DESCRIPTION] data from AWS [SERVICE_NAME] across an organization
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that exists or needs to be created to hold data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold data
+  
+  # TODO: Choose ONE of the following role parameters based on your module type:
+  # - For management account only modules: Use ManagementRoleName
+  # - For linked account modules: Use MultiAccountRoleName
+  # DELETE the parameter you don't need!
+  
+  ManagementRoleName:
+    Type: String
+    Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
+  
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: [MODULE-NAME]  # TODO: Replace with your module name (kebab-case)
+  
+  # TODO: Add module-specific parameters here (e.g., data prefixes, filters)
+  # Example:
+  # DataPrefix:
+  #   Type: String
+  #   Description: Prefix for data storage
+  #   Default: data
+  
+  # TODO: Only include GlueRoleARN if you will actually use Glue crawlers
+  # For most modules, this should be DELETED since we use manual table definitions
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(14 days)"  # TODO: Adjust based on data freshness needs
+  
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        # TODO: Update this policy based on your role selection:
+        # - For ManagementRoleName: Keep as-is
+        # - For MultiAccountRoleName: Change ${ManagementRoleName} to ${MultiAccountRoleName}
+        - PolicyName: !Sub "${CFDataName}-ManagementAccount-LambdaRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${ManagementRoleName}"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+        # TODO: Add additional IAM policies for AWS service access
+        # Example:
+        # - PolicyName: "ServiceAccess"
+        #   PolicyDocument:
+        #     Version: "2012-10-17"
+        #     Statement:
+        #       - Effect: "Allow"
+        #         Action:
+        #           - "service:ListResources"
+        #           - "service:DescribeResource"
+        #         Resource: "*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Code:
+        ZipFile: |
+          """
+          TODO: Add module description
+          Collects [SERVICE_NAME] data and uploads to S3
+          """
+          import os
+          import json
+          import logging
+          import time
+          from datetime import date
+          import boto3
+          from botocore.config import Config
+
+          # Initialize AWS clients
+          s3 = boto3.client('s3')
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+          
+          # Environment variables
+          BUCKET = os.environ['BUCKET_NAME']
+          ROLE = os.environ['ROLE_NAME']
+          PREFIX = os.environ['PREFIX']
+          MAX_RETRIES = int(os.environ.get('MAX_RETRIES', "10"))
+          EXTRA_PAUSE = float(os.environ.get('EXTRA_PAUSE', '0'))
+          
+          config = Config(retries={"max_attempts": MAX_RETRIES, "mode": "adaptive"})
+
+          def store_data_to_s3(data, prefix, payer_id, account_id):
+              """Store collected data to S3 with date-based partitioning"""
+              if not data:
+                  logger.info("No data")
+                  return
+              
+              # Add payer_id and account_id to each record
+              for record in data:
+                  record['payer_id'] = payer_id
+                  record['account_id'] = account_id
+              
+              json_data = "\n".join(json.dumps(entity) for entity in data)
+              
+              # File naming: payer_id_account_id_yyyymmdd.json
+              today = date.today()
+              filename = f"{payer_id}_{account_id}_{today.strftime('%Y%m%d')}.json"
+              
+              # S3 path: prefix/year=yyyy/month=mm/day=dd/filename
+              key = today.strftime(f"{PREFIX}/{PREFIX}-{prefix}/year=%Y/month=%m/day=%d/{filename}")
+              
+              s3.put_object(
+                  Bucket=BUCKET,
+                  Key=key,
+                  Body=json_data,
+                  ContentType='application/json'
+              )
+              logger.info(f'File upload successful to s3://{BUCKET}/{key}')
+
+          def collect_data(client):
+              """
+              TODO: Implement data collection logic
+              Collect data from AWS service with pagination
+              """
+              results = []
+              pagination_token = ''
+              
+              while True:
+                  # TODO: Replace with actual API call
+                  params = {'MaxResults': 100}
+                  if pagination_token:
+                      params['NextToken'] = pagination_token
+                  
+                  # TODO: Replace 'list_resources' with actual API method
+                  response = client.list_resources(**params)
+                  results.extend(response.get('Resources', []))
+                  
+                  # Add sleep if configured
+                  if EXTRA_PAUSE > 0:
+                      time.sleep(EXTRA_PAUSE)
+                  
+                  pagination_token = response.get('NextToken', '')
+                  if not pagination_token:
+                      break
+              
+              return results
+
+          def process_one_account(account_id, payer_id=None):
+              """Process data collection for a single account"""
+              if payer_id is None:
+                  payer_id = account_id  # Use account_id as payer_id if not provided
+              
+              region = boto3.session.Session().region_name
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              
+              logger.debug('assuming role')
+              cred = boto3.client('sts').assume_role(
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE}",
+                  RoleSessionName="data_collection"
+              )['Credentials']
+              
+              # TODO: Replace 'service-name' with actual AWS service
+              client = boto3.client(
+                  'service-name',
+                  config=config,
+                  region_name=region,  # TODO: Some services require specific regions
+                  aws_access_key_id=cred['AccessKeyId'],
+                  aws_secret_access_key=cred['SecretAccessKey'],
+                  aws_session_token=cred['SessionToken'],
+              )
+              
+              try:
+                  # Collect and store data
+                  data = collect_data(client)
+                  # TODO: Replace 'data-type' with actual data prefix
+                  store_data_to_s3(data, 'data-type', payer_id, account_id)
+              except Exception as exc:
+                  logger.error(f"{account_id}: {exc}")
+                  raise
+
+          def lambda_handler(event, context):
+              """Main Lambda handler"""
+              logger.info(f"Event data {json.dumps(event)}")
+              
+              if 'account' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              
+              account = json.loads(event["account"])
+              
+              try:
+                  # Extract payer_id if available, otherwise use account_id
+                  payer_id = account.get("payer_id", account["account_id"])
+                  process_one_account(account["account_id"], payer_id)
+              except Exception as exc:
+                  logging.error(f"{account['account_id']}: {exc}")
+                  raise
+              
+              return "Successful"
+
+      Handler: 'index.lambda_handler'
+      MemorySize: 2688
+      Timeout: 600
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          # TODO: Update ROLE_NAME based on your role selection:
+          # - For ManagementRoleName: Keep as-is
+          # - For MultiAccountRoleName: Change to !Ref MultiAccountRoleName
+          ROLE_NAME: !Ref ManagementRoleName
+          # TODO: Add module-specific environment variables
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  # Define Athena tables manually with partition projection (NO CRAWLERS)
+  # TODO: Create one table per data type
+  DataTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub '${CFDataName}_data'  # TODO: Replace 'data' with actual data type
+        Description: !Sub 'Table for ${CFDataName} data collection'
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2020,2030'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          storage.location.template: !Sub 's3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/year=${!year}/month=${!month}/day=${!day}'
+        PartitionKeys:
+          - Name: year
+            Type: int
+          - Name: month
+            Type: int
+          - Name: day
+            Type: int
+        StorageDescriptor:
+          Columns:
+            # TODO: Define your schema columns here based on actual data structure
+            # IMPORTANT: Always include payer_id and account_id as columns
+            - Name: payer_id
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: id
+              Type: string
+            - Name: name
+              Type: string
+            - Name: created_date
+              Type: string
+            # Add more columns as needed
+          Location: !Sub 's3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: 'payer_id,account_id,id,name,created_date'  # TODO: Update with actual column names
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: '[]'  # Empty - no crawlers needed with partition projection
+        CollectionType: "Payers"  # TODO: Change to "LINKED" if collecting from all accounts
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
