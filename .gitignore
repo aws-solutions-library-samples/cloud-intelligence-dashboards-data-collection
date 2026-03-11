@@ -161,6 +161,10 @@ cython_debug/
 
 .DS_Store
 .vscode
+
+
+# AI guidance - local/personal files
+.ai/local/
 .kiro
 sqlite_mcp_server.db
 
@@ -174,8 +178,14 @@ sandbox/
 scratch/
 migration_log.csv
 # Pylint custom script temporal folder
-.tmp
 
-data-collection/lambda-layers/python/
-data-collection/lambda-layers/layer.zip
+
+# Lambda layer build artifacts
+.tmp
+data-collection/deploy/layers/boto3-layer.zip
+
 data-collection/test/clean-html.py
+
+# Local testing suites
+local-test
+.pylintrc
