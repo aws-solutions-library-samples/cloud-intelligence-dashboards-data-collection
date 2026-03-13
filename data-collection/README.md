@@ -18,7 +18,7 @@ For deployment and additional information reference to the [documentation](https
 3. Step Functions launches **Data Collection Lambda** function for each collected Account.
 4. Each data collection module Lambda function assumes an [IAM](https://aws.amazon.com/iam/) role in linked accounts and retrieves respective optimization data via [AWS SDK for Python (Boto3)](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html). Retrieved data is aggregated in an [Amazon S3](https://aws.amazon.com/s3/) bucket.
 5. Once data is stored in the S3 bucket, Step Functions trigger an [AWS Glue](https://aws.amazon.com/glue/) crawler which creates or updates the table in the [AWS Glue Data Catalog](https://docs.aws.amazon.com/glue/latest/dg/components-overview.html#data-catalog-intro).
-6. Collected data is visualized with the [Cloud Intelligence Dashboards](https://aws.amazon.com/solutions/implementations/cloud-intelligence-dashboards/) using [Amazon QuickSight](https://aws.amazon.com/quicksight/) to get optimization recommendations and insights.
+6. Collected data is visualized with the [Cloud Intelligence Dashboards](https://aws.amazon.com/solutions/guidance/advanced-cloud-observability-with-cloud-intelligence-dashboards-on-aws/) using [Amazon QuickSight](https://aws.amazon.com/quicksight/) to get optimization recommendations and insights.
 
 
 ### Modules

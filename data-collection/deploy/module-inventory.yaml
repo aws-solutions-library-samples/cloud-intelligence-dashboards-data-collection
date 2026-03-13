@@ -2023,7 +2023,7 @@ Resources:
               current_gb_cost + current_iops_cost AS current_total_cost,
               gp3_gb_cost + gp3_iops_cost + gp3_throughput_cost AS gp3_total_cost,
               (current_gb_cost + current_iops_cost) - (gp3_gb_cost + gp3_iops_cost + gp3_throughput_cost) as gp3_saving
-          FROM inventory_ebs_data
+          FROM ebs_data
 
   WorkspacesInventoryView:
     Type: AWS::Athena::NamedQuery

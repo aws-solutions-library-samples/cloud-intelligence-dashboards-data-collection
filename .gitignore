@@ -162,6 +162,7 @@ cython_debug/
 .DS_Store
 .vscode
 .kiro
+sqlite_mcp_server.db
 
 # Packaged modules
 fof.zip

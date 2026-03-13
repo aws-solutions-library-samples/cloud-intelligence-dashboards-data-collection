@@ -280,7 +280,7 @@ Resources:
                 Fn::Sub: "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-shared"
               StorageClass: STANDARD
             Id: ReplicationRule1
-            Prefix: ""
+            Prefix: "cur"
             Status: Enabled
       LifecycleConfiguration:
         Rules:
