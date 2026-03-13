@@ -47,9 +47,15 @@ Metadata:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
           - EUCAccountIDs
+      - Label:
+          default: 'Technical Parameters. Please do not change.'
+        Parameters:
+          - DestinationBucketFullName
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
+      DestinationBucketFullName:
+        default: 'Full S3 bucket name (only specify if instructed by support)'
       ManagementAccountRole:
         default: 'Management account role'
       ManagementAccountID:
@@ -146,6 +152,10 @@ Parameters:
     Description: "A Prefix of S3 Bucket name that will hold information. A Bucket name will be concatenated with account_id automatically (ex: cid-data-123456123456). You can keep this parameter as is."
     AllowedPattern: (?=^.{3,36}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9\-])$)
     Default: cid-data-
+  DestinationBucketFullName:
+    Type: String
+    Description: "Optional: Full S3 bucket name to use instead of prefix. If provided, this will be used instead of DestinationBucket+AccountId. Leave empty to use prefix mode."
+    Default: ""
   ManagementAccountRole:
     Type: String
     Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Organization data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
@@ -356,10 +366,13 @@ Conditions:
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
+  UseExistingBucket: !Not [ !Equals [ !Ref DestinationBucketFullName, "" ] ]
+  CreateNewBucket: !Equals [ !Ref DestinationBucketFullName, "" ]
   
 Resources:
   S3Bucket:
     Type: 'AWS::S3::Bucket'
+    Condition: CreateNewBucket
     Properties:
       BucketName: !Sub "${DestinationBucket}${AWS::AccountId}"
       VersioningConfiguration:
@@ -400,6 +413,7 @@ Resources:
 
   S3DataBucketPolicy:
     Type: AWS::S3::BucketPolicy
+    Condition: CreateNewBucket
     Properties:
       Bucket: !Ref S3Bucket
       PolicyDocument:
@@ -459,12 +473,12 @@ Resources:
                 Action:
                   - s3:ListBucket
                 Resource:
-                 - !Sub "arn:${AWS::Partition}:s3:::${DestinationBucket}${AWS::AccountId}"
+                 - !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !Sub "arn:${AWS::Partition}:s3:::${DestinationBucket}${AWS::AccountId}" ]
               - Effect: Allow
                 Action:
                   - s3:GetObject
                 Resource:
-                 - !Sub "arn:${AWS::Partition}:s3:::${DestinationBucket}${AWS::AccountId}/*"
+                 - !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}/*", !Sub "arn:${AWS::Partition}:s3:::${DestinationBucket}${AWS::AccountId}/*" ]
         - !If
           - NeedDataBucketsKms
           - PolicyName: "KMS"
@@ -656,7 +670,7 @@ Resources:
         Variables:
           DATABASE_NAME: !Ref DatabaseName
           RESOURCE_PREFIX: !Ref ResourcePrefix
-          BUCKET_NAME: !Sub "${DestinationBucket}${AWS::AccountId}"
+          BUCKET_NAME: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Sub "${DestinationBucket}${AWS::AccountId}" ]
       Code:
         ZipFile: |
           import os
@@ -783,7 +797,7 @@ Resources:
         Variables:
           DATABASE_NAME: !Ref DatabaseName
           RESOURCE_PREFIX: !Ref ResourcePrefix
-          BUCKET_NAME: !Sub "${DestinationBucket}${AWS::AccountId}"
+          BUCKET_NAME: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Sub "${DestinationBucket}${AWS::AccountId}" ]
       Code:
         ZipFile: |
           import os
@@ -924,7 +938,7 @@ Resources:
               - Effect: "Allow"
                 Action:
                   - "s3:GetObject"
-                Resource: !Sub '${S3Bucket.Arn}/*'
+                Resource: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}/*", !Sub '${S3Bucket.Arn}/*' ]
         - PolicyName: "LoggingToS3andCloudWatch" #Used for logging/instrumentation
           PolicyDocument:
             Version: "2012-10-17"
@@ -932,7 +946,7 @@ Resources:
               - Effect: "Allow"
                 Action:
                   - s3:PutObject
-                Resource: !Sub '${S3Bucket.Arn}/*'
+                Resource: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}/*", !Sub '${S3Bucket.Arn}/*' ]
               - Effect: "Allow"
                 Action:
                   - cloudwatch:PutMetricData
@@ -1025,7 +1039,7 @@ Resources:
           - { Name: subversion,                  Type: string }
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
-          Location: !Sub "s3://${DestinationBucket}${AWS::AccountId}/logs/modules/"
+          Location: !If [ UseExistingBucket, !Sub "s3://${DestinationBucketFullName}/logs/modules/", !Sub "s3://${DestinationBucket}${AWS::AccountId}/logs/modules/" ]
           Parameters:
             UPDATED_BY_CRAWLER: CID-DC-no-crawler-needed
           SerdeInfo:
@@ -1040,7 +1054,7 @@ Resources:
           projection.logdate.range: 2025/01/01,NOW
           projection.logdate.type: date
           projection.enabled: 'true'
-          storage.location.template: !Sub "s3://${DestinationBucket}${AWS::AccountId}/logs/modules/${!logdate}"
+          storage.location.template: !If [ UseExistingBucket, !Sub "s3://${DestinationBucketFullName}/logs/modules/${!logdate}", !Sub "s3://${DestinationBucket}${AWS::AccountId}/logs/modules/${!logdate}" ]
 
   TrustedAdvisorModule:
     Type: AWS::CloudFormation::Stack
@@ -1050,8 +1064,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref Schedule
@@ -1072,8 +1086,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         Schedule: !Ref Schedule
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1093,8 +1107,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1115,8 +1129,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1136,8 +1150,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         Schedule: !Ref Schedule
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1156,8 +1170,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-inventory.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
@@ -1183,8 +1197,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-pricing.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         GlueRoleARN: !GetAtt GlueRole.Arn
         CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
@@ -1205,7 +1219,7 @@ Resources:
     Properties:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-compute-optimizer.yaml"
       Parameters:
-        DestinationBucket: !Ref S3Bucket
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         ManagementAccountID: !Ref ManagementAccountID
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1232,8 +1246,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref Schedule
@@ -1258,8 +1272,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref Schedule
@@ -1284,8 +1298,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref Schedule
@@ -1310,8 +1324,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         Schedule: !Ref Schedule
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
@@ -1330,8 +1344,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-budgets.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
@@ -1352,8 +1366,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         GlueRoleARN: !GetAtt GlueRole.Arn
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref Schedule
@@ -1377,8 +1391,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-aws-feeds.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1396,8 +1410,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-isv-feeds.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
         ResourcePrefix: !Ref ResourcePrefix
@@ -1415,8 +1429,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         Schedule: !Ref ScheduleFrequent
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1437,8 +1451,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1457,8 +1471,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-service-quotas.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         Schedule: !Ref ScheduleFrequent
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
@@ -1484,8 +1498,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
         ResourcePrefix: !Ref ResourcePrefix
@@ -1503,7 +1517,7 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-resilience-hub.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1528,8 +1542,8 @@ Resources:
       TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.3/module-marketplace.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         GlueRoleARN: !GetAtt GlueRole.Arn
@@ -1555,8 +1569,8 @@ Resources:
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         Schedule: !Ref ScheduleFrequent
         GlueRoleARN: !GetAtt GlueRole.Arn
         ResourcePrefix: !Ref ResourcePrefix
@@ -1580,8 +1594,8 @@ Resources:
         ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
         ManagementAccountID: !Ref ManagementAccountID
         ResourcePrefix: !Ref ResourcePrefix
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DestinationBucket: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
+        DestinationBucketARN: !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !GetAtt S3Bucket.Arn ]
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         EUCAccountIDs: !Ref EUCAccountIDs
 
@@ -1610,14 +1624,14 @@ Resources:
             Effect: Allow
             Action: s3:ListBucket
             Resource:
-              - !Sub ${S3Bucket.Arn}
+              - !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}", !Sub "${S3Bucket.Arn}" ]
           - Sid: AllowReadBucket
             Effect: Allow
             Action:
               - s3:GetObject
               - s3:GetObjectVersion
             Resource:
-              - !Sub ${S3Bucket.Arn}/*
+              - !If [ UseExistingBucket, !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketFullName}/*", !Sub "${S3Bucket.Arn}/*" ]
           - !If
             - NeedDataBucketsKms
             - Sid: AllowKmsDecrypt
@@ -1630,7 +1644,7 @@ Resources:
 Outputs:
   Bucket:
     Description: CID Data Collection - Name of S3 Bucket which will store collected data
-    Value: !Ref S3Bucket
+    Value: !If [ UseExistingBucket, !Ref DestinationBucketFullName, !Ref S3Bucket ]
     Export: { Name: "cid-DataCollection-Bucket" }
   Database:
     Description: "Glue Database for CID Data Collection"
