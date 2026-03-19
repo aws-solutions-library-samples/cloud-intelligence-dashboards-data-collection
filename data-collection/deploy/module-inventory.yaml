@@ -1483,18 +1483,18 @@ Resources:
                       function_name='describe_vpcs'
                   ),
                   'lambda-functions' : partial(
-                  paginated_scan,
-                  service='lambda',
-                  function_name='list_functions',
-                  obj_name='Functions[*]'
+                      paginated_scan,
+                      service='lambda',
+                      function_name='list_functions',
+                      obj_name='Functions[*]'
                   ),
                   'eks': eks_clusters_scan,
                   'workspaces': workspaces_scan,
                   'network-interfaces': partial(
-                  paginated_scan,
-                  service='ec2',
-                  function_name='describe_network_interfaces',
-                  obj_name='NetworkInterfaces[*]'
+                      paginated_scan,
+                      service='ec2',
+                      function_name='describe_network_interfaces',
+                      obj_name='NetworkInterfaces[*]'
                   ),
               }
               account = account if isinstance(account, dict) else json.loads(account)
