@@ -148,7 +148,7 @@ Resources:
 
           BUCKET = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
-          MODULE_NAME = os.environ['MODULE_NAME']
+          MODULE_NAME = os.environ.get('MODULE_NAME', 'service-quotas')
           REGIONS = [r.strip() for r in os.environ['REGIONS'].split(',') if r]
 
           logger = logging.getLogger(__name__)
@@ -156,16 +156,18 @@ Resources:
 
           def lambda_handler(event, context): #pylint: disable=unused-argument
               logger.info(f"Incoming event: {json.dumps(event)}")
-              key = "account"
-              if key not in event:
-                  logger.error(f"Lambda event parameter '{key}' not defined (fatal) in {MODULE_NAME} module. Please do not trigger this Lambda manually. "
+              account = event.get("account")
+              if not account:
+                  logger.error(f"Lambda event parameter 'account' not defined (fatal) in {MODULE_NAME} module. Please do not trigger this Lambda manually. "
                       f"Find the corresponding {MODULE_NAME} state machine in Step Functions and trigger from there."
                   )
-                  raise RuntimeError(f"(MissingParameterError) Lambda event missing '{key}' parameter")
+                  raise RuntimeError(f"(MissingParameterError) Lambda event missing 'account' parameter")
 
-              account = json.loads(event[key])
+              account = account if isinstance(account, dict) else json.loads(account)
+              regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+              regions = regions if len(regions) > 0 else REGIONS
               try:
-                  main(account, ROLE_NAME, MODULE_NAME, BUCKET, REGIONS)
+                  main(account, ROLE_NAME, MODULE_NAME, BUCKET, regions)
               except Exception as exc: #pylint: disable=broad-exception-caught
                   logger.error(f'Error in account {account}: {exc}')
               return {
@@ -200,7 +202,7 @@ Resources:
               for region in regions:
                   logger.info(f"Processing region {region} for account {account_id}")
                   try:
-                      quotas_client = session.client("service-quotas", region_name=region) 
+                      quotas_client = session.client("service-quotas", region_name=region)
                       logger.debug(f"Start looping through services in {region}")
                       quota_history = list(
                           quotas_client
@@ -210,7 +212,7 @@ Resources:
                       )
                       if not quota_history:
                           logger.debug(f"No change history in {region}")
-                          continue 
+                          continue
                       # Store history
                       history_key = f'{module_name}/{module_name}-history/payer_id={payer_id}/account_id={account_id}/region={region}/history.json'
                       s3_client.put_object(
@@ -259,7 +261,6 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           ROLE_NAME: !Ref MultiAccountRoleName
-          MODULE_NAME: !Ref CFDataName
           REGIONS: !Ref RegionsInScope
     Metadata:
       cfn_nag:

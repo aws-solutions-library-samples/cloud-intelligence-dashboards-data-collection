@@ -209,13 +209,16 @@ Resources:
 
           def lambda_handler(event, context): #pylint: disable=unused-argument,too-many-branches,too-many-locals,too-many-statements
               logger.info(f"Event: {event}")
-              if 'account' not in event:
+              account = event.get("account")
+              if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually. "
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
               module_name = 'resilience-hub'
-              account = json.loads(event["account"])
+              account = account if isinstance(account, dict) else json.loads(account)
+              regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+              regions = regions if len(regions) > 0 else REGIONS
               account_id = account["account_id"]
               payer_id = account["payer_id"]
               logger.info(f"Collecting data for account: {account_id}")
@@ -232,7 +235,7 @@ Resources:
               s3 = boto3.client('s3') # local s3
               s3_uploader = partial(s3_json_file, s3, BUCKET)
 
-              for region in REGIONS:
+              for region in regions:
                   try:
                       resilience_client = assumed_session.client('resiliencehub', region_name=region)
 
@@ -328,9 +331,9 @@ Resources:
               return {
                   'statusCode': 200,
                   'body': {
-                    'message': 'Completed successfully',
-                    'account': account_id,
-                    'bucket': BUCKET,
+                  'message': 'Completed successfully',
+                  'account': account_id,
+                  'bucket': BUCKET,
                   }
               }
 
