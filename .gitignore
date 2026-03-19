@@ -171,11 +171,13 @@ ta.zip
 
 # Local sandbox
 sandbox/
+local-test/
 scratch/
 migration_log.csv
 # Pylint custom script temporal folder
 .tmp
 
+.pylintrc
 data-collection/lambda-layers/python/
 data-collection/lambda-layers/layer.zip
 data-collection/test/clean-html.py

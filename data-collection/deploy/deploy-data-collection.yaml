@@ -1584,6 +1584,12 @@ Resources:
         DestinationBucketARN: !GetAtt S3Bucket.Arn
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         EUCAccountIDs: !Ref EUCAccountIDs
+        RegionsInScope:
+          Fn::If:
+            - RegionsInScopeIsEmpty
+            - !Sub "${AWS::Region}"
+            - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
+
 
   DataCollectionReadAccess:
     Type: AWS::IAM::ManagedPolicy

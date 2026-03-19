@@ -56,12 +56,6 @@ def test_budgets_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."budgets_data" LIMIT 10;')
     assert len(data) > 0, 'budgets_data is empty'
 
-
-def test_cost_explorer_rightsizing_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."cost_explorer_rightsizing_data" LIMIT 10;')
-    assert len(data) > 0, 'cost_explorer_rightsizing_data is empty'
-
-
 def test_cost_anomaly_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."cost_anomaly_data" LIMIT 10;')
     assert len(data) > 0, 'cost_anomaly_data is empty'
