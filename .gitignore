@@ -161,7 +161,10 @@ cython_debug/
 
 .DS_Store
 .vscode
-.kiro
+.kiro/*
+!.kiro/steering/
+.kiro/steering/*
+!.kiro/steering/*.md
 sqlite_mcp_server.db
 
 # Packaged modules
@@ -181,3 +184,5 @@ migration_log.csv
 data-collection/lambda-layers/python/
 data-collection/lambda-layers/layer.zip
 data-collection/test/clean-html.py
+
+.ai/local
