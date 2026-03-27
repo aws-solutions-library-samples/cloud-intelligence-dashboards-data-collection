@@ -4,7 +4,7 @@
 # This script creates a Lambda layer package with the correct directory structure
 # for Python 3.13 runtime.
 #
-# Usage: ./build-boto3-layer.sh
+# Usage: ./boto3-layer-build.sh
 #
 # Output: data-collection/deploy/layers/boto3-layer.zip
 
@@ -237,7 +237,7 @@ echo ""
 echo "  2. Deploy the CloudFormation stack with the layer"
 echo ""
 echo "  Or run the publish script to upload to all regional buckets:"
-echo "     ./data-collection/deploy/layers/publish-boto3-layer.sh"
+echo "     ./data-collection/deploy/layers/boto3-layer-publish.sh"
 echo ""
 
 # Output the filename for scripting (like case-summarization does)

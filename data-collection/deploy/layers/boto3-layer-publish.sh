@@ -2,7 +2,7 @@
 # This script builds and publishes the boto3 Lambda layer to all regional buckets.
 # It should be run as part of the release process.
 #
-# Usage: ./publish-boto3-layer.sh
+# Usage: ./boto3-layer-publish.sh
 #
 # Prerequisites:
 # - AWS CLI configured with appropriate credentials
@@ -46,7 +46,7 @@ fi
 info "Building boto3 layer for version: $version"
 
 # Build the layer using the build script in the same directory
-layer_file=$(bash "./build-boto3-layer.sh" 2>&1 | tail -1)
+layer_file=$(bash "./boto3-layer-build.sh" 2>&1 | tail -1)
 
 # Check if build was successful
 if [ ! -f "./boto3-layer.zip" ]; then
