@@ -9,6 +9,13 @@ export CENTRAL_BUCKET=aws-managed-cost-intelligence-dashboards
 code_path=$(git rev-parse --show-toplevel)/data-collection/deploy
 version=v$(jq -r '.version' data-collection/utils/version.json)
 
+# Build boto3 Lambda layer
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! "$SCRIPT_DIR/layer-utils/boto3-layer-build.sh"; then
+  read -p "Layer build failed. Continue anyway? (y/N): " choice
+  [[ "$choice" != [yY] ]] && { echo "Aborted."; exit 1; }
+fi
+
 echo "sync to central bucket"
 aws s3 sync $code_path/       s3://$CENTRAL_BUCKET/cfn/data-collection/
 aws s3 sync $code_path/       s3://$CENTRAL_BUCKET/cfn/data-collection/$version/
