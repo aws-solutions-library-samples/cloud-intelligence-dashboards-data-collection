@@ -152,7 +152,7 @@ Resources:
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
 
           BUCKET_NAME = os.environ['BUCKET_NAME']
-          ROLENAME = os.environ['ROLENAME']
+          ROLE_NAME = os.environ['ROLE_NAME']
           PREFIX = os.environ['PREFIX']
           REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
           if len(REGIONS) > 0:
@@ -345,7 +345,7 @@ Resources:
               region = get_active_health_region()
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
               creds = boto3.client('sts').assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
                   RoleSessionName="data_collection"
               )['Credentials']
               health_client = boto3.client(
@@ -439,7 +439,7 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           PREFIX: !Ref CFDataName
-          ROLENAME: !Ref ManagementRoleName
+          ROLE_NAME: !Ref ManagementRoleName
           #REGIONS: -- defining regions can miss events within the region list so default to global
           LOOKBACK: 730 # 2 years
           DETAIL_SM_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}${CFDataName}-detail-StateMachine'

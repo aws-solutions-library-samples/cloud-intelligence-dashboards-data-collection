@@ -137,7 +137,7 @@ Resources:
 
           BUCKET = os.environ["BUCKET_NAME"]
           PREFIX = os.environ["PREFIX"]
-          role_name = os.environ['ROLENAME']
+          ROLE_NAME = os.environ['ROLE_NAME']
           local_file = "/tmp/data.json"
           REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
 
@@ -154,7 +154,8 @@ Resources:
 
           def lambda_handler(event, context):
               collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-              if 'account' not in event:
+              account = event.get("account")
+              if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
@@ -162,12 +163,16 @@ Resources:
 
               try:
                   account = json.loads(event["account"])
+                  account = account if isinstance(account, dict) else json.loads(account)
+                  regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+                  regions = regions if len(regions) > 0 else REGIONS
+
                   account_id = account["account_id"]
                   account_name = account["account_name"]
                   payer_id = account["payer_id"]
                   logger.info(f"Collecting data for account: {account_id}")
 
-                  for region in REGIONS:
+                  for region in regions:
                       try:
                           cw_client = assume_role('cloudwatch', account_id, region)
                           ec2_client = assume_role('ec2', account_id, region)
@@ -250,7 +255,7 @@ Resources:
           def assume_session(account_id, region):
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
               cred = boto3.client('sts', region_name=region).assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{role_name}",
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
                   RoleSessionName="data_collection"
               )['Credentials']
               return boto3.Session(
@@ -266,7 +271,7 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           PREFIX: !Ref CFDataName
-          ROLENAME: !Ref MultiAccountRoleName
+          ROLE_NAME: !Ref MultiAccountRoleName
           REGIONS: !Ref RegionsInScope
     Metadata:
       cfn_nag:

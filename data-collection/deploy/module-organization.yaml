@@ -137,9 +137,9 @@ Resources:
           from botocore.exceptions import ClientError
           from botocore.client import Config
 
-          BUCKET = os.environ['BUCKET_NAME']
-          ROLE = os.environ['ROLENAME']
-          PREFIX = os.environ['PREFIX']
+          BUCKET = os.environ.get('BUCKET_NAME')
+          ROLE = os.environ.get('ROLE_NAME')
+          PREFIX = os.environ.get('PREFIX')
           REGIONS = ["us-east-1"] #This MUST be us-east-1 regardless of region of Lambda
 
           logger = logging.getLogger(__name__)
@@ -147,12 +147,13 @@ Resources:
 
           def lambda_handler(event, context):
               logger.info(f"Event data {json.dumps(event)}")
-              if 'account' not in event:
+              account = event.get("account")
+              if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              account = json.loads(event["account"])
+              account = account if isinstance(account, dict) else json.loads(account)
               try:
                   process_management_acc(account["account_id"])
               except Exception as exc:
@@ -270,8 +271,13 @@ Resources:
                   'organizations',
                   region_name="us-east-1", #MUST be us-east-1 regardless of region you have the Lambda
               )
+              res = []
               for account in OrgController(client).iterate_accounts():
+                  res.append(account)
                   print(json.dumps(account, default=json_converter))
+              return
+
+          #test()
       Handler: 'index.lambda_handler'
       MemorySize: 2688
       Timeout: 600
@@ -280,7 +286,7 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           PREFIX: !Ref CFDataName
-          ROLENAME: !Ref ManagementRoleName
+          ROLE_NAME: !Ref ManagementRoleName
     Metadata:
       cfn_nag:
         rules_to_suppress:
