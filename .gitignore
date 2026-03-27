@@ -178,6 +178,5 @@ migration_log.csv
 .tmp
 
 .pylintrc
-data-collection/lambda-layers/python/
-data-collection/lambda-layers/layer.zip
+data-collection/deploy/layers/*.zip
 data-collection/test/clean-html.py
