@@ -54,9 +54,14 @@ Parameters:
   DetailStepFunctionTemplate:
     Type: String
     Description: JSON representation of the detail retrieval StepFunction template
+  Boto3LayerArn:
+    Type: String
+    Description: "ARN of the Boto3 Lambda Layer"
+    Default: ""
 
 Conditions:
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  UseBoto3Layer: !Not [ !Equals [ !Ref Boto3LayerArn, "" ] ]
 
 Outputs:
   StepFunctionARN:
@@ -135,21 +140,28 @@ Resources:
       Description: !Sub "Lambda function to retrieve ${CFDataName}"
       Runtime: python3.13
       Architectures: [x86_64]
+      Layers: !If
+        - UseBoto3Layer
+        - [!Ref Boto3LayerArn]
+        - !Ref AWS::NoValue
       Code:
         ZipFile: |
           import os
           import json
           import uuid
           import logging
+          from datetime import date, datetime, timedelta, timezone
+
           import jmespath
           import socket
-          from datetime import date, datetime, timedelta, timezone
 
           import boto3
           from botocore.config import Config
 
           logger = logging.getLogger()
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          logger.info("boto3 version: %s", boto3.__version__)
 
           BUCKET_NAME = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
@@ -189,6 +201,8 @@ Resources:
               'event_source': 'event_source',
               'event_arn': 'event.arn',
               'ingestion_time': 'ingestion_time',
+              'personas': 'event.personas',
+              'actionability': 'event.actionability'
           }
 
           time_fields_to_convert = ['start_time', 'end_time', 'last_updated_time', 'affected_entity_last_update']
@@ -281,10 +295,14 @@ Resources:
 
               # merge with details and affected entities
               event_details_per_affected = []
+              logger.debug(f"Raw event: {event}")
+              logger.debug(f"Raw details: {details}")
               if len(affected_entities) == 0:
                   detail = details[0] if len(details) > 0 else {}
                   event = {**event, **detail}
                   event_details_per_affected.append(event)
+                  logger.debug(f"Merged WITHOUT entities: {event}\n\n")
+
               for affected_entity in affected_entities:
                   account = affected_entity['awsAccountId']
                   event_arn = affected_entity['eventArn']
@@ -296,11 +314,10 @@ Resources:
                       deprecated_versions = metadata.pop('deprecated_versions', None)
                       if deprecated_versions:
                           event['deprecated_versions'] = deprecated_versions
-                      if len(metadata) == 0:
-                          event['eventMetadata'] = ""
                   merged_dict = {**event, **affected_entity}
                   if len(detail) > 0:
                       merged_dict = {**merged_dict, **detail[0]}
+                  logger.debug(f"Merged WITH entities: {merged_dict}")
                   event_details_per_affected.append(merged_dict)
               return event_details_per_affected
 
@@ -331,7 +348,7 @@ Resources:
               logger.info(f"Event data: {event}")
               account = event.get('account')
               items = event.get('items')
-              if not (account):
+              if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
@@ -423,6 +440,7 @@ Resources:
                               metadata = flatten_event.get('event_metadata')
                               metadata = json.dumps(metadata) if (not isinstance(metadata, str)) and (metadata != None) else metadata
                               flatten_event['event_metadata'] = metadata
+                              logger.debug(f"Final flattened event: {flatten_event}")
                               f.write(to_json(flatten_event) + '\n')
                               count += 1
                   if count > 0:
