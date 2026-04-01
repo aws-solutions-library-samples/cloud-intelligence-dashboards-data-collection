@@ -26,6 +26,9 @@ Parameters:
     Type: String
     Description: "Comma-separated list of account IDs that user has identified to have WorkSpaces running, used to collect WorkSpaces metrics from. If left blank, metrics will be checked from all linked accounts in Organization."
     Default: ""
+  RegionsInScope:
+    Type: String
+    Description: "Comma Delimited list of AWS regions from which data about resources will be collected. Example: us-east-1,eu-west-1,ap-northeast-1"
 
 Outputs:
   LambdaFunctionName:
@@ -126,6 +129,9 @@ Resources:
       Architectures: [x86_64]
       Code:
           ZipFile: |
+            """Account collector Lambda for building linked and payer account lists with
+            optional inclusion, exclusion, and granular execution control."""
+
             import os
             import re
             import json
@@ -149,11 +155,13 @@ Resources:
             START_TIME = str(datetime.now().isoformat())
             LINKED_ACCOUNT_LIST_KEY = os.environ.get('LINKED_ACCOUNT_LIST_KEY', 'linked-account-list.json')
             PAYER_ACCOUNT_LIST_KEY = os.environ.get('PAYER_ACCOUNT_LIST_KEY', 'payer-account-list.json')
+            REGIONS = os.environ.get('REGIONS', '*').replace(",", ":")
 
             logger = logging.getLogger(__name__)
             logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
 
             def lambda_handler(event, context): #pylint: disable=unused-argument
+                """Build account lists for data collection modules based on event type."""
                 logger.info(f"Incoming event: {event}")
                 # need to confirm that the Lambda concurrency limit is sufficient to avoid throttling
                 lambda_limit = boto3.client('lambda').get_account_settings()['AccountLimit']['ConcurrentExecutions']
@@ -167,7 +175,7 @@ Resources:
                 module = event.get("module", '').lower()
                 params = event.get("params", '')
                 functions = { # keep keys same as boto3 services
-                    'linked': partial(iterate_linked_accounts, module),
+                    'linked': partial(iterate_linked_accounts, module, params),
                     'euc': partial(iterate_accounts_with_filter, EUC_ACCOUNTS),
                     'payers': partial(iterate_admins_accounts, None),
                     'organizations': partial(iterate_admins_accounts, 'organizations'),
@@ -207,10 +215,12 @@ Resources:
                 return {'statusCode': 200, 'accountList': key, 'bucket': BUCKET}
 
             def get_all_payers():
+                """Yield each payer account ID from the comma-separated management account list."""
                 for payer_id in MANAGEMENT_ACCOUNT_IDS.split(','):
                     yield payer_id.strip()
 
             def iterate_admins_accounts(service=None):
+                """Yield payer or delegated admin accounts, checking SSM for delegation overrides."""
                 ssm = boto3.client('ssm')
                 for payer_id in get_all_payers():
                     account_id = payer_id # default
@@ -222,11 +232,15 @@ Resources:
                             logger.info(f'Not found ssm parameter {ssm_key}. Will use Management Account Id {payer_id}')
                     yield {"account": json.dumps({'account_id': account_id, 'account_name': '', 'payer_id': payer_id})}
 
-            def iterate_linked_accounts(module=None):
+            def iterate_linked_accounts(module=None, params=None):
+                """Yield linked accounts using granular config, predefined list, or Organization discovery."""
                 granular_config = get_from_bucket(BUCKET, GRANULAR_EXECUTION_CONFIG_KEY)
                 try:
                     # Test first to see if a granular config is setup for the current module
                     if granular_config:
+                        logger.info("Using granular collection policy mode")
+                        if len(params):
+                            module = module + '-' + params
                         policies, per_module = parse_granular_config(granular_config, module)
                         # If there is a config file and it does not have any definition for the current module, proceed as normal
                         if per_module > 0:
@@ -234,10 +248,11 @@ Resources:
                             for org_account_data in iterate_admins_accounts('organizations'):
                                 org_account = json.loads(org_account_data['account'])
                                 org_client = get_client_with_role(service="organizations", account_id=org_account['account_id'], region="us-east-1") #MUST be us-east-1
-                                account_policy_list |= OrganizationsPrincipalExpander(org_client).process_policies(policies, module)
+                                account_policy_list |= OrganizationsPrincipalExpander(org_client, logger).process_policies(policies, module)
                                 for account_id, account_policy in account_policy_list.items():
-                                    for region in account_policy['regions']:
-                                        yield format_account(account_id=account_id, account_name='', payer_id=org_account['payer_id'], region=region, payload=account_policy['payload'])
+                                    regions_str = ','.join(account_policy['regions']) if len(account_policy['regions']) > 0 else ''
+                                    logger.debug(f"Allowing module {module}, account {account_id}, regions {regions_str}")
+                                    yield format_account(account_id=account_id, account_name='', payer_id=org_account['payer_id'], regions=regions_str, payload=account_policy['payload'])
                             return
 
                     defined_accounts, ext = get_defined_list(BUCKET, PREDEF_ACCOUNT_LIST_KEY)
@@ -271,15 +286,16 @@ Resources:
 
 
             def iterate_accounts_with_filter(filter_accounts):
-                ''' same as iterate_linked_accounts but with additional filtering
+                """ same as iterate_linked_accounts but with additional filtering
                 filter_accounts: a comma separated list of accounts OR '*'
-                '''
+                """
                 for acc in iterate_linked_accounts():
                     account_id = json.loads(acc['account'])['account_id']
                     if account_id in filter_accounts.split(',') or filter_accounts.strip() == '*':
                         yield acc
 
             def get_defined_list(bucket, key):
+                """Try to load a predefined account list from S3 as JSON or CSV."""
                 s3 = boto3.client("s3")
                 exts = [".json", ".csv"]
                 for ext in exts:
@@ -290,6 +306,7 @@ Resources:
                 return None, None
 
             def get_from_bucket(bucket, key, client=None):
+                """Retrieve an object from S3 and return its lines, or None if not found."""
                 s3 = client if client else boto3.client("s3")
                 try:
                     data = s3.get_object(Bucket=bucket, Key=key)
@@ -297,19 +314,21 @@ Resources:
                 except Exception: #pylint: disable=broad-exception-caught
                     return None
 
-            def format_account(account_id, account_name, payer_id='', region='*', payload=''):
+            def format_account(account_id, account_name, payer_id='', regions='', payload=''):
+                """Return an account dict with a JSON-serialized account payload."""
                 return {
                     "account": json.dumps({
                         'account_id': account_id,
                         'account_name': account_name,
                         'payer_id': payer_id,
-                        "region": region,
+                        "regions": regions,
                         "payload": payload
                     })
                 }
 
 
             def get_client_with_role(account_id, service, region):
+                """Assume a cross-account role and return a boto3 client for the given service."""
                 partition = boto3.session.Session().get_partition_for_region(region_name=region)
                 credentials = boto3.client('sts').assume_role(
                     RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
@@ -325,45 +344,48 @@ Resources:
 
             def parse_granular_config(policy_lines, module_scope):
                 """Create policy dictionaries from a string with comma-separated values.
-                
+
                 Format: module,policy_type,principal,regions,payload
                 Regions are separated by colons within the regions field.
                 Multiple lines are separated by linebreaks.
-                
+
                 Returns a list of policy dictionaries.
                 """
                 instances = []
                 lines_for_module = 0
-                
+
                 logger.info(f'Parsing granular config file, found {len(policy_lines) if policy_lines else 0} lines')
                 try:
                     for line in policy_lines:
                         line = line.strip()
-                        if not line:  # Skip empty lines
+                        if not line or line[0] == '#':  # Skip empty or commented lines
                             continue
-                            
+
                         parts = line.split(',')
                         if len(parts) < 3:
                             continue # malformed so ignore
                         while len(parts) < 5:
                             parts.append('')
-                        
-                        module, policy_type, principal, regions_str, payload = parts
-                        
-                        # Parse regions (colon-separated)
-                        regions = regions_str.split(':') if regions_str else ['*']
-                        
-                        instance = {
-                            'principal': principal,
-                            'module': module,
-                            'policy_type': policy_type,
-                            'regions': regions,
-                            'payload': payload
-                        }
-                        instances.append(instance)
+
+                        module, policy_type, principal, regions_str, payload = [p.strip() for p in parts]
+                        module = module if len(module) > 0 and module != '*' else module_scope
+
                         if module == module_scope:
+                            if len(regions_str) == 0 or regions_str == '*':
+                                regions_str = REGIONS
+                            # Parse regions (colon-separated)
+                            regions = [r.strip() for r in regions_str.split(':')]
+
+                            instance = {
+                                'principal': principal,
+                                'module': module,
+                                'policy_type': policy_type,
+                                'regions': regions,
+                                'payload': payload
+                            }
+                            instances.append(instance)
                             lines_for_module += 1
-                    
+
                     return instances, lines_for_module
                 except Exception as exc: #pylint: disable=broad-exception-caught
                     logger.error( f'{type(exc).__name__}: When parsing granular config file. {exc}')
@@ -371,56 +393,108 @@ Resources:
 
             class OrganizationsPrincipalExpander:
                 """Expands OU principals to individual account principals using AWS Organizations."""
-                
-                def __init__(self, organizations_client=None):
-                    """Initialize with optional Organizations client."""
+
+                def __init__(self, organizations_client=None, logger=None):
+                    """Initialize with optional Organizations client and logger."""
                     self.organizations_client = organizations_client or boto3.client('organizations')
-                
+                    self.logger = logger or logging.getLogger(__name__)
+
                 def process_policies(self, principal_policies, module=None):
-                    """Process policies with allow ('a') and deny ('d') types, applying deny precedence.
-                    
+                    """Process policies with allow ('A') and deny ('D') types, applying deny precedence.
+
                     Args:
                         principal_policies: List of policy dictionaries
-                        
+
                     Returns:
                         OrderedDict with account IDs as keys and policy dictionaries as values
                     """
-                    if module:
-                        principal_policies = [p for p in principal_policies if p['module'] == module]
-                      
-                    # Filter policies by type
-                    allow_policies = [p for p in principal_policies if p['policy_type'].upper() == 'A']
-                    deny_policies = [p for p in principal_policies if p['policy_type'].upper() == 'D']
-                    
-                    # Process allow policies first
-                    allow_expanded = self._expand_principals(allow_policies)
-                    
-                    # Process deny policies
-                    deny_expanded = self._expand_principals(deny_policies)
-                    
-                    # Remove allow entries that intersect with deny entries
-                    for account_id in deny_expanded.keys():
-                        if account_id in allow_expanded:
-                            del allow_expanded[account_id]
-                    
-                    return allow_expanded
-                
+                    try:
+                        if module:
+                            principal_policies = [p for p in principal_policies if p['module'].upper() == module.upper()]
+
+                        # Filter policies by type
+                        allow_policies = [p for p in principal_policies if p['policy_type'][0].upper() == 'A']
+                        deny_policies = [p for p in principal_policies if p['policy_type'][0].upper() == 'D']
+
+                        # Process allow policies first
+                        allow_expanded = self._expand_principals(allow_policies)
+                        logger.debug(f"Expanded ALLOW policies are {allow_expanded}")
+
+                        # Process deny policies
+                        deny_expanded = self._expand_principals(deny_policies)
+                        logger.debug(f"Expanded DENY policies are {deny_expanded}")
+
+                        # Remove allow entries that intersect with deny entries
+                        # Region-aware: remove only matching regions, delete account if none remain
+                        for account_id, deny_policy in deny_expanded.items():
+                            deny_regions = set(deny_policy.get('regions', ['*']))
+                            logger.debug(f"Applying DENY policies to account {account_id}: {deny_policy}")
+
+                            # If denying all regions for all accounts then there are no possible allow rules
+                            if '*' in deny_regions and account_id == '*':
+                                logger.warning("Rule denies all regions for all accounts. Nothing will be invoked.")
+                                return []
+
+                            # Check if deny only certain regions for all accounts
+                            if account_id == '*':
+                                logger.debug(f"Deny all rule detected for specific regions {deny_regions}")
+                                for account_id, allow_policy in allow_expanded.items():
+                                    allow_regions = allow_policy.get('regions', [])
+                                    # Remove matching regions from the allow policy
+                                    remaining = [r for r in allow_regions if r not in deny_regions]
+                                    if remaining:
+                                        logger.debug(f"Remaining regions for account {account_id} are {remaining}")
+                                        allow_policy['regions'] = remaining
+                                    else:
+                                        logger.info(f"No remaining regions in scope for account {account_id} so removing entirely")
+                                        del allow_expanded[account_id]
+                                continue
+
+                            # Specified account to deny but not in the allow list so nothing to do
+                            if account_id not in allow_expanded:
+                                logger.info(f"DENY policy for account {account_id} is not in the account allow list")
+                                continue
+
+                            allow_policy = allow_expanded[account_id]
+                            allow_regions = allow_policy.get('regions', [])
+
+                            # Wildcard region deny removes the entire account
+                            if '*' in deny_regions:
+                                logger.warning(f"DENY policy for account {account_id} specifies all regions so removing account entirely")
+                                del allow_expanded[account_id]
+                                continue
+
+                            # Remove matching regions from the allow policy
+                            remaining = [r for r in allow_regions if r not in deny_regions]
+                            if remaining:
+                                logger.debug(f"Remaining regions for account {account_id} are {remaining}")
+                                allow_policy['regions'] = remaining
+                            else:
+                                logger.debug(f"No remaining regions in scope for account {account_id} so removing entirely")
+                                del allow_expanded[account_id]
+
+                        logger.debug(f"All policies successfully parsed and resulting in {allow_expanded}")
+                        return allow_expanded
+                    except Exception as exc: #pylint: disable=broad-exception-caught
+                        self.logger.error(f'{type(exc).__name__}: Error processing policies: {exc}')
+                        return []
+
                 def _expand_principals(self, principal_policies):
                     """Private method to expand OU principals to individual account principals.
-                    
+
                     Args:
                         principal_policies: List of policy dictionaries
-                        
+
                     Returns:
                         OrderedDict with account IDs as keys and policy dictionaries as values
                     """
                     expanded_principals = OrderedDict()
-                    
+
                     for policy in principal_policies:
                         if self._is_ou_principal(policy['principal']):
                             # Get all accounts under this OU with the policy object
                             account_policy_dict = self._get_all_accounts_in_ou(policy['principal'], policy)
-                            
+
                             # Add the dictionary contents to expanded_principals
                             for account_id, original_policy in account_policy_dict.items():
                                 expanded_policy = {
@@ -432,20 +506,20 @@ Resources:
                         else:
                             # Keep non-OU principals as-is
                             expanded_principals[policy['principal']] = policy
-                    
+
                     return expanded_principals
-                
+
                 def _is_ou_principal(self, principal):
                     """Check if principal represents an OU or root."""
                     return principal and (principal.startswith(('r-', 'ou-')) and not re.match(r'^\d+$', principal))
-                
+
                 def _get_all_accounts_in_ou(self, ou_id, principal_policy):
                     """Recursively get all account IDs under an OU with their associated policy.
-                    
+
                     Args:
                         ou_id: The OU ID to expand
                         principal_policy: The policy dictionary associated with this OU
-                        
+
                     Returns:
                         OrderedDict with account IDs as keys and policy dictionaries as values
                     """
@@ -458,27 +532,27 @@ Resources:
                             ParentId=ou_id,
                             ChildType='ACCOUNT'
                         )
-                        
+
                         # Add all direct account children
                         for page in account_pages:
                             for child in page['Children']:
                                 accounts[child['Id']] = principal_policy
-                        
+
                         # Get all child OUs with pagination
                         ou_pages = paginator.paginate(
                             ParentId=ou_id,
                             ChildType='ORGANIZATIONAL_UNIT'
                         )
-                        
+
                         for page in ou_pages:
                             for child_ou in page['Children']:
                                 # Recursively get accounts from child OUs
                                 child_accounts = self._get_all_accounts_in_ou(child_ou['Id'], principal_policy)
                                 accounts.update(child_accounts)
-                            
+
                     except Exception as exc: #pylint: disable=broad-exception-caught
-                        logger.error( f'{type(exc).__name__}: Error retrieving children for OU {ou_id}: {exc}')
-                    
+                        self.logger.error( f'{type(exc).__name__}: Error retrieving children for OU {ou_id}: {exc}')
+
                     return accounts
       Handler: 'index.lambda_handler'
       MemorySize: 2688
@@ -494,6 +568,7 @@ Resources:
           EXCLUDED_ACCOUNT_LIST_KEY: "account-list/excluded-linked-account-list.csv"
           EUC_ACCOUNT_IDS: !Ref EUCAccountIDs
           GRANULAR_EXECUTION_CONFIG_KEY: "account-list/granular-execution-config.csv"
+          REGIONS: !Ref RegionsInScope
 
     Metadata:
       cfn_nag:

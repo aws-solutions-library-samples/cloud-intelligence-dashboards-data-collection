@@ -138,7 +138,7 @@ Resources:
 
           BUCKET = os.environ["BUCKET_NAME"]
           PREFIX = os.environ["PREFIX"]
-          ROLE_NAME = os.environ['ROLENAME']
+          ROLE_NAME = os.environ['ROLE_NAME']
           REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
           local_file = "/tmp/data.json"
 
@@ -147,20 +147,23 @@ Resources:
 
           def lambda_handler(event, context):
               collection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-              if 'account' not in event:
+              account = event.get("account")
+              if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
 
               try:
-                  account = json.loads(event["account"])
+                  account = account if isinstance(account, dict) else json.loads(account)
+                  regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+                  regions = regions if len(regions) > 0 else REGIONS
                   account_id = account["account_id"]
                   account_name = account["account_name"]
                   payer_id = account["payer_id"]
                   logger.info(f"Collecting data for account: {account_id}")
                   with open(local_file, "w") as f:
-                      for region in REGIONS:
+                      for region in regions:
                           services_counter = 0
                           try:
                               session = assume_session(account_id, region)
@@ -220,7 +223,6 @@ Resources:
 
           def list_ecs_regions():
               return boto3.Session().get_available_regions('ecs')
-
       Handler: 'index.lambda_handler'
       MemorySize: 2688
       Timeout: 300
@@ -229,7 +231,7 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           PREFIX: !Ref CFDataName
-          ROLENAME: !Ref MultiAccountRoleName
+          ROLE_NAME: !Ref MultiAccountRoleName
           REGIONS: !Ref RegionsInScope
     Metadata:
       cfn_nag:

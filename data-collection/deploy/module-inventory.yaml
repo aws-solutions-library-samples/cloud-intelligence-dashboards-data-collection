@@ -1238,7 +1238,7 @@ Resources:
           TMP_FILE = "/tmp/data.json"
           PREFIX = os.environ['PREFIX']
           BUCKET = os.environ["BUCKET_NAME"]
-          ROLENAME = os.environ['ROLENAME']
+          ROLE_NAME = os.environ['ROLE_NAME']
           REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
           TRACKING_TAGS = os.environ.get("TRACKING_TAGS")
           TAG_LIST = TRACKING_TAGS.split(",") if TRACKING_TAGS else []
@@ -1266,7 +1266,7 @@ Resources:
               """assume role in account"""
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
               credentials = boto3.client('sts', region_name=region).assume_role(
-                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}" ,
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}" ,
                   RoleSessionName="data_collection"
               )['Credentials']
               return boto3.session.Session(
@@ -1417,13 +1417,14 @@ Resources:
               and must be called from the corresponding Step Function to orchestrate
               """
               logger.info(f"Event data: {event}")
-              if 'account' not in event or 'params' not in event  :
+              account = event.get("account")
+              params = [p for p in event.get('params', '').split() if p]
+              if not account or not params:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
 
-              params = [p for p in event.get('params', '').split() if p]
               name = params[0]
 
               sub_modules = {
@@ -1482,30 +1483,33 @@ Resources:
                       function_name='describe_vpcs'
                   ),
                   'lambda-functions' : partial(
-                    paginated_scan,
-                    service='lambda',
-                    function_name='list_functions',
-                    obj_name='Functions[*]'
+                      paginated_scan,
+                      service='lambda',
+                      function_name='list_functions',
+                      obj_name='Functions[*]'
                   ),
                   'eks': eks_clusters_scan,
                   'workspaces': workspaces_scan,
                   'network-interfaces': partial(
-                    paginated_scan,
-                    service='ec2',
-                    function_name='describe_network_interfaces',
-                    obj_name='NetworkInterfaces[*]'
+                      paginated_scan,
+                      service='ec2',
+                      function_name='describe_network_interfaces',
+                      obj_name='NetworkInterfaces[*]'
                   ),
               }
-              account = json.loads(event["account"])
+              account = account if isinstance(account, dict) else json.loads(account)
               account_id = account["account_id"]
               payer_id = account["payer_id"]
+              regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+              regions = regions if len(regions) > 0 else REGIONS
+
               func = sub_modules[name]
               counter = 0
               logger.info(f"Collecting {name} for account {account_id}")
               collection_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
               try:
                   with open(TMP_FILE, "w", encoding='utf-8') as file_:
-                      for region in REGIONS:
+                      for region in regions:
                           logger.info(f"Collecting in {region}")
                           try:
                               for counter, obj in enumerate(func(account_id=account_id,region=region), start=counter + 1):
@@ -1551,7 +1555,7 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref DestinationBucket
           PREFIX: !Ref CFDataName
-          ROLENAME: !Ref MultiAccountRoleName
+          ROLE_NAME: !Ref MultiAccountRoleName
           REGIONS: !Ref RegionsInScope
 
   LogGroup:
