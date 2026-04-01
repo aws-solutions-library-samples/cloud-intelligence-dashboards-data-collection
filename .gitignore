@@ -161,8 +161,6 @@ cython_debug/
 
 .DS_Store
 .vscode
-.kiro
-sqlite_mcp_server.db
 
 # Packaged modules
 fof.zip
@@ -181,3 +179,16 @@ migration_log.csv
 data-collection/lambda-layers/python/
 data-collection/lambda-layers/layer.zip
 data-collection/test/clean-html.py
+
+# AI-related folders. Allow some for standard sharing as well as local for experimentation
+# The intent here is to have Kiro redirect all steering to the .ai folder and retain only the minimal redirection in the repo
+.kiro/*
+!.kiro/steering/
+!.kiro/steering/ai-specs-readme.md
+!.kiro/steering/implementation.md
+!.kiro/steering/project-standards.md
+sqlite_mcp_server.db
+
+.ai/*
+!.ai/specs/
+
