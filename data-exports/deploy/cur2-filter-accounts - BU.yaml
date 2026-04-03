@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Daily automated Athena query execution for S3 cost data extraction with monitoring'
+Description: 'Setup for Daily automated Athena query execution for S3 cost data extraction with monitoring'
 
 Parameters:
 
