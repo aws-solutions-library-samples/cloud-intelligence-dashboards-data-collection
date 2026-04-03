@@ -14,9 +14,7 @@ Resources:
   TargetDataBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'
-      VersioningConfiguration:
-        Status: Disabled
+      BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'      
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
