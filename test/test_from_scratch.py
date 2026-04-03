@@ -147,6 +147,14 @@ def test_rds_db_instances_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_rds_db_instances_data" LIMIT 10;')
     assert len(data) > 0, 'rds_db_instances_data is empty'
 
+def test_rds_db_clusters_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_rds_db_clusters_data" LIMIT 10;')
+    assert len(data) > 0, 'rds_db_clusters_data is empty'
+
+def test_eks_clusters_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_eks_clusters_data" LIMIT 10;')
+    assert len(data) > 0, 'eks_clusters_data is empty'
+
 def test_pricing_computesavingsplan_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."pricing_computesavingsplan_data" LIMIT 10;')
     assert len(data) > 0, 'pricing_computesavingsplan_data is empty'
