@@ -84,7 +84,7 @@ success "Directory structure created"
 # Install boto3 with pip
 info "Installing latest boto3 and dependencies..."
 
-pip3 install boto3 --target "$LAYER_DIR" --upgrade --quiet || {
+pip3 install boto3 --only-binary=:all: --platform=manylinux2014_x86_64 --target "$LAYER_DIR" --upgrade --quiet || {
     error "Failed to install boto3" "pip3 install failed" "Check network connectivity and Python version compatibility"
     exit 1
 }
