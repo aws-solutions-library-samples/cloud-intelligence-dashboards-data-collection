@@ -74,6 +74,19 @@ python3 ./utils/pylint.py
 
 The test will install stacks from scratch in a single account, then it will check the presence of Athena tables. After running tests, it will delete the stacks and all artifacts that are not deleted by CFN. You can avoid teardown by providing a flag `--no-teardown`.
 
+To tear down all stacks and clean up without running tests:
+
+```bash
+./test/run-test-from-scratch.sh --teardown
+```
+
+To diagnose failures (check stack status, Step Function executions, Lambda errors, Glue crawlers):
+
+```bash
+./test/diagnose.sh         # last 60 minutes
+./test/diagnose.sh 120     # last 2 hours
+```
+
 4. Create a merge request.
 
 

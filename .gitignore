@@ -173,15 +173,10 @@ local-test/
 scratch/
 migration_log.csv
 # Pylint custom script temporal folder
-
-
-# Lambda layer build artifacts
 .tmp
-data-collection/deploy/layers/boto3-layer.zip
 
 .pylintrc
-data-collection/lambda-layers/python/
-data-collection/lambda-layers/layer.zip
+data-collection/deploy/layers/*.zip
 data-collection/test/clean-html.py
 
 

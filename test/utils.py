@@ -252,6 +252,14 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
         ]
     )
 
+    # Wait for data collection stacks first (summarization depends on exports from data collection)
+    logger.info('Waiting for data collection stacks')
+    watch_stacks(cloudformation, [
+        f'{PREFIX}OptimizationDataReadPermissionsStack',
+        f'{PREFIX}OptimizationDataCollectionStack',
+    ])
+
+    # Deploy summarization after data collection exports are available
     deploy_stack(
         cloudformation=cloudformation,
         stack_name=f'{PREFIX}SupportCaseSummarizationStack',
@@ -262,10 +270,8 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
         ]
     )
 
-    logger.info('Waiting for stacks')
+    logger.info('Waiting for summarization stack')
     watch_stacks(cloudformation, [
-        f'{PREFIX}OptimizationDataReadPermissionsStack',
-        f'{PREFIX}OptimizationDataCollectionStack',
         f'{PREFIX}SupportCaseSummarizationStack'
     ])
 
@@ -387,6 +393,8 @@ def trigger_update(account_id):
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-LambdaFunctions-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-NetworkInterfaces-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-WorkSpaces-StateMachine',
+        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-RdsDbClusters-StateMachine',
+        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-EKSClusters-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}rds-usage-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}transit-gateway-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}trusted-advisor-StateMachine',
@@ -427,9 +435,14 @@ def trigger_update(account_id):
 
 def cleanup_stacks(cloudformation, account_id, s3, s3client, athena, glue):
 
-    for index in range(10):
-        print(f'Press Ctrl+C if you want to avoid teardown: {9-index}\a') # beep
-        time.sleep(1)
+    try:
+        choice = input('Run teardown and delete all stacks? (y/N): ')
+        if choice.lower() != 'y':
+            logger.info('Teardown skipped')
+            return
+    except EOFError:
+        logger.info('Non-interactive mode, skipping teardown')
+        return
 
     try:
         clean_bucket(s3=s3, s3client=s3client, account_id=account_id)
