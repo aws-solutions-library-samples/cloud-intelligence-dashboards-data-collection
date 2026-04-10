@@ -196,3 +196,4 @@ sqlite_mcp_server.db
 # Local testing suites
 local-test
 .pylintrc
+localruntest.sh
