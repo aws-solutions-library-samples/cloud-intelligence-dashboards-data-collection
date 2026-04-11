@@ -392,7 +392,7 @@ Resources:
 
           BUCKET_PREFIX = os.environ["BUCKET_PREFIX"]
           INCLUDE_MEMBER_ACCOUNTS = os.environ.get("INCLUDE_MEMBER_ACCOUNTS", 'yes').lower() == 'yes'
-          REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
           ROLE_NAME = os.environ['ROLE_NAME']
           ARCH = os.environ.get('ARCH', 'AWS_ARM64,CURRENT').split(',')
 

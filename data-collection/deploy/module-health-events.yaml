@@ -165,7 +165,7 @@ Resources:
           BUCKET_NAME = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
           PREFIX = os.environ['PREFIX']
-          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "*").split(',') if r]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
           if len(REGIONS) > 0:
               REGIONS.append('global')
           LOOKBACK = int(os.environ['LOOKBACK'])

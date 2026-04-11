@@ -139,7 +139,7 @@ Resources:
           BUCKET = os.environ["BUCKET_NAME"]
           PREFIX = os.environ["PREFIX"]
           ROLE_NAME = os.environ['ROLE_NAME']
-          REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
           local_file = "/tmp/data.json"
 
           logger = logging.getLogger(__name__)
