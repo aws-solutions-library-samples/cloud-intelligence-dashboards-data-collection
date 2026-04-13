@@ -1223,8 +1223,10 @@ Resources:
                       print('deleted:', json.dumps(res))
                   except client.exceptions.ResourceNotFoundException:
                       print('Not Found. Nothing to delete')
+                  except (IndexError, TypeError):
+                      print(f'Export {export_name} not found in list. Nothing to delete.')
                   except Exception as exc:
-                      print('Exception on deletion:', str(exc))
+                      raise  # Propagate so CFN gets FAILED, rolls back, and customer sees the error
               else:
                   raise Exception("Unknown operation: " + event['RequestType'])
 
