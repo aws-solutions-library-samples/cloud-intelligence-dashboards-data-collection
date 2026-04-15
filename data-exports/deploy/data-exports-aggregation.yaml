@@ -57,7 +57,7 @@ Metadata:
       LegacyLocalBucket:
         default: "Legacy Local Bucket (set to 'no' for new deployments)"
       SecondaryDestinationBucket:
-        default: "DEPRECATED. Secondary Destination Bucket Name."
+        default: "Secondary Destination Bucket Name. Keep it Empty."
 
 
 Parameters:
@@ -137,12 +137,10 @@ Parameters:
     Description: "Keep 'yes' when updating from a previous version (retains the local S3 bucket). Set to 'no' for new deployments."
     Default: "yes"
     AllowedValues: ["yes", "no"]
-  # DEPRECATED: Retained for backward compatibility so existing stacks that had this parameter
-  # can still be updated without errors. No longer used — replication to a secondary bucket
-  # was removed when switching from S3 replication to direct Data Export delivery (S3BucketOwner).
+  # Optional: If provided, data will be replicated from the local bucket to this secondary bucket.
   SecondaryDestinationBucket:
     Type: String
-    Description: "DEPRECATED. No longer used. Kept for backward compatibility with existing stacks."
+    Description: "A Bucket name for optional supplementary data replication. If not empty, the export data will be replicated to this bucket. Keep it empty if unsure."
     Default: ''
   AddScheduleForBlockingWrite:
     Type: String
