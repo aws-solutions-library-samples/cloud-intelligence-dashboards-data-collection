@@ -29,6 +29,7 @@ Metadata:
           - CUR2TimeGranularity
           - FOCUSTimeGranularity
           - LegacyLocalBucket
+          - SecondaryDestinationBucket
 
     ParameterLabels:
       ManageCOH:
@@ -55,6 +56,8 @@ Metadata:
         default: "I have LakeFormation permission model in place for this account & my CFN deployment credentials have administrative rights on LakeFormation"
       LegacyLocalBucket:
         default: "Legacy Local Bucket (set to 'no' for new deployments)"
+      SecondaryDestinationBucket:
+        default: "DEPRECATED. Secondary Destination Bucket Name."
 
 
 Parameters:
@@ -134,6 +137,13 @@ Parameters:
     Description: "Keep 'yes' when updating from a previous version (retains the local S3 bucket). Set to 'no' for new deployments."
     Default: "yes"
     AllowedValues: ["yes", "no"]
+  # DEPRECATED: Retained for backward compatibility so existing stacks that had this parameter
+  # can still be updated without errors. No longer used — replication to a secondary bucket
+  # was removed when switching from S3 replication to direct Data Export delivery (S3BucketOwner).
+  SecondaryDestinationBucket:
+    Type: String
+    Description: "DEPRECATED. No longer used. Kept for backward compatibility with existing stacks."
+    Default: ''
   AddScheduleForBlockingWrite:
     Type: String
     Description: 'Set yes to schedule Disabling/Enabling schedule to stop Data Export writes for a short period of time to secure QuickSight Dataset refresh.'
@@ -339,6 +349,43 @@ Resources:
                     - EmptySourceAccountIds
                     - !Ref AWS::AccountId
                     - !Split [',', !Ref SourceAccountIds]
+          - !If
+            # Legacy replication policy statements retained for backward compatibility.
+            # During the transition from S3 replication to direct Data Export delivery (S3BucketOwner),
+            # source stacks may still replicate data to this bucket until they are updated.
+            # These statements are included only when LegacyLocalBucket=yes (existing deployments)
+            # and will be removed once customers set LegacyLocalBucket=no after completing migration.
+            - LegacyLocalBucket
+            - Sid: AllowReplicationWrite
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ReplicateDelete
+                - s3:ReplicateObject
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - LegacyLocalBucket
+            - Sid: AllowReplicationRead
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ListBucket
+                - s3:ListBucketVersions
+                - s3:GetBucketVersioning
+                - s3:PutBucketVersioning
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
+            - !Ref AWS::NoValue
 
   # Legacy local bucket retained for backward compatibility during stack updates.
   # Existing stacks had this bucket with DeletionPolicy: Delete. Keeping it here with
@@ -356,6 +403,7 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      AccessControl: BucketOwnerFullControl
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced
@@ -1176,6 +1224,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1315,6 +1364,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1419,6 +1469,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1521,6 +1572,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
