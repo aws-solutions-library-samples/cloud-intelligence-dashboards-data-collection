@@ -183,17 +183,25 @@ Conditions:
   ManageCarbon: !Equals [!Ref ManageCarbon, "yes"]
   EnableSCAD: !Equals [!Ref EnableSCAD, 'yes']
   LegacyLocalBucket: !Equals [!Ref LegacyLocalBucket, 'yes']
+  NonEmptySecondaryDestinationBucket: !Not [ !Equals [ !Ref SecondaryDestinationBucket, ''] ]
   DeployDataExport:
     Fn::Or:
       - !Condition ManageCUR2
       - !Condition ManageFOCUS
       - !Condition ManageCOH
       - !Condition ManageCarbon
-  DeploySourceS3: # Legacy local bucket for backward compatibility during updates
+  DeploySourceS3: # Legacy local bucket for backward compatibility during updates, or when SecondaryDestinationBucket is set
     Fn::And:
       - !Condition IsSourceAccount
       - !Condition DeployDataExport
-      - !Condition LegacyLocalBucket
+      - Fn::Or:
+        - !Condition LegacyLocalBucket
+        - !Condition NonEmptySecondaryDestinationBucket
+  DeploySecondaryReplication: # Replication to SecondaryDestinationBucket
+    Fn::And:
+      - !Condition IsSourceAccount
+      - !Condition DeployDataExport
+      - !Condition NonEmptySecondaryDestinationBucket
   DeployCOHServiceRole:  !And [!Condition IsSourceAccount, !Condition ManageCOH]
   DeployCUR2ViaCFN:      !And [!Condition IsSourceAccount, !Condition ManageCUR2,        !Condition RegionSupportsDataExportsViaCFN]
   DeployFOCUSViaCFN:     !And [!Condition IsSourceAccount, !Condition ManageFOCUS,       !Condition RegionSupportsDataExportsViaCFN]
@@ -412,22 +420,111 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        # Versioning is required for S3 replication to SecondaryDestinationBucket
+        Status: !If [NonEmptySecondaryDestinationBucket, Enabled, Suspended]
+      ReplicationConfiguration:
+        # Replication to SecondaryDestinationBucket only. Replication to the destination bucket
+        # is no longer needed since Data Exports now writes directly via S3BucketOwner.
+        Fn::If:
+          - NonEmptySecondaryDestinationBucket
+          - Role: !GetAtt ReplicationRole.Arn
+            Rules:
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCUR2DataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "cur2/${AWS::AccountId}/${ResourcePrefix}-cur2/data/"
+                Status: !If [ManageCUR2, Enabled, Disabled]
+                Priority: 101
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateFOCUSDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "focus/${AWS::AccountId}/${ResourcePrefix}-focus/data/"
+                Status: !If [ManageFOCUS, Enabled, Disabled]
+                Priority: 102
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCOHDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "coh/${AWS::AccountId}/${ResourcePrefix}-coh/data/"
+                Status: !If [ManageCOH, Enabled, Disabled]
+                Priority: 103
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCarbonDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "carbon/${AWS::AccountId}/${ResourcePrefix}-carbon/data/"
+                Status: !If [ManageCarbon, Enabled, Disabled]
+                Priority: 104
+                DeleteMarkerReplication:
+                  Status: Enabled
+          - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
-          - Id: ExpireAllObjects
+          - Id: Object&Version Expiration
             Status: Enabled
-            ExpirationInDays: 1
             NoncurrentVersionExpirationInDays: 1
-          - Id: DeleteIncompleteMultipartUploads
+            ExpirationInDays: 7
+          - Id: DeleteIncompleteMultipartUploadsAndExpiredDeleteMarkers
             Status: Enabled
             AbortIncompleteMultipartUpload:
-              DaysAfterInitiation: 1
+              DaysAfterInitiation: 7
             ExpiredObjectDeleteMarker: true
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: 'W35'
             reason: "Legacy bucket kept for backward compatibility"
+
+  # IAM role for S3 replication to SecondaryDestinationBucket.
+  # Only created when SecondaryDestinationBucket is provided.
+  ReplicationRole:
+    Condition: DeploySecondaryReplication
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${ResourcePrefix}/
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReplicationPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetReplicationConfiguration
+                  - s3:ListBucket
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${AWS::AccountId}-data-local"
+              - Effect: Allow
+                Action:
+                  - s3:GetObjectVersionForReplication
+                  - s3:GetObjectVersionAcl
+                  - s3:GetObjectVersionTagging
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${AWS::AccountId}-data-local/*"
+              - Effect: Allow
+                Action:
+                  - s3:ReplicateObject
+                  - s3:ReplicateDelete
+                  - s3:ReplicateTags
+                Resource:
+                  - !If [NonEmptySecondaryDestinationBucket, !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*", !Ref 'AWS::NoValue']
 
   BucketWriteBlockerLambdaRole:
     Type: AWS::IAM::Role
