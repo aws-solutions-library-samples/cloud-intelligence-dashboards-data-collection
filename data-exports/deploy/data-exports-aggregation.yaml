@@ -1101,12 +1101,19 @@ Resources:
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt CidDataExportCreatorLambdaRole.Arn
-      Timeout: 15
+      Timeout: 120
       Code:
         ZipFile: |
           import os
           import json
           import uuid
+          import logging
+
+          # Update boto3 to support newer API parameters (e.g. S3BucketOwner)
+          from pip._internal.cli.main import main, sys
+          logging.getLogger('pip').setLevel(logging.ERROR)
+          main(['install', '-I', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0, '/tmp/')
 
           import boto3
           import cfnresponse
@@ -1133,30 +1140,42 @@ Resources:
                   print('created:', json.dumps(res))
               elif event['RequestType'] == 'Update':
                   old_export_name = old_export['Name']
-                  old_export_arn = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{old_export_name}']"))[0]['ExportArn']
-                  if old_export['Name'] != export['Name']:
-                      res = client.create_export(Export=export)
-                      print('created:', json.dumps(res))
-                      try:
-                          res = client.delete_export(ExportArn=old_export_arn)
-                          print('deleted:', json.dumps(res))
-                      except Exception as exc:
-                          print('Exception on deletion:', str(exc))
-                  elif export['DataQuery'] != old_export['DataQuery']: # Data export do not support update of queries
-                      print(export['DataQuery'], '!=', old_export['DataQuery'])
-                      res = client.delete_export(ExportArn=old_export_arn)
-                      print('deleted:', json.dumps(res))
+                  matching = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{old_export_name}']"))
+                  matching = [m for m in matching if m]  # filter None values from JMESPath
+                  if not matching:
+                      # Old export not found — create instead of update
+                      print(f'Export {old_export_name} not found, creating new export')
                       res = client.create_export(Export=export)
                       print('created:', json.dumps(res))
                   else:
-                      res = client.update_export(ExportArn=old_export_arn, Export=export)
-                      print('updated:', json.dumps(res))
+                      old_export_arn = matching[0]['ExportArn']
+                      if old_export['Name'] != export['Name']:
+                          res = client.create_export(Export=export)
+                          print('created:', json.dumps(res))
+                          try:
+                              res = client.delete_export(ExportArn=old_export_arn)
+                              print('deleted:', json.dumps(res))
+                          except Exception as exc:
+                              print('Exception on deletion:', str(exc))
+                      elif export['DataQuery'] != old_export['DataQuery']: # Data export do not support update of queries
+                          print(export['DataQuery'], '!=', old_export['DataQuery'])
+                          res = client.delete_export(ExportArn=old_export_arn)
+                          print('deleted:', json.dumps(res))
+                          res = client.create_export(Export=export)
+                          print('created:', json.dumps(res))
+                      else:
+                          res = client.update_export(ExportArn=old_export_arn, Export=export)
+                          print('updated:', json.dumps(res))
               elif event['RequestType'] == 'Delete':
                   export_name = export['Name']
                   try:
-                      export_arn = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{export_name}']"))[0]['ExportArn']
-                      res = client.delete_export(ExportArn=export_arn)
-                      print('deleted:', json.dumps(res))
+                      matching = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{export_name}']"))
+                      matching = [m for m in matching if m]
+                      if matching:
+                          res = client.delete_export(ExportArn=matching[0]['ExportArn'])
+                          print('deleted:', json.dumps(res))
+                      else:
+                          print(f'Export {export_name} not found. Nothing to delete')
                   except client.exceptions.ResourceNotFoundException:
                       print('Not Found. Nothing to delete')
                   except Exception as exc:
