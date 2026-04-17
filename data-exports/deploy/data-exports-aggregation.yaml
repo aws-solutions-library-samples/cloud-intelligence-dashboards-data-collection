@@ -481,10 +481,18 @@ Resources:
               DaysAfterInitiation: 7
             ExpiredObjectDeleteMarker: true
     Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_21
+            comment: "Versioning is conditionally enabled via Fn::If when SecondaryDestinationBucket is set"
       cfn_nag:
         rules_to_suppress:
           - id: 'W35'
             reason: "Legacy bucket kept for backward compatibility"
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3045 # Need to use AccessControl
 
   # IAM role for S3 replication to SecondaryDestinationBucket.
   # Only created when SecondaryDestinationBucket is provided.
@@ -522,7 +530,7 @@ Resources:
                   - s3:ReplicateDelete
                   - s3:ReplicateTags
                 Resource:
-                  - !If [NonEmptySecondaryDestinationBucket, !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*", !Ref 'AWS::NoValue']
+                  - !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*"
 
   BucketWriteBlockerLambdaRole:
     Type: AWS::IAM::Role
@@ -642,6 +650,8 @@ Resources:
   LocalCUR2viaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCUR2ViaCFN
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -705,6 +715,8 @@ Resources:
   LocalFOCUSviaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployFOCUSViaCFN
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -764,6 +776,8 @@ Resources:
     Condition: DeployCOHViaCFN
     DependsOn:
       - CreateServiceLinkedRoleCustomResource
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -988,6 +1002,8 @@ Resources:
   LocalCarbonViaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCarbonViaCFN
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
