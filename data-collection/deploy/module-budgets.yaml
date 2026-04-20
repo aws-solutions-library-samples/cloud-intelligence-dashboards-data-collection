@@ -179,6 +179,66 @@ Resources:
                   aws_session_token=cred['SessionToken']
               )
 
+          def collect_budget_history(budgets_client, account_id, account_name, payer_id, budget_name, aws_partition, prev_month_date):
+              """Collect historical budget data for previous month"""
+              try:
+                  prev_month_start = prev_month_date.replace(day=1)
+                  next_month = (prev_month_date.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+                  prev_month_end = next_month - datetime.timedelta(days=1)
+                  
+                  history = budgets_client.describe_budget_performance_history(
+                      AccountId=account_id,
+                      BudgetName=budget_name,
+                      TimePeriod={
+                          'Start': prev_month_start,
+                          'End': prev_month_end
+                      }
+                  )
+                  
+                  if not history.get('BudgetPerformanceHistory'):
+                      return None
+                      
+                  perf_history = history['BudgetPerformanceHistory']
+                  budgeted_and_actual = perf_history.get('BudgetedAndActualAmountsList', [])
+                  
+                  if not budgeted_and_actual:
+                      return None
+                  
+                  # Get the last entry which has the complete month data
+                  last_entry = budgeted_and_actual[-1]
+                  
+                  # Construct budget object from history
+                  budget_hist = {
+                      'BudgetName': budget_name,
+                      'BudgetLimit': perf_history.get('BudgetLimit', {}),
+                      'CostFilters': perf_history.get('CostFilters', {'Filter': ['None']}),
+                      'CostTypes': perf_history.get('CostTypes', {}),
+                      'TimeUnit': perf_history.get('TimeUnit', 'MONTHLY'),
+                      'TimePeriod': last_entry.get('TimePeriod', {}),
+                      'CalculatedSpend': {
+                          'ActualSpend': last_entry.get('ActualAmount', {}),
+                          'ForecastedSpend': last_entry.get('ActualAmount', {})
+                      },
+                      'BudgetType': perf_history.get('BudgetType', 'COST'),
+                      'collection_time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                      'Account_ID': account_id,
+                      'Account_Name': account_name,
+                      'Tags': [],
+                      'PlannedBudgetLimits_Flat': [],
+                      'is_historical': True
+                  }
+                  
+                  # Fetch tags
+                  budget_tags = budgets_client.list_tags_for_resource(ResourceARN=f"arn:{aws_partition}:budgets::{account_id}:budget/{budget_name}")
+                  budget_hist['Tags'] = budget_tags.get('ResourceTags') or []
+                  
+                  process_cost_filters(budget_hist)
+                  return budget_hist
+                  
+              except Exception as exc:
+                  logger.warning(f"Failed to collect history for budget {budget_name}: {exc}")
+                  return None
+
           def lambda_handler(event, context): #pylint: disable=W0613
               logger.info(f"Event data {json.dumps(event)}")
               if 'account' not in event:
@@ -186,23 +246,31 @@ Resources:
                       "Please do not trigger this Lambda manually."
                       "Find the corresponding state machine in Step Functions and Trigger from there."
                   )
-              collection_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+              now = datetime.datetime.now()
+              collection_time = now.strftime("%Y-%m-%d %H:%M:%S")
               aws_partition = boto3.session.Session().get_partition_for_region(boto3.session.Session().region_name)
               account = json.loads(event["account"])
               account_id = account["account_id"]
               account_name = account["account_name"]
               payer_id = account["payer_id"]
+              
+              # Check if we should collect previous month's historical data
+              collect_history = now.day <= 3
+              prev_month_date = (now.replace(day=1) - datetime.timedelta(days=1)) if collect_history else None
 
               logger.info(f"Collecting data for account: {account_id}")
               try:
                   budgets_client = assume_role(account_id, "budgets", "us-east-1") # must be us-east-1
                   count = 0
+                  hist_count = 0
+                  
+                  # Collect current budgets
                   with open(TMP_FILE, "w", encoding='utf-8') as f:
                       for budget in budgets_client.get_paginator("describe_budgets").paginate(AccountId=account_id).search('Budgets'):
                           if not budget:
                               continue
                           budget['collection_time'] = collection_time
-                          # Fetch tags for the budget using List tag for resource API
+                          budget['is_historical'] = False
                           budget_name = budget['BudgetName']
                           budget_tags = budgets_client.list_tags_for_resource(ResourceARN=f"arn:{aws_partition}:budgets::{account_id}:budget/{budget_name}")
                           budget.update({
@@ -210,9 +278,7 @@ Resources:
                               'Account_Name': account_name,
                               'Tags': budget_tags.get('ResourceTags') or []
                           })
-                          # Fetch CostFilters if available
                           process_cost_filters(budget)
-                          # Add column plannedbudgetslimit as type array
                           budget_limits = budget.pop('PlannedBudgetLimits', {}) 
                           budget['PlannedBudgetLimits_Flat'] = [
                               {'date': key, 'Amount': value.get('Amount'), 'Unit': value.get('Unit')}
@@ -220,8 +286,29 @@ Resources:
                           ]
                           f.write(json.dumps(budget, cls=DateTimeEncoder) + "\n")
                           count += 1
-                  logger.info(f"Budgets collected: {count}")
+                  
+                  logger.info(f"Current budgets collected: {count}")
                   s3_upload(account_id, payer_id)
+                  
+                  # Collect historical data for previous month if in first 3 days
+                  if collect_history:
+                      logger.info(f"Collecting previous month historical data for {prev_month_date.strftime('%Y-%m')}")
+                      with open(TMP_FILE, "w", encoding='utf-8') as f:
+                          for budget in budgets_client.get_paginator("describe_budgets").paginate(AccountId=account_id).search('Budgets'):
+                              if not budget:
+                                  continue
+                              budget_name = budget['BudgetName']
+                              hist_budget = collect_budget_history(budgets_client, account_id, account_name, payer_id, budget_name, aws_partition, prev_month_date)
+                              if hist_budget:
+                                  f.write(json.dumps(hist_budget, cls=DateTimeEncoder) + "\n")
+                                  hist_count += 1
+                      
+                      if hist_count > 0:
+                          logger.info(f"Historical budgets collected: {hist_count}")
+                          s3_upload_historical(account_id, payer_id, prev_month_date)
+                      else:
+                          logger.info("No historical budget data collected")
+                  
               except Exception as exc: #pylint: disable=broad-exception-caught
                   if "AccessDenied" in str(exc):
                       print(f'Failed to assume role {ROLE_NAME} in account {account_id}. Please make sure the role exists. {exc}')
@@ -236,6 +323,14 @@ Resources:
               key = datetime.datetime.now().strftime(f"{PREFIX}/{PREFIX}-data/payer_id={payer_id}/year=%Y/month=%m/budgets-{account_id}.json")
               boto3.client('s3').upload_file(TMP_FILE, BUCKET, key)
               logger.info(f"Budget data for {account_id} stored at s3://{BUCKET}/{key}")
+          
+          def s3_upload_historical(account_id, payer_id, prev_month_date):
+              if os.path.getsize(TMP_FILE) == 0:
+                  logger.info(f"No historical data in file for {PREFIX}")
+                  return
+              key = prev_month_date.strftime(f"{PREFIX}/{PREFIX}-data/payer_id={payer_id}/year=%Y/month=%m/budgets-{account_id}.json")
+              boto3.client('s3').upload_file(TMP_FILE, BUCKET, key)
+              logger.info(f"Historical budget data for {account_id} stored at s3://{BUCKET}/{key}")
 
       Handler: 'index.lambda_handler'
       MemorySize: 2688
