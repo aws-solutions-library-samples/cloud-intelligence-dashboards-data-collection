@@ -24,8 +24,10 @@ Parameters:
     Description: 'Payer account ID for partitioning'
   
   FilterAccountIds:
-    Type: CommaDelimitedList
+    Type: String
     Default: ''
+    AllowedPattern: '^(\d{12}(,\d{12})*)?$'
+    ConstraintDescription: 'Must be a comma-separated list of 12-digit AWS account IDs (e.g., 111222333444,555666777888)'
     Description: 'Comma-separated list of account IDs to filter'
   
   ScheduleExpression:
@@ -96,13 +98,17 @@ Resources:
                   - athena:GetQueryExecution
                   - athena:GetQueryResults
                   - athena:StopQueryExecution
-                Resource: "*"
+                Resource:
+                  - !Sub 'arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/primary'                  
               - Effect: Allow
                 Action:
                   - glue:GetDatabase
                   - glue:GetTable
                   - glue:GetPartitions
-                Resource: "*"
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${SourceDatabase}'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${SourceDatabase}/${SourceTable}'
 
   # Lambda function for Athena query execution
   AthenaQueryLambda:
@@ -119,8 +125,9 @@ Resources:
           SOURCE_TABLE: !Ref SourceTable
           TARGET_S3_BUCKET: !Ref TargetS3Bucket
           PAYER_ACCOUNT_ID: !Ref PayerAccountId
-          FILTER_ACCOUNT_IDS: !Join [',', !Ref FilterAccountIds]
+          FILTER_ACCOUNT_IDS: !Ref FilterAccountIds
           ATHENA_RESULTS_BUCKET: !Ref AthenaResultsBucket
+          MAX_WAIT_TIME: '600'
       Code:
         ZipFile: |          
           import json
@@ -159,7 +166,7 @@ Resources:
                   account_filter = "', '".join([acc.strip() for acc in filter_accounts])
                   
                   # Delete all existing files under data directory
-                  prefix = f'cur2/{payer_account}/cid-cur2/cid-cur2/'
+                  prefix = f'{payer_account}/cid-cur2/cid-cur2/'
                   delete_all_files(target_bucket, prefix)
                   
                   # Construct the UNLOAD query
@@ -297,7 +304,7 @@ Resources:
                       FROM {source_db}.{source_table}
                       WHERE line_item_usage_account_id IN ('{account_filter}')
                   )
-                  TO 's3://{target_bucket}/cur2/{payer_account}/cid-cur2/cid-cur2/'
+                  TO 's3://{target_bucket}/{payer_account}/cid-cur2/cid-cur2/'
 
                   WITH (
                       format = 'PARQUET',                      
@@ -318,7 +325,7 @@ Resources:
                   print(f"Started query execution: {query_execution_id}")
                   
                   # Wait for query completion
-                  max_wait_time = 600  # 10 minutes
+                  max_wait_time = int(os.environ.get('MAX_WAIT_TIME', '600'))
                   wait_interval = 10   # 10 seconds
                   elapsed_time = 0
                   
