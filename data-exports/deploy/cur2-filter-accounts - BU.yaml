@@ -14,7 +14,11 @@ Resources:
   TargetDataBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'      
+      BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -28,7 +32,7 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: CrossAccountAccess
+          - Sid: CrossAccountLambdaAccess
             Effect: Allow
             Principal:
               AWS: !Sub 'arn:aws:iam::${DataCollectionAccountId}:root'
@@ -40,281 +44,29 @@ Resources:
             Resource:
               - !GetAtt TargetDataBucket.Arn
               - !Sub '${TargetDataBucket.Arn}/*'
-
-
-  CidDatabase:
-    Type: AWS::Glue::Database
-    Properties:
-      DatabaseInput:
-        Name: 'cid_data_export'
-      CatalogId: !Sub '${AWS::AccountId}'
-
-  CUR2Table:
-    Type: AWS::Glue::Table
-    Properties:
-      CatalogId: !Sub "${AWS::AccountId}"
-      DatabaseName: !Ref CidDatabase
-      TableInput:
-        Name: cur2
-        Owner: owner
-        Retention: 0
-        TableType: EXTERNAL_TABLE
-        Parameters:
-          compressionType: none
-          classification: parquet
-          UPDATED_BY_CRAWLER: !Ref CURCrawler
-        StorageDescriptor:
-          BucketColumns: []
-          Compressed: false
-          Location: !Sub 's3://${TargetDataBucket}/cur2/'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*Lambda*'
+                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*lambda*'
           
-          NumberOfBuckets: -1
-          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
-          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
-          SerdeInfo:
-            Parameters:
-              serialization.format: '1'
-            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
-          StoredAsSubDirectories: false
-          Columns:
-            - {"Name": "bill_bill_type", "Type": "string" }
-            - {"Name": "bill_billing_entity", "Type": "string" }
-            - {"Name": "bill_billing_period_end_date", "Type": "timestamp" }
-            - {"Name": "bill_billing_period_start_date", "Type": "timestamp" }
-            - {"Name": "bill_invoice_id", "Type": "string" }
-            - {"Name": "bill_payer_account_id", "Type": "string" }
-            - {"Name": "bill_payer_account_name", "Type": "string" }
-            - {"Name": "cost_category", "Type": "map<string,string>" }
-            - {"Name": "discount", "Type": "map<string,double>" }
-            - {"Name": "discount_bundled_discount", "Type": "double" }
-            - {"Name": "discount_total_discount", "Type": "double" }
-            - {"Name": "identity_line_item_id", "Type": "string" }
-            - {"Name": "identity_time_interval", "Type": "string" }
-            - {"Name": "line_item_availability_zone", "Type": "string" }
-            - {"Name": "line_item_legal_entity", "Type": "string" }
-            - {"Name": "line_item_line_item_description", "Type": "string" }
-            - {"Name": "line_item_line_item_type", "Type": "string" }
-            - {"Name": "line_item_operation", "Type": "string" }
-            - {"Name": "line_item_product_code", "Type": "string" }
-            - {"Name": "line_item_resource_id", "Type": "string" }
-            - {"Name": "line_item_unblended_cost", "Type": "double" }
-            - {"Name": "line_item_usage_account_id", "Type": "string" }
-            - {"Name": "line_item_usage_account_name", "Type": "string" }
-            - {"Name": "line_item_usage_amount", "Type": "double" }
-            - {"Name": "line_item_usage_end_date", "Type": "timestamp" }
-            - {"Name": "line_item_usage_start_date", "Type": "timestamp" }
-            - {"Name": "line_item_usage_type", "Type": "string" }
-            - {"Name": "pricing_lease_contract_length", "Type": "string" }
-            - {"Name": "pricing_offering_class", "Type": "string" }
-            - {"Name": "pricing_public_on_demand_cost", "Type": "double" }
-            - {"Name": "pricing_purchase_option", "Type": "string" }
-            - {"Name": "pricing_term", "Type": "string" }
-            - {"Name": "pricing_unit", "Type": "string" }
-            - {"Name": "product", "Type": "map<string,string>" }
-            - {"Name": "product_from_location", "Type": "string" }
-            - {"Name": "product_instance_type", "Type": "string" }
-            - {"Name": "product_product_family", "Type": "string" }
-            - {"Name": "product_servicecode", "Type": "string" }
-            - {"Name": "product_to_location", "Type": "string" }
-            - {"Name": "reservation_amortized_upfront_fee_for_billing_period", "Type": "double" }
-            - {"Name": "reservation_effective_cost", "Type": "double" }
-            - {"Name": "reservation_end_time", "Type": "string" }
-            - {"Name": "reservation_reservation_a_r_n", "Type": "string" }
-            - {"Name": "reservation_start_time", "Type": "string" }
-            - {"Name": "reservation_unused_amortized_upfront_fee_for_billing_period", "Type": "double" }
-            - {"Name": "reservation_unused_recurring_fee", "Type": "double" }
-            - {"Name": "resource_tags", "Type": "map<string,string>" }
-            - {"Name": "savings_plan_amortized_upfront_commitment_for_billing_period", "Type": "double" }
-            - {"Name": "savings_plan_end_time", "Type": "string" }
-            - {"Name": "savings_plan_offering_type", "Type": "string" }
-            - {"Name": "savings_plan_payment_option", "Type": "string" }
-            - {"Name": "savings_plan_purchase_term", "Type": "string" }
-            - {"Name": "savings_plan_savings_plan_a_r_n", "Type": "string" }
-            - {"Name": "savings_plan_savings_plan_effective_cost", "Type": "double" }
-            - {"Name": "savings_plan_start_time", "Type": "string" }
-            - {"Name": "savings_plan_total_commitment_to_date", "Type": "double" }
-            - {"Name": "savings_plan_used_commitment", "Type": "double" }
-            - {"Name": "split_line_item_parent_resource_id", "Type": "string" }
-            - {"Name": "split_line_item_reserved_usage", "Type": "double" }
-            - {"Name": "split_line_item_actual_usage", "Type": "double" }
-            - {"Name": "split_line_item_split_usage", "Type": "double" }
-            - {"Name": "split_line_item_split_usage_ratio", "Type": "double" }
-            - {"Name": "split_line_item_split_cost", "Type": "double" }
-            - {"Name": "split_line_item_unused_cost", "Type": "double" }
-            - {"Name": "split_line_item_net_split_cost", "Type": "double" }
-            - {"Name": "split_line_item_net_unused_cost", "Type": "double" }
-            - {"Name": "split_line_item_public_on_demand_split_cost", "Type": "double" }
-            - {"Name": "split_line_item_public_on_demand_unused_cost", "Type": "double" }
-            - {"Name": "tags", "Type": "map<string,string>" }
-        PartitionKeys:
-          - {"Name": "partition_0", "Type": "string" }
-          - {"Name": "partition_1", "Type": "string" }
-          - {"Name": "partition_2", "Type": "string" }
-          - {"Name": "billing_period", "Type": "string" }
-
-  CURCrawler:
-    Type: AWS::Glue::Crawler
-    Properties:
-      Name: "cid-DataExportCUR2Crawler"
-      Description: A recurring crawler that keeps your CUR table in Athena up-to-date.
-      Role: !GetAtt CidDataExportCrawlerRole.Arn
-      DatabaseName: !Ref CidDatabase
-      Targets:
-        S3Targets:
-          - Path: !Sub "s3://${TargetDataBucket}/cur2/"
-            Exclusions:
-              - '**.json'
-              - '**.yml'
-              - '**.sql'
-              - '**.csv'
-              - '**.csv.metadata'
-              - '**.gz'
-              - '**.zip'
-              - '**/cost_and_usage_data_status/*'
-              - 'aws-programmatic-access-test-object'
-      SchemaChangePolicy:
-        DeleteBehavior: LOG
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_EVERYTHING
-      Schedule:
-        ScheduleExpression: cron(0 2 * * ? *)
-      Configuration: |
-        {
-          "Version":1.0,
-          "Grouping": {
-            "TableGroupingPolicy": "CombineCompatibleSchemas"
-          },
-          "CrawlerOutput":{
-            "Tables":{
-              "AddOrUpdateBehavior":"MergeNewColumns"
-            }
-          }
-        }
-
-  CidDataExportCrawlerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - glue.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: CrawlerPolicy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - 's3:GetObject'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${TargetDataBucket}/*'
-              - Effect: Allow
-                Action:
-                  - 's3:ListBucket'
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${TargetDataBucket}'
-              - Effect: Allow
-                Action:
-                  - glue:GetDatabase
-                  - glue:GetDatabases
-                  - glue:UpdateDatabase
-                  - glue:CreateTable
-                  - glue:UpdateTable
-                  - glue:GetTable
-                  - glue:GetTables
-                  - glue:BatchCreatePartition
-                  - glue:CreatePartition
-                  - glue:DeletePartition
-                  - glue:BatchDeletePartition
-                  - glue:UpdatePartition
-                  - glue:GetPartition
-                  - glue:GetPartitions
-                  - glue:BatchGetPartition
-                  - glue:ImportCatalogToGlue
-                Resource:
-                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
-                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${CidDatabase}
-                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${CidDatabase}/*
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/crawlers:*'
-              - Effect: Allow
-                Action:
-                  - logs:PutLogEvents
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/crawlers:log-stream:*'
-
+          - Sid: AllowRead
+            Effect: Allow
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'            
+            Action: 
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning            
+            Resource:
+              - !GetAtt TargetDataBucket.Arn
+              - !Sub '${TargetDataBucket.Arn}/*'
+              
+          
   
-  DataExportsReadAccess:
-      Type: AWS::IAM::ManagedPolicy
-      Properties:
-        ManagedPolicyName: 'cidDataExportsReadAccess'
-        Description: 'Policy for QuickSight to allow DataExports access'
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-            - Sid: AllowGlue
-              Effect: Allow
-              Action:
-                - glue:GetPartition
-                - glue:GetPartitions
-                - glue:GetDatabase
-                - glue:GetDatabases
-                - glue:GetTable
-                - glue:GetTables
-              Resource:
-                - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
-                - Fn::Join:
-                  - ''
-                  - - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/
-                    - 'cid_data_export'
-                    - '/*'
-                - Fn::Join:
-                  - ''
-                  - - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/
-                    - 'cid_data_export'
-            - Sid: AllowListBucket
-              Effect: Allow
-              Action: s3:ListBucket
-              Resource:
-                - !Sub 'arn:${AWS::Partition}:s3:::${TargetDataBucket}'
-            - Sid: AllowReadBucket
-              Effect: Allow
-              Action:
-                - s3:GetObject
-                - s3:GetObjectVersion
-              Resource:
-                - !Sub 'arn:${AWS::Partition}:s3:::${TargetDataBucket}/*'
-      Metadata:
-        cfn_nag:
-          rules_to_suppress:
-            - id: 'W28'
-              reason: "Need an explicit name for reference"
-
-
-  
-Outputs:
-  
-  
+Outputs:  
   AggregateBucketName:
     Description: Bucket with aggregate Data Exports
     Value: !Ref TargetDataBucket
-    Export: { Name: 'cid-DataExports-Bucket'}
-  Database:
-    Description: Database for Data Exports
-    Value:   'cid_data_export'
-    Export: { Name: 'cid-DataExports-Database'}
-
-  ReadAccessPolicyARN:
-    Description: Policy to allow read access DataExports in S3 and Athena. Attach it to QuickSight role.
-    Value: !Ref  DataExportsReadAccess
-    Export: { Name: 'cid-DataExports-ReadAccessPolicyARN'}
-
-
-  
+    Export: { Name: 'cid-DataExports-Bucket'}  
