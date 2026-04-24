@@ -135,6 +135,7 @@ Resources:
           import os
           import json
           import logging
+          import time
           from datetime import date
           import boto3
           # Initialize AWS clients
@@ -185,6 +186,19 @@ Resources:
                       break
               return licenses
 
+          def list_grants_with_retry(license_manager, license_arn, max_retries=5):
+              for attempt in range(max_retries):
+                  try:
+                      return license_manager.list_received_grants_for_organization(LicenseArn=license_arn)['Grants']
+                  except license_manager.exceptions.RateLimitExceededException:
+                      if attempt < max_retries - 1:
+                          wait = 2 ** attempt
+                          logger.warning(f"Rate limited on {license_arn}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                          time.sleep(wait)
+                      else:
+                          logger.error(f"Rate limit exceeded after {max_retries} retries for {license_arn}")
+                          raise
+
           def process_one_management_acc(management_account_id):
               region = boto3.session.Session().region_name
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
@@ -214,7 +228,7 @@ Resources:
                   for license_ in marketplace_licenses:
                       license_arn = license_['LicenseArn']
                       try:
-                          grants_for_license = license_manager.list_received_grants_for_organization(LicenseArn=license_arn)['Grants']
+                          grants_for_license = list_grants_with_retry(license_manager, license_arn)
                       except license_manager.exceptions.AccessDeniedException:
                           print(
                               'ERROR: AccessDenied when getting grants for ', license_arn,
