@@ -1,6 +1,8 @@
 #!/bin/bash
 # see ../CONTRIBUTION.md
 
+# shellcheck disable=SC2034,SC2086,SC2181
+
 PREFIX="CID-DC-"
 account_id=$(aws sts get-caller-identity --query "Account" --output text)
 bucket=cid-$account_id-test
