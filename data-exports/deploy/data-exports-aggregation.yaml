@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-exports/deploy/data-exports-aggregation.yaml
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS Billing Data Export Aggregation v0.10.0 - AWS Solution SO9011
+Description: AWS Billing Data Export Aggregation v0.11.0 - AWS Solution SO9011
 Metadata:
 
   AWS::CloudFormation::Interface:
@@ -28,6 +28,7 @@ Metadata:
           - RolePath
           - CUR2TimeGranularity
           - FOCUSTimeGranularity
+          - LegacyLocalBucket
           - SecondaryDestinationBucket
 
     ParameterLabels:
@@ -53,6 +54,8 @@ Metadata:
         default: "FOCUS Granularity. Do not change."
       LakeFormationEnabled:
         default: "I have LakeFormation permission model in place for this account & my CFN deployment credentials have administrative rights on LakeFormation"
+      LegacyLocalBucket:
+        default: "Legacy Local Bucket (set to 'no' for new deployments)"
       SecondaryDestinationBucket:
         default: "Secondary Destination Bucket Name. Keep it Empty."
 
@@ -64,7 +67,7 @@ Parameters:
   ##
   DestinationAccountId:
     Type: String
-    Description: "AWS Account Id where DataExport will be replicated to (Where you deploy CID Quicksight Dashboards or Data Collection)"
+    Description: "AWS Account Id where DataExport will be delivered to (Where you deploy CID Quicksight Dashboards or Data Collection)"
     AllowedPattern: '\d{12}'
   ResourcePrefix:
     Type: String
@@ -129,24 +132,30 @@ Parameters:
     Description: Choose 'yes' if Lake Formation permission model is in place for the account. If you are not sure, leave it as 'no'. You need to install cid-lakeformation-prerequisite.yaml first.
     Default: "no"
     AllowedValues: ["yes", "no"]
+  LegacyLocalBucket:
+    Type: String
+    Description: "Keep 'yes' when updating from a previous version (retains the local S3 bucket). Set to 'no' for new deployments."
+    Default: "yes"
+    AllowedValues: ["yes", "no"]
+  # Optional: If provided, data will be replicated from the local bucket to this secondary bucket.
   SecondaryDestinationBucket:
     Type: String
-    Description: Leave Empty. A Bucket name for optional supplementary data replication. If not empty, the export data will be replicated to this bucket in addition to the default replication destination. Keep it empty if unsure.
+    Description: "A Bucket name for optional supplementary data replication. If not empty, the export data will be replicated to this bucket. Keep it empty if unsure."
     Default: ''
   AddScheduleForBlockingWrite:
     Type: String
-    Description: 'Set yes to schedule Disabling/Enabling schedule to stop CUR replication for a short period of time to secure QuickSight Dataset refresh.'
+    Description: 'Set yes to schedule Disabling/Enabling schedule to stop Data Export writes for a short period of time to secure QuickSight Dataset refresh.'
     Default: "no"
     AllowedValues: ["yes", "no"]
   DisableWriteCronSchedule:
     Type: String
-    Description: 'Cron expression for disabling replication (UTC)'
+    Description: 'Cron expression for disabling writes (UTC)'
     Default: '0 1 * * ? *'
     AllowedPattern: '^[0-9*,\-/\s?]+$'
     ConstraintDescription: Must be a valid cron expression
   EnableWriteCronSchedule:
     Type: String
-    Description: 'Cron expression for enabling replication (UTC)'
+    Description: 'Cron expression for enabling writes (UTC)'
     Default: '0 3 * * ? *'
     AllowedPattern: '^[0-9*,\-/\s?]+$'
     ConstraintDescription: Must be a valid cron expression
@@ -154,9 +163,8 @@ Parameters:
 Conditions:
   EmptySourceAccountIds: !Equals [ !Ref SourceAccountIds, '']
   IsDestinationAccount: !Equals [!Ref DestinationAccountId, !Ref 'AWS::AccountId']
-  NonEmptySecondaryDestinationBucket: !Not [ !Equals [ !Ref SecondaryDestinationBucket, ''] ]
   IsSourceAccount:
-    # it is Source account if it is not a destination or if it is a destination and it is listed in Source Accounts (as the list one).
+    # it is Source account if it is not a destination or if it is a destination and it is listed in Source Accounts (as the first one).
     # Unfortunately, there no 'Fn::Contains' in Conditions, so we need to request user setting Dest account as the first.
     Fn::Or:
       - !Not [!Condition IsDestinationAccount]
@@ -172,16 +180,26 @@ Conditions:
   ManageCOH: !Equals [!Ref ManageCOH, 'yes']
   ManageCarbon: !Equals [!Ref ManageCarbon, "yes"]
   EnableSCAD: !Equals [!Ref EnableSCAD, 'yes']
+  LegacyLocalBucket: !Equals [!Ref LegacyLocalBucket, 'yes']
+  NonEmptySecondaryDestinationBucket: !Not [ !Equals [ !Ref SecondaryDestinationBucket, ''] ]
   DeployDataExport:
     Fn::Or:
       - !Condition ManageCUR2
       - !Condition ManageFOCUS
       - !Condition ManageCOH
       - !Condition ManageCarbon
-  DeploySourceS3:
+  DeploySourceS3: # Legacy local bucket for backward compatibility during updates, or when SecondaryDestinationBucket is set
     Fn::And:
       - !Condition IsSourceAccount
       - !Condition DeployDataExport
+      - Fn::Or:
+        - !Condition LegacyLocalBucket
+        - !Condition NonEmptySecondaryDestinationBucket
+  DeploySecondaryReplication: # Replication to SecondaryDestinationBucket
+    Fn::And:
+      - !Condition IsSourceAccount
+      - !Condition DeployDataExport
+      - !Condition NonEmptySecondaryDestinationBucket
   DeployCOHServiceRole:  !And [!Condition IsSourceAccount, !Condition ManageCOH]
   DeployCUR2ViaCFN:      !And [!Condition IsSourceAccount, !Condition ManageCUR2,        !Condition RegionSupportsDataExportsViaCFN]
   DeployFOCUSViaCFN:     !And [!Condition IsSourceAccount, !Condition ManageFOCUS,       !Condition RegionSupportsDataExportsViaCFN]
@@ -287,7 +305,7 @@ Resources:
       cfn-lint:
         config:
           ignore_checks:
-            - W3045 # Need to use AccessControl for replication
+            - W3045 # Need to use AccessControl
 
   DestinationS3BucketPolicy:
     Type: 'AWS::S3::BucketPolicy'
@@ -298,7 +316,7 @@ Resources:
       Bucket:
         Ref: DestinationS3
       PolicyDocument:
-        Id: AllowReplication
+        Id: AllowDataExportsWrite
         Version: "2012-10-17"
         Statement:
           - Sid: AllowTLS12Only
@@ -321,53 +339,76 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: false
-          - Sid: AllowReplicationWrite
+          - Sid: EnableAWSDataExportsToWriteToS3
             Effect: Allow
             Principal:
-              AWS:
-                Fn::If:
-                  - EmptySourceAccountIds
-                  - !Ref AWS::AccountId
-                  - !Split [',', !Ref SourceAccountIds]
+              Service: bcm-data-exports.amazonaws.com
             Action:
-              - s3:ReplicateDelete
-              - s3:ReplicateObject
+              - s3:PutObject
             Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
-          - Sid: AllowReplicationRead
-            Effect: Allow
-            Principal:
-              AWS:
-                Fn::If:
-                  - EmptySourceAccountIds
-                  - !Ref AWS::AccountId
-                  - !Split [',', !Ref SourceAccountIds]
-            Action:
-              - s3:ListBucket
-              - s3:ListBucketVersions
-              - s3:GetBucketVersioning
-              - s3:PutBucketVersioning
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:bcm-data-exports:*:*:export/*'
+              StringEquals:
+                aws:SourceAccount:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+          - !If
+            # Legacy replication policy statements retained for backward compatibility.
+            # During the transition from S3 replication to direct Data Export delivery (S3BucketOwner),
+            # source stacks may still replicate data to this bucket until they are updated.
+            # These statements are included only when LegacyLocalBucket=yes (existing deployments)
+            # and will be removed once customers set LegacyLocalBucket=no after completing migration.
+            - LegacyLocalBucket
+            - Sid: AllowReplicationWrite
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ReplicateDelete
+                - s3:ReplicateObject
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - LegacyLocalBucket
+            - Sid: AllowReplicationRead
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ListBucket
+                - s3:ListBucketVersions
+                - s3:GetBucketVersioning
+                - s3:PutBucketVersioning
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
+            - !Ref AWS::NoValue
 
+  # Legacy local bucket retained for backward compatibility during stack updates.
+  # Existing stacks had this bucket with DeletionPolicy: Delete. Keeping it here with
+  # DeletionPolicy: Retain prevents CloudFormation from attempting to delete a non-empty bucket
+  # during update. New deployments set LegacyLocalBucket=no via deployment link to skip creation.
+  # Customers can set LegacyLocalBucket=no after emptying this bucket to remove it from the stack.
   SourceS3:
     Type: AWS::S3::Bucket
     Condition: DeploySourceS3
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub ${ResourcePrefix}-${AWS::AccountId}-data-local
-
-      ## Uncomment following lines to enable bucket logging if needed. Please be careful with the cost of logging.
-      # LoggingConfiguration:
-      #   DestinationBucketName: REPLACE_WITH_YOUR_LOGGING_BUCKET
-      #   LogFilePrefix: REPLACE_WITH_YOUR_PREFIX
-
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256 ## Use AWS managed KMS
-              ## If you need Customer managed KMS key, yoy can do that using following parameters:
-              # SSEAlgorithm: aws:kms
-              # KMSMasterKeyID: "REPLACE_WITH_YOUR_KEY_ARN"
+              SSEAlgorithm: AES256
       AccessControl: BucketOwnerFullControl
       OwnershipControls:
         Rules:
@@ -378,102 +419,56 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
       VersioningConfiguration:
-        Status: Enabled
+        # Versioning is required for S3 replication to SecondaryDestinationBucket
+        Status: !If [NonEmptySecondaryDestinationBucket, Enabled, Suspended]
       ReplicationConfiguration:
-        Role: !GetAtt ReplicationRole.Arn
-        Rules:
-          - Destination:
-              Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
-              StorageClass: STANDARD
-            Id: ReplicateCUR2Data
-            Filter:
-              Prefix: !Sub "cur2/${AWS::AccountId}/${ResourcePrefix}-cur2/data/"  # Hardcoded export name
-            Status: Enabled
-            Priority: 1
-            DeleteMarkerReplication:
-              Status: Enabled
-          - Destination:
-              Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
-              StorageClass: STANDARD
-            Id: ReplicateFOCUSData
-            Filter:
-              Prefix: !Sub "focus/${AWS::AccountId}/${ResourcePrefix}-focus/data/" # Hardcoded export name
-            Status: Enabled
-            Priority: 2
-            DeleteMarkerReplication:
-              Status: Enabled
-          - Destination:
-              Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
-              StorageClass: STANDARD
-            Id: ReplicateCOHData
-            Filter:
-              Prefix: !Sub "coh/${AWS::AccountId}/${ResourcePrefix}-coh/data/" # Hardcoded export name
-            Status: Enabled
-            Priority: 3
-            DeleteMarkerReplication:
-              Status: Enabled
-          - Destination:
-              Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
-              StorageClass: STANDARD
-            Id: ReplicateCarbonData
-            Filter:
-              Prefix: !Sub "carbon/${AWS::AccountId}/${ResourcePrefix}-carbon/data/" # Hardcoded export name
-            Status: Enabled
-            Priority: 4
-            DeleteMarkerReplication:
-              Status: Enabled
-          - Fn::If:
-            - NonEmptySecondaryDestinationBucket
-            - Destination:
-                Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
-                StorageClass: STANDARD
-              Id: ReplicateCUR2DataToSecondaryBucket
-              Filter:
-                Prefix: !Sub "cur2/${AWS::AccountId}/${ResourcePrefix}-cur2/data/"  # Hardcoded export name
-              Status: Enabled
-              Priority: 101
-              DeleteMarkerReplication:
-                Status: Enabled
-            - !Ref 'AWS::NoValue'
-          - Fn::If:
-            - NonEmptySecondaryDestinationBucket
-            - Destination:
-                Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
-                StorageClass: STANDARD
-              Id: ReplicateFOCUSDataToSecondaryBucket
-              Filter:
-                Prefix: !Sub "focus/${AWS::AccountId}/${ResourcePrefix}-focus/data/" # Hardcoded export name
-              Status: Enabled
-              Priority: 102
-              DeleteMarkerReplication:
-                Status: Enabled
-            - !Ref 'AWS::NoValue'
-          - Fn::If:
-            - NonEmptySecondaryDestinationBucket
-            - Destination:
-                Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
-                StorageClass: STANDARD
-              Id: ReplicateCOHDataToSecondaryBucket
-              Filter:
-                Prefix: !Sub "coh/${AWS::AccountId}/${ResourcePrefix}-coh/data/" # Hardcoded export name
-              Status: Enabled
-              Priority: 103
-              DeleteMarkerReplication:
-                Status: Enabled
-            - !Ref 'AWS::NoValue'
-          - Fn::If:
-            - NonEmptySecondaryDestinationBucket
-            - Destination:
-                Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
-                StorageClass: STANDARD
-              Id: ReplicateCarbonDataToSecondaryBucket
-              Filter:
-                Prefix: !Sub "carbon/${AWS::AccountId}/${ResourcePrefix}-carbon/data/" # Hardcoded export name
-              Status: Enabled
-              Priority: 104
-              DeleteMarkerReplication:
-                Status: Enabled
-            - !Ref "AWS::NoValue"
+        # Replication to SecondaryDestinationBucket only. Replication to the destination bucket
+        # is no longer needed since Data Exports now writes directly via S3BucketOwner.
+        Fn::If:
+          - NonEmptySecondaryDestinationBucket
+          - Role: !GetAtt ReplicationRole.Arn
+            Rules:
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCUR2DataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "cur2/${AWS::AccountId}/${ResourcePrefix}-cur2/data/"
+                Status: !If [ManageCUR2, Enabled, Disabled]
+                Priority: 101
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateFOCUSDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "focus/${AWS::AccountId}/${ResourcePrefix}-focus/data/"
+                Status: !If [ManageFOCUS, Enabled, Disabled]
+                Priority: 102
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCOHDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "coh/${AWS::AccountId}/${ResourcePrefix}-coh/data/"
+                Status: !If [ManageCOH, Enabled, Disabled]
+                Priority: 103
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
+                  StorageClass: STANDARD
+                Id: ReplicateCarbonDataToSecondaryBucket
+                Filter:
+                  Prefix: !Sub "carbon/${AWS::AccountId}/${ResourcePrefix}-carbon/data/"
+                Status: !If [ManageCarbon, Enabled, Disabled]
+                Priority: 104
+                DeleteMarkerReplication:
+                  Status: Enabled
+          - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: Object&Version Expiration
@@ -485,80 +480,34 @@ Resources:
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 7
             ExpiredObjectDeleteMarker: true
-      Tags: # Hacky way to manage conditional dependencies
-        - Key: IgnoreConditionalDependency
-          Value: !If [IsDestinationAccount, !Ref DestinationS3, '']
     Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_21
+            comment: "Versioning is conditionally enabled via Fn::If when SecondaryDestinationBucket is set"
       cfn_nag:
         rules_to_suppress:
           - id: 'W35'
-            reason: "Data buckets would generate too much logs"
+            reason: "Legacy bucket kept for backward compatibility"
       cfn-lint:
         config:
           ignore_checks:
-            - W3045 # Need to use AccessControl for replication
+            - W3045 # Need to use AccessControl
 
-  SourceS3BucketPolicy:
-    Type: 'AWS::S3::BucketPolicy'
-    Condition: DeploySourceS3
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
-    Properties:
-      Bucket: !Ref SourceS3
-      PolicyDocument:
-        Id: AllowBillingReadAndWrite
-        Version: "2012-10-17"
-        Statement:
-          - Sid: AllowTLS12Only
-            Effect: Deny
-            Principal: "*"
-            Action: s3:*
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
-            Condition:
-              NumericLessThan:
-                s3:TlsVersion: 1.2
-          - Sid: AllowOnlyHTTPS
-            Effect: Deny
-            Principal: "*"
-            Action: s3:*
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
-            Condition:
-              Bool:
-                aws:SecureTransport: false
-          - Sid: AllowBillingReadAndWrite
-            Effect: Allow
-            Principal:
-              Service: bcm-data-exports.amazonaws.com
-            Action:
-              - s3:GetBucketAcl
-              - s3:GetBucketPolicy
-              - s3:PutObject
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
-              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-
+  # IAM role for S3 replication to SecondaryDestinationBucket.
+  # Only created when SecondaryDestinationBucket is provided.
   ReplicationRole:
-    Condition: DeploySourceS3
+    Condition: DeploySecondaryReplication
     Type: AWS::IAM::Role
     Properties:
       Path: !Sub /${ResourcePrefix}/
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
-          -
-            Effect: Allow
+          - Effect: Allow
             Principal:
-              Service:
-                - "s3.amazonaws.com"
-            Action:
-              - "sts:AssumeRole"
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
       Policies:
         - PolicyName: ReplicationPolicy
           PolicyDocument:
@@ -581,8 +530,7 @@ Resources:
                   - s3:ReplicateDelete
                   - s3:ReplicateTags
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports/*/${AWS::AccountId}/*"
-                  - !If [NonEmptySecondaryDestinationBucket, !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*", !Ref 'AWS::NoValue']
+                  - !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*"
 
   BucketWriteBlockerLambdaRole:
     Type: AWS::IAM::Role
@@ -644,7 +592,7 @@ Resources:
       Environment:
         Variables:
           BUCKET_NAME: !Ref DestinationS3
-          POLICY_SID: 'AllowReplicationWrite'
+          POLICY_SID: 'EnableAWSDataExportsToWriteToS3'
       MemorySize: 128
       Timeout: 60
     Metadata:
@@ -658,24 +606,24 @@ Resources:
     Type: AWS::Events::Rule
     Condition: DeployWriteBlocker
     Properties:
-      Description: !Sub "Schedule for disabling replication using cron: ${DisableWriteCronSchedule}"
+      Description: !Sub "Schedule for disabling writes using cron: ${DisableWriteCronSchedule}"
       ScheduleExpression: !Sub "cron(${DisableWriteCronSchedule})"
       State: ENABLED
       Targets:
         - Arn: !GetAtt BucketWriteBlockerPolicyLambda.Arn
-          Id: "DisableReplicationTarget"
+          Id: "DisableWriteTarget"
           Input: '{"action": "disable"}'
 
   EnableRuleSchedule:
     Type: AWS::Events::Rule
     Condition: DeployWriteBlocker
     Properties:
-      Description: !Sub "Schedule for enabling replication using cron: ${EnableWriteCronSchedule}"
+      Description: !Sub "Schedule for enabling writes using cron: ${EnableWriteCronSchedule}"
       ScheduleExpression: !Sub "cron(${EnableWriteCronSchedule})"
       State: ENABLED
       Targets:
         - Arn: !GetAtt BucketWriteBlockerPolicyLambda.Arn
-          Id: "EnableReplicationTarget"
+          Id: "EnableWriteTarget"
           Input: '{"action": "enable"}'
 
   LambdaPermissionDisable:
@@ -702,8 +650,8 @@ Resources:
   LocalCUR2viaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCUR2ViaCFN
-    DependsOn:
-      - SourceS3BucketPolicy
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -717,8 +665,9 @@ Resources:
         Description: "CUR 2.0 export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "cur2/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "cur2/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -735,7 +684,6 @@ Resources:
     Condition: DeployCUR2ViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
-      BucketPolicyWait: !Ref SourceS3BucketPolicy
       Export:
         DataQuery:
           QueryStatement: !If [EnableSCAD, !FindInMap [DataExports, CUR2, SCADQuery], !FindInMap [DataExports, CUR2, DefaultQuery]]
@@ -748,8 +696,9 @@ Resources:
         Description: "CUR 2.0 export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "cur2/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "cur2/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -766,8 +715,8 @@ Resources:
   LocalFOCUSviaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployFOCUSViaCFN
-    DependsOn:
-      - SourceS3BucketPolicy
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -778,8 +727,9 @@ Resources:
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "focus/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "focus/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -796,7 +746,6 @@ Resources:
     Condition: DeployFOCUSViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
-      BucketPolicyWait: !Ref SourceS3BucketPolicy
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
@@ -806,8 +755,9 @@ Resources:
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "focus/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "focus/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -825,8 +775,9 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCOHViaCFN
     DependsOn:
-      - SourceS3BucketPolicy
       - CreateServiceLinkedRoleCustomResource
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -838,8 +789,9 @@ Resources:
         Description: "Cost Optimization Hub Recommendations export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "coh/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "coh/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -858,7 +810,6 @@ Resources:
     Condition: DeployCOHViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
-      BucketPolicyWait: !Ref SourceS3BucketPolicy
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, COH, DefaultQuery]
@@ -869,8 +820,9 @@ Resources:
         Description: "Cost Optimization Hub Recommendations export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "coh/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "coh/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -926,7 +878,6 @@ Resources:
             reason: "Need an explicit name for reference"
           - id: 'W11'
             reason: "Some COH resources cannot be restricted"
-
 
   CreateServiceLinkedRoleFunction:
     Type: 'AWS::Lambda::Function'
@@ -1051,8 +1002,8 @@ Resources:
   LocalCarbonViaCFN:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCarbonViaCFN
-    DependsOn:
-      - SourceS3BucketPolicy
+    Metadata:
+      cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
         DataQuery:
@@ -1060,8 +1011,9 @@ Resources:
         Description: "Carbon emissions export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "carbon/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "carbon/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -1078,15 +1030,15 @@ Resources:
     Condition: DeployCarbonViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
-      BucketPolicyWait: !Ref SourceS3BucketPolicy
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, Carbon, DefaultQuery]
         Description: "Carbon emissions export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Ref SourceS3
-            S3Prefix: !Sub "carbon/${AWS::AccountId}" # Explicitly hardcode name of folder (it will be the same as table name)
+            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
+            S3BucketOwner: !Ref DestinationAccountId
+            S3Prefix: !Sub "carbon/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
               Overwrite: "OVERWRITE_REPORT"
@@ -1153,7 +1105,7 @@ Resources:
               - cost-optimization-hub:ListRecommendations
               Resource: "arn:aws:cost-optimization-hub:*"
             - Effect: Allow
-              Action: sustainability:GetCarbonFootprintSummary # needed ad carbon emissions data export creation time
+              Action: sustainability:GetCarbonFootprintSummary # needed at carbon emissions data export creation time
               Resource: "*"
 
   CidDataExportCreatorLambda:
@@ -1165,17 +1117,24 @@ Resources:
       Handler: index.lambda_handler
       MemorySize: 128
       Role: !GetAtt CidDataExportCreatorLambdaRole.Arn
-      Timeout: 15
+      Timeout: 120
       Code:
         ZipFile: |
           import os
           import json
           import uuid
+          import logging
+
+          # Update boto3 to support newer API parameters (e.g. S3BucketOwner)
+          from pip._internal.cli.main import main, sys
+          logging.getLogger('pip').setLevel(logging.ERROR)
+          main(['install', '-I', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0, '/tmp/')
 
           import boto3
           import cfnresponse
 
-          # DataExports only exist in paricular regions
+          # DataExports only exist in particular regions
           region = 'us-east-1'
           if os.environ['AWS_REGION'].startswith('cn-'):
               region = 'cn-northwest-1'
@@ -1197,30 +1156,42 @@ Resources:
                   print('created:', json.dumps(res))
               elif event['RequestType'] == 'Update':
                   old_export_name = old_export['Name']
-                  old_export_arn = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{old_export_name}']"))[0]['ExportArn']
-                  if old_export['Name'] != old_export['Name']:
-                      res = client.create_export(Export=export)
-                      print('created:', json.dumps(res))
-                      try:
-                          res = client.delete_export(ExportArn=old_export_arn)
-                          print('deleted:', json.dumps(res))
-                      except Exception as exc:
-                          print('Exception on deletion:', str(exc))
-                  elif export['DataQuery'] != old_export['DataQuery']: # Data export do not support update of queries
-                      print(export['DataQuery'], '!=', old_export['DataQuery'])
-                      res = client.delete_export(ExportArn=old_export_arn)
-                      print('deleted:', json.dumps(res))
+                  matching = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{old_export_name}']"))
+                  matching = [m for m in matching if m]  # filter None values from JMESPath
+                  if not matching:
+                      # Old export not found — create instead of update
+                      print(f'Export {old_export_name} not found, creating new export')
                       res = client.create_export(Export=export)
                       print('created:', json.dumps(res))
                   else:
-                      res = client.update_export(ExportArn=old_export_arn, Export=export)
-                      print('updated:', json.dumps(res))
+                      old_export_arn = matching[0]['ExportArn']
+                      if old_export['Name'] != export['Name']:
+                          res = client.create_export(Export=export)
+                          print('created:', json.dumps(res))
+                          try:
+                              res = client.delete_export(ExportArn=old_export_arn)
+                              print('deleted:', json.dumps(res))
+                          except Exception as exc:
+                              print('Exception on deletion:', str(exc))
+                      elif export['DataQuery'] != old_export['DataQuery']: # Data export do not support update of queries
+                          print(export['DataQuery'], '!=', old_export['DataQuery'])
+                          res = client.delete_export(ExportArn=old_export_arn)
+                          print('deleted:', json.dumps(res))
+                          res = client.create_export(Export=export)
+                          print('created:', json.dumps(res))
+                      else:
+                          res = client.update_export(ExportArn=old_export_arn, Export=export)
+                          print('updated:', json.dumps(res))
               elif event['RequestType'] == 'Delete':
                   export_name = export['Name']
                   try:
-                      export_arn = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{export_name}']"))[0]['ExportArn']
-                      res = client.delete_export(ExportArn=export_arn)
-                      print('deleted:', json.dumps(res))
+                      matching = list(client.get_paginator('list_exports').paginate().search(f"Exports[? ExportName=='{export_name}']"))
+                      matching = [m for m in matching if m]
+                      if matching:
+                          res = client.delete_export(ExportArn=matching[0]['ExportArn'])
+                          print('deleted:', json.dumps(res))
+                      else:
+                          print(f'Export {export_name} not found. Nothing to delete')
                   except client.exceptions.ResourceNotFoundException:
                       print('Not Found. Nothing to delete')
                   except Exception as exc:
@@ -1383,6 +1354,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1522,6 +1494,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1626,6 +1599,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -1728,6 +1702,7 @@ Resources:
               - '**.gz'
               - '**.zip'
               - '**/cost_and_usage_data_status/*'
+              - '**/metadata/**'
               - 'aws-programmatic-access-test-object'
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -2056,10 +2031,6 @@ Outputs:
     Description: Database for Data Exports
     Value:  !Join [ '_', !Split [ '-', !Sub '${ResourcePrefix}_data_export' ] ] # replace '-' to '_'
     Export: { Name: 'cid-DataExports-Database'}
-  LocalAccountBucket:
-    Condition: DeploySourceS3
-    Description: Local Bucket Name which replicate objects to centralized bucket
-    Value: !Sub ${ResourcePrefix}-${AWS::AccountId}-data-local
   ReadAccessPolicyARN:
     Condition: DeployAnyTable
     Description: Policy to allow read access DataExports in S3 and Athena. Attach it to QuickSight role.
