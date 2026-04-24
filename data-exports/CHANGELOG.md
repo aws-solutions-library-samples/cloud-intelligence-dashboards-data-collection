@@ -1,5 +1,9 @@
 # Change Log
 
+## v0.11.1
+
+- Fix for single account deployment to create Data Exports only after S3 bucket policy is created
+
 ## v0.11.0
 - Added direct cross-account delivery using S3BucketOwner property — Data Exports now write directly to the destination bucket without S3 replication
 - Added backward compatibility for existing deployments transitioning from S3 replication to direct delivery (LegacyLocalBucket parameter)
