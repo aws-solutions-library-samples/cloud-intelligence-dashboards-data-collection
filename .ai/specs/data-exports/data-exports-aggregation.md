@@ -1,7 +1,7 @@
 # Data Exports Aggregation Template Specification
 
 Template: `data-exports/deploy/data-exports-aggregation.yaml`
-Version: v0.10.0 (AWS Solution SO9011)
+Version: v0.11.1 (AWS Solution SO9011)
 
 ## Overview
 
@@ -37,6 +37,7 @@ Resources created:
 - **Data Exports** — One per enabled export type, created via:
   - Native CFN (`AWS::BCMDataExports::Export`) in us-east-1, cn-northwest-1, us-iso-east-1, us-iso-west-1
   - Custom Resource Lambda (`CidDataExportCreatorLambda`) in all other regions
+  - **Bucket Policy Dependency**: CFN-based exports use a conditional implicit dependency on `DestinationS3BucketPolicy` via `Metadata` to prevent a race condition in same-account deployments (see [Bucket Policy Race Condition](#bucket-policy-race-condition) below)
 - **SourceS3** (conditional) — Legacy local bucket `{prefix}-{accountId}-data-local`, created when `LegacyLocalBucket=yes` or `SecondaryDestinationBucket` is non-empty
 - **ReplicationRole** (conditional) — IAM role for S3 replication, created only when `SecondaryDestinationBucket` is non-empty
 - **COH Service Linked Role** (conditional) — Created via custom resource when COH export is enabled
@@ -220,6 +221,25 @@ When `LegacyLocalBucket=no`, only statement 1 is included.
 - Changed from `DeletionPolicy: Delete` to `DeletionPolicy: Retain`
 - Prevents CloudFormation from failing when trying to delete a non-empty bucket during update
 - Customers must manually empty and delete the bucket after migration
+
+### Bucket Policy Race Condition
+
+In same-account deployments (`IsSourceAccount` and `IsDestinationAccount` both true), CloudFormation creates the Data Export resources and the `DestinationS3BucketPolicy` in parallel. The BCM Data Exports service validates S3 write permissions at export creation time, so if the bucket policy hasn't been applied yet, the export fails with `S3 bucket permission validation failed`.
+
+**Problem constraints:**
+- `DependsOn` cannot be used because the export conditions (`Deploy{Type}ViaCFN` = `IsSourceAccount + ...`) don't imply `IsDestinationAccount`. In source-only deployments, `DestinationS3BucketPolicy` doesn't exist, and `DependsOn` on a non-existent conditional resource causes `Template format error: Unresolved resource dependencies`.
+- CloudFormation's `DependsOn` attribute does not support `Fn::If` — it must be a string or list of strings.
+
+**Solution:** Each CFN-based export resource includes a conditional implicit dependency in its `Metadata`:
+```yaml
+Metadata:
+  BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
+```
+
+- In same-account deployments (`IsDestinationAccount` = true): `!Ref DestinationS3BucketPolicy` creates an implicit dependency, so CloudFormation waits for the bucket policy before creating the export.
+- In source-only deployments (`IsDestinationAccount` = false): evaluates to `''`, no dependency created, no error.
+
+This pattern is based on the CloudFormation technique of using `Metadata` with `Fn::If` to create conditional implicit dependencies without requiring `DependsOn`.
 
 ## Conditions Reference
 
