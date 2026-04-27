@@ -1,6 +1,6 @@
 # https://github.com/awslabs/cid-data-collection-framework/blob/main/data-exports/deploy/data-exports-aggregation.yaml
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS Billing Data Export Aggregation v0.11.0 - AWS Solution SO9011
+Description: AWS Billing Data Export Aggregation v0.11.1 - AWS Solution SO9011
 Metadata:
 
   AWS::CloudFormation::Interface:
@@ -651,6 +651,10 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCUR2ViaCFN
     Metadata:
+      # Implicit dependency: in same-account deployments (IsDestinationAccount=true), reference the
+      # bucket policy so CFN waits for it before creating the export. Data Exports validate S3 write
+      # permissions at creation time, so the bucket policy must exist first.
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -716,6 +720,7 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployFOCUSViaCFN
     Metadata:
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -777,6 +782,7 @@ Resources:
     DependsOn:
       - CreateServiceLinkedRoleCustomResource
     Metadata:
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -1003,6 +1009,7 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCarbonViaCFN
     Metadata:
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
