@@ -149,7 +149,7 @@ Resources:
 
           import boto3
 
-          REGIONS = [r.strip() for r in os.environ.get("REGIONS").split(',') if r]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
           ROLE_NAME = os.environ['ROLE_NAME']
           BUCKET = os.environ['DESTINATION_BUCKET']
 
