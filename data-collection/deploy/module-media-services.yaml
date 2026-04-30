@@ -1,0 +1,373 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves AWS Media Services inventory across accounts
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: KMS Key ARNs used for encrypting data in S3 buckets (comma separated)
+    Default: ""
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to hold collected data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket to hold collected data
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: media-services
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  RegionsInScope:
+    Type: String
+    Description: "Comma Delimited list of AWS regions from which data about resources will be collected. Example: us-east-1,eu-west-1,ap-northeast-1"
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [',', !Ref DataBucketsKmsKeysArns]
+          - !Ref AWS::NoValue
+        - PolicyName: "AssumeMultiAccountRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: "S3Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          from datetime import date, datetime
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          BUCKET_NAME = os.environ["BUCKET_NAME"]
+          PREFIX = os.environ["PREFIX"]
+          ROLE_NAME = os.environ['ROLE_NAME']
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "").split(',') if r]
+          TMP_FILE = "/tmp/data.json"
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          def assume_session(account_id, region):
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              cred = boto3.client('sts', region_name=region).assume_role(
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLE_NAME}",
+                  RoleSessionName="data_collection"
+              )['Credentials']
+              return boto3.Session(
+                  aws_access_key_id=cred['AccessKeyId'],
+                  aws_secret_access_key=cred['SecretAccessKey'],
+                  aws_session_token=cred['SessionToken']
+              )
+
+          def collect_medialive(session, region, account_id):
+              """Collect MediaLive channels and inputs"""
+              client = session.client('medialive', region_name=region)
+              results = []
+              try:
+                  for page in client.get_paginator('list_channels').paginate():
+                      for ch in page.get('Channels', []):
+                          results.append({
+                              'service': 'MediaLive',
+                              'resource_type': 'Channel',
+                              'resource_id': ch['Id'],
+                              'resource_name': ch.get('Name', ''),
+                              'state': ch.get('State', ''),
+                              'channel_class': ch.get('ChannelClass', ''),
+                              'account_id': account_id,
+                              'region': region
+                          })
+                  for page in client.get_paginator('list_inputs').paginate():
+                      for inp in page.get('Inputs', []):
+                          results.append({
+                              'service': 'MediaLive',
+                              'resource_type': 'Input',
+                              'resource_id': inp['Id'],
+                              'resource_name': inp.get('Name', ''),
+                              'state': inp.get('State', ''),
+                              'input_type': inp.get('Type', ''),
+                              'account_id': account_id,
+                              'region': region
+                          })
+              except ClientError as exc:
+                  logger.warning("MediaLive error in %s/%s: %s", account_id, region, exc)
+              return results
+
+          def collect_mediapackage(session, region, account_id):
+              """Collect MediaPackage channels and endpoints"""
+              client = session.client('mediapackage', region_name=region)
+              results = []
+              try:
+                  for page in client.get_paginator('list_channels').paginate():
+                      for ch in page.get('Channels', []):
+                          results.append({
+                              'service': 'MediaPackage',
+                              'resource_type': 'Channel',
+                              'resource_id': ch['Id'],
+                              'resource_name': ch.get('Description', ''),
+                              'account_id': account_id,
+                              'region': region
+                          })
+                  for page in client.get_paginator('list_origin_endpoints').paginate():
+                      for ep in page.get('OriginEndpoints', []):
+                          results.append({
+                              'service': 'MediaPackage',
+                              'resource_type': 'OriginEndpoint',
+                              'resource_id': ep['Id'],
+                              'resource_name': ep.get('Description', ''),
+                              'channel_id': ep.get('ChannelId', ''),
+                              'account_id': account_id,
+                              'region': region
+                          })
+              except ClientError as exc:
+                  logger.warning("MediaPackage error in %s/%s: %s", account_id, region, exc)
+              return results
+
+          def collect_mediaconvert(session, region, account_id):
+              """Collect MediaConvert queues"""
+              client = session.client('mediaconvert', region_name=region)
+              results = []
+              try:
+                  resp = client.describe_endpoints(MaxResults=1)
+                  if resp.get('Endpoints'):
+                      endpoint_url = resp['Endpoints'][0]['Url']
+                      mc_client = session.client('mediaconvert', region_name=region, endpoint_url=endpoint_url)
+                      for page in mc_client.get_paginator('list_queues').paginate():
+                          for q in page.get('Queues', []):
+                              results.append({
+                                  'service': 'MediaConvert',
+                                  'resource_type': 'Queue',
+                                  'resource_id': q.get('Arn', ''),
+                                  'resource_name': q.get('Name', ''),
+                                  'status': q.get('Status', ''),
+                                  'pricing_plan': q.get('PricingPlan', ''),
+                                  'account_id': account_id,
+                                  'region': region
+                              })
+              except ClientError as exc:
+                  logger.warning("MediaConvert error in %s/%s: %s", account_id, region, exc)
+              return results
+
+          def lambda_handler(event, context): #pylint: disable=W0613
+              logger.info("Event data: %s", json.dumps(event))
+              account = event.get('account')
+              if not account:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually."
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              account = account if isinstance(account, dict) else json.loads(account)
+              account_id = account["account_id"]
+              payer_id = account.get("payer_id", account_id)
+              regions = [r.strip() for r in account.get('regions', '').split(',') if r]
+              regions = regions if regions else REGIONS
+
+              count = 0
+              with open(TMP_FILE, "w", encoding='utf-8') as f:
+                  for region in regions:
+                      try:
+                          session = assume_session(account_id, region)
+                          for collector in [collect_medialive, collect_mediapackage, collect_mediaconvert]:
+                              for item in collector(session, region, account_id):
+                                  item['payer_id'] = payer_id
+                                  item['collection_time'] = datetime.utcnow().isoformat()
+                                  f.write(json.dumps(item) + '\n')
+                                  count += 1
+                      except ClientError as exc:
+                          logger.warning("Error assuming role in %s/%s: %s", account_id, region, exc)
+
+              if count > 0:
+                  key = datetime.utcnow().strftime(
+                      f"{PREFIX}/{PREFIX}-data/payer_id={payer_id}/year=%Y/month=%m/day=%d/{account_id}.json"
+                  )
+                  boto3.client('s3').upload_file(TMP_FILE, BUCKET_NAME, key)
+                  logger.info("Uploaded %d records to s3://%s/%s", count, BUCKET_NAME, key)
+              else:
+                  logger.info("No media services resources found for %s", account_id)
+
+              return {"status": "200", "Recorded": str(count)}
+      Handler: 'index.lambda_handler'
+      MemorySize: 2688
+      Timeout: 300
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          ROLE_NAME: !Ref MultiAccountRoleName
+          REGIONS: !Ref RegionsInScope
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName

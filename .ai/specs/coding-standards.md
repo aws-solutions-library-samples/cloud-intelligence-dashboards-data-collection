@@ -24,12 +24,14 @@ Templates follow a consistent section ordering:
 ### 1.2 Naming Conventions
 
 - Module files: `module-<service-name>.yaml` (kebab-case)
-- Resource prefix: all resource names use `!Sub "${ResourcePrefix}${CFDataName}-<ResourceType>"`
-- Lambda functions: `!Sub '${ResourcePrefix}${CFDataName}-Lambda'`
-- IAM roles: `!Sub "${ResourcePrefix}${CFDataName}-LambdaRole"`
-- Step Functions: `!Sub '${ResourcePrefix}${CFDataName}-StateMachine'`
-- Log groups: `!Sub "/aws/lambda/${LambdaFunction}"`
-- Schedulers: `!Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'`
+- Resource prefix pattern: `!Sub "${ResourcePrefix}${CFDataName}-<ResourceType>"`
+- Lambda: `${ResourcePrefix}${CFDataName}-Lambda`
+- IAM role: `${ResourcePrefix}${CFDataName}-LambdaRole`
+- Step Function: `${ResourcePrefix}${CFDataName}-StateMachine`
+- Log group: `/aws/lambda/${LambdaFunction}`
+- Scheduler: `${ResourcePrefix}${CFDataName}-RefreshSchedule`
+- Partition Awareness
+Always use `!Sub "arn:${AWS::Partition}:..."` for ARNs. Never hardcode `arn:aws:`.
 
 ### 1.3 Standard Conditions
 
@@ -57,10 +59,6 @@ Metadata:
     rules_to_suppress:
       - id: W28
         reason: "Need explicit name to identify role actions"
-      - id: W89
-        reason: "No need for VPC in this case"
-      - id: W92
-        reason: "No need for simultaneous execution"
 ```
 
 ### 1.6 Log Group
@@ -90,16 +88,35 @@ These standards apply to Python code embedded in CloudFormation templates via `C
 7. `lambda_handler(event, context)` — main entry point
 
 ### 2.2 Environment Variable Access Style
-
+Always use the os.environ.get instead of the bracketed index method to gracefully allow trapping of errors with missing parameters. Encourace a default value for optional variables.
 ```python
-BUCKET_NAME = os.environ["BUCKET_NAME"]
-PREFIX = os.environ["PREFIX"]
-ROLE_NAME = os.environ['ROLE_NAME']
+BUCKET_NAME = os.environ.get("BUCKET_NAME")
+PREFIX = os.environ.get("PREFIX")
+ROLE_NAME = os.environ.get('ROLE_NAME')
 ```
 
 Constants are defined at module level, not inside functions.
 
-### 2.3 Logger Setup Style
+### 2.3 Boto3 Client Retry Configuration
+
+All modules should support an optional `MAX_RETRIES` environment variable to configure adaptive retry behavior on boto3 clients. Default to 10 retries if not set.
+
+```python
+from botocore.config import Config
+
+MAX_RETRIES = int(os.environ.get('MAX_RETRIES', '10'))
+BOTO_CONFIG = Config(retries={"max_attempts": MAX_RETRIES, "mode": "adaptive"})
+```
+
+Pass `BOTO_CONFIG` (or the equivalent from the common layer) when creating boto3 clients:
+
+```python
+client = session.client('medialive', region_name=region, config=BOTO_CONFIG)
+```
+
+When using the common Lambda layer, use `utils.get_boto_config()` which reads `MAX_RETRIES` from the environment and returns a `botocore.config.Config` object.
+
+### 2.4 Logger Setup Style
 
 ```python
 logger = logging.getLogger(__name__)
@@ -110,7 +127,7 @@ logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), lo
 - Default log level is `INFO`, configurable via `LOG_LEVEL` env var
 - Use `getattr` pattern for safe level resolution
 
-### 2.4 Pylint Inline Suppressions
+### 2.5 Pylint Inline Suppressions
 
 Standard inline suppressions used in Lambda code:
 
@@ -155,7 +172,7 @@ The custom pylint runner (`utils/pylint.py`) disables these checks for inline La
 
 ## 4. General Python Conventions
 
-- Python 3.10+ required (Lambda runtime default: python3.13)
+- Python 3.12+ required (Lambda runtime default: python3.13)
 - Always use `encoding='utf-8'` with `open()` calls
 - Use f-strings for string formatting in application code (allowed in inline Lambda per pylint config)
 - Use lazy `%s` formatting in logging calls for standalone scripts
