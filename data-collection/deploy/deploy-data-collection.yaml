@@ -1051,7 +1051,7 @@ Resources:
       Description: "Boto3 and Botocore libraries for Python"
       Content:
         S3Bucket: !If [ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket]
-        S3Key: "cfn/data-collection/v3.14.3/layers/boto3-layer.zip"
+        S3Key: "cfn/data-collection/v3.14.4/layers/boto3-layer.zip"
       CompatibleRuntimes:
         - python3.10
         - python3.11
@@ -1447,6 +1447,7 @@ Resources:
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         DetailStepFunctionTemplate: !FindInMap [StepFunctionCode, health-detail-state-machine, TemplatePath]
+        Boto3LayerArn: !Ref Boto3LayerVersion
 
   LicenseManagerModule:
     Type: AWS::CloudFormation::Stack
