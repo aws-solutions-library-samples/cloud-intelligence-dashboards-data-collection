@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kiro User Activity - Data Collection Account (Destination) v3.14.5
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to hold the Kiro user activity table
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that holds collected data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that holds collected data
+  CFDataName:
+    Type: String
+    Description: The name of what this CloudFormation stack is doing.
+    Default: kiro-user-activity
+  KiroActivityPrefix:
+    Type: String
+    Description: "S3 prefix used in source accounts for Kiro activity data. Must match the KiroActivityPrefix in the source stack."
+    Default: "kiro/"
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created.
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  Schedule:
+    Type: String
+    Description: "Cron schedule for the Glue Crawler. Default runs daily at 3AM UTC (after Kiro generates reports at 2AM UTC)."
+    Default: "cron(0 3 * * ? *)"
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if not encrypted with KMS."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
+Resources:
+  # Glue Crawler discovers Kiro user activity CSVs at:
+  #   {KiroActivityPrefix}AWSLogs/{accountId}/KiroLogs/user_report/{region}/{year}/{month}/{day}/{hour}/*.csv
+  #
+  # Kiro also writes occasional access-validation marker files (UUID-named, no extension) at:
+  #   {KiroActivityPrefix}AWSLogs/{accountId}/KiroLogs/{uuid}
+  # These would confuse the crawler/Athena, so we exclude them via glob pattern.
+  #
+  # The crawler will create a table named after the top-level prefix folder.
+  # With KiroActivityPrefix="kiro/", the resulting Athena table is "kiro".
+  # With TablePrefix="kiro_user_activity_", the resulting table is "kiro_user_activity_kiro".
+  KiroUserActivityCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      TablePrefix: kiro_user_activity_
+      Schedule:
+        ScheduleExpression: !Ref Schedule
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${KiroActivityPrefix}"
+            Exclusions:
+              # UUID-formatted validation marker files (e.g. af0ef93c-30cd-4cae-802a-7482900cb356)
+              - "**/KiroLogs/*-*-*-*-*"
+              - "**/*.json"
+              - "**/*.metadata"
+              - "**/*.txt"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
+
+Outputs:
+  CrawlerName:
+    Description: Glue Crawler name - run manually to discover new partitions immediately
+    Value: !Ref KiroUserActivityCrawler
+  TableName:
+    Description: Athena table name for the Kiro user activity data
+    Value: !Sub "${DatabaseName}.kiro_user_activity_kiro"

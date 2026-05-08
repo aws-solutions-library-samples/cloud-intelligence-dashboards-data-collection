@@ -42,11 +42,16 @@ Metadata:
           - IncludeEUCUtilizationModule
           - IncludeResilienceHubModule
           - IncludeMarketplaceModule
+          - IncludeKiroUserActivityModule
           - IncludeReferenceModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
           - EUCAccountIDs
+      - Label:
+          default: 'Kiro User Activity Module Configuration'
+        Parameters:
+          - KiroSourceAccountIds
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -114,6 +119,10 @@ Metadata:
         default: 'Include Resilience Hub Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
+      IncludeKiroUserActivityModule:
+        default: 'Include Kiro User Activity Data Collection Module'
+      KiroSourceAccountIds:
+        default: 'Kiro Source Account IDs (comma-separated)'
 
 Mappings:
   RegionMap:
@@ -297,6 +306,16 @@ Parameters:
    Description: Collects AWS Marketplace data
    AllowedValues: ['yes', 'no']
    Default: 'no'
+  IncludeKiroUserActivityModule:
+    Type: String
+    Description: "Crawls Kiro user activity report CSVs replicated from source accounts. Requires deploying module-kiro-user-activity-source.yaml in each account with a Kiro profile."
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
+  KiroSourceAccountIds:
+    Type: String
+    Description: "Comma-separated list of AWS Account IDs where Kiro profiles are enabled and user activity source stacks are deployed. Required if IncludeKiroUserActivityModule is yes."
+    Default: ""
+    AllowedPattern: ^(\d{12}(,\d{12})*)?$
   IncludeReferenceModule:
     Type: String
     Description: Collects Reference data for other modules
@@ -324,6 +343,7 @@ Conditions:
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
+  DeployKiroUserActivityModule: !Equals [ !Ref IncludeKiroUserActivityModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
@@ -426,6 +446,23 @@ Resources:
             Condition:
               NumericLessThan:
                 s3:TlsVersion: 1.2
+          - !If
+            - DeployKiroUserActivityModule
+            - Sid: AllowKiroReplicationFromSourceAccounts
+              Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:ReplicateObject
+                - s3:ReplicateDelete
+                - s3:ReplicateTags
+                - s3:GetObjectVersionTagging
+                - s3:ObjectOwnerOverrideToBucketOwner
+              Resource:
+                - !Sub "${S3Bucket.Arn}/kiro-activity/*"
+              Condition:
+                StringLike:
+                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
+            - !Ref AWS::NoValue
 
   # GlueDatabase: # GlueDatabase can be already created by crawler in previous versions. So we cannot create it here. See Init CustomResource
   #   Type: "AWS::Glue::Database"
@@ -1566,6 +1603,21 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+
+  KiroUserActivityModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployKiroUserActivityModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-kiro-user-activity.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
 
   ReferenceModule:
     Type: AWS::CloudFormation::Stack
