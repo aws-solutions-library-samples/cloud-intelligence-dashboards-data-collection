@@ -248,6 +248,8 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeMarketplaceModule',         'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeKiroUserActivityModule',   'ParameterValue': "yes"},
+            {'ParameterKey': 'KiroSourceAccountIds',            'ParameterValue': account_id},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
         ]
     )

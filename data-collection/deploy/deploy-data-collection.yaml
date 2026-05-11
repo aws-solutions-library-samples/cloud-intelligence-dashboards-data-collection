@@ -460,11 +460,31 @@ Resources:
                 - s3:ReplicateTags
                 - s3:GetObjectVersionTagging
                 - s3:ObjectOwnerOverrideToBucketOwner
-                - s3:List*
-                - s3:GetBucketVersioning
               Resource:
                 - !Sub "${S3Bucket.Arn}/kiro/*"
+              Condition:
+                # Scope to the dedicated replication role in each source account,
+                # so this statement only grants access to the expected replication identity,
+                # not the whole source account.
+                StringLike:
+                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
+            - !Ref AWS::NoValue
+          - !If
+            - DeployKiroUserActivityModule
+            - Sid: AllowKiroReplicationListBucket
+              Effect: Allow
+              Principal:
+                AWS: !Split
+                  - ","
+                  - !Ref KiroSourceAccountIds
+              Action:
+                - s3:GetBucketVersioning
+                - s3:GetReplicationConfiguration
+              Resource:
                 - !Sub "${S3Bucket.Arn}"
+              Condition:
+                StringLike:
+                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
             - !Ref AWS::NoValue
 
   # GlueDatabase: # GlueDatabase can be already created by crawler in previous versions. So we cannot create it here. See Init CustomResource
