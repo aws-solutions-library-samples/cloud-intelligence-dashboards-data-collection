@@ -450,18 +450,21 @@ Resources:
             - DeployKiroUserActivityModule
             - Sid: AllowKiroReplicationFromSourceAccounts
               Effect: Allow
-              Principal: "*"
+              Principal:
+                AWS: !Split
+                  - ","
+                  - !Ref KiroSourceAccountIds
               Action:
                 - s3:ReplicateObject
                 - s3:ReplicateDelete
                 - s3:ReplicateTags
                 - s3:GetObjectVersionTagging
                 - s3:ObjectOwnerOverrideToBucketOwner
+                - s3:List*
+                - s3:GetBucketVersioning
               Resource:
-                - !Sub "${S3Bucket.Arn}/kiro-activity/*"
-              Condition:
-                StringLike:
-                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
+                - !Sub "${S3Bucket.Arn}/kiro/*"
+                - !Sub "${S3Bucket.Arn}"
             - !Ref AWS::NoValue
 
   # GlueDatabase: # GlueDatabase can be already created by crawler in previous versions. So we cannot create it here. See Init CustomResource
@@ -1617,7 +1620,6 @@ Resources:
         GlueRoleARN: !GetAtt GlueRole.Arn
         ResourcePrefix: !Ref ResourcePrefix
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
-        LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
 
   ReferenceModule:
     Type: AWS::CloudFormation::Stack

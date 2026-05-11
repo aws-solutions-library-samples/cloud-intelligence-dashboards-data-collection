@@ -67,6 +67,9 @@ Resources:
             Exclusions:
               # UUID-formatted validation marker files (e.g. af0ef93c-30cd-4cae-802a-7482900cb356)
               - "**/KiroLogs/*-*-*-*-*"
+              # Legacy user activity report format with a different schema (Chat_AICodeLines, InlineChat_*, etc.)
+              # See https://kiro.dev/docs/enterprise/monitor-and-track/user-activity/
+              - "**/by_user_analytic/**"
               - "**/*.json"
               - "**/*.metadata"
               - "**/*.txt"
