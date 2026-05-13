@@ -279,7 +279,7 @@ Parameters:
     Default: 'no'
   IncludeQuickSightModule:
     Type: String
-    Description: Collects Amazon QuickSight users and gropus details
+    Description: Collects Amazon QuickSight users and groups details
     AllowedValues: ['yes', 'no']
     Default: 'no'
   IncludeServiceQuotasModule:
