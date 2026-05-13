@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034,SC2086,SC2181
 # Diagnostic script for CID data collection test failures
 # Checks CloudFormation stacks, Step Function executions, and Lambda errors
 

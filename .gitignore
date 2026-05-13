@@ -179,6 +179,7 @@ migration_log.csv
 data-collection/deploy/layers/*.zip
 data-collection/test/clean-html.py
 
+
 # AI-related folders. Allow some for standard sharing as well as local for experimentation
 # The intent here is to have Kiro redirect all steering to the .ai folder and retain only the minimal redirection in the repo
 .kiro/*
@@ -191,3 +192,8 @@ sqlite_mcp_server.db
 .ai/*
 !.ai/specs/
 
+
+# Local testing suites
+local-test
+.pylintrc
+localruntest.sh
