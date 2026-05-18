@@ -1203,12 +1203,10 @@ Resources:
                               print('deleted:', json.dumps(res))
                           except Exception as exc:
                               print('Exception on deletion:', str(exc))
-                      elif export['DataQuery'] != old_export['DataQuery']: # Data export do not support update of queries
-                          print(export['DataQuery'], '!=', old_export['DataQuery'])
-                          res = client.delete_export(ExportArn=old_export_arn)
-                          print('deleted:', json.dumps(res))
-                          res = client.create_export(Export=export)
-                          print('created:', json.dumps(res))
+                      elif export['DataQuery'] != old_export['DataQuery']:
+                          print('DataQuery changed:', export['DataQuery'], '!=', old_export['DataQuery'])
+                          res = client.update_export(ExportArn=old_export_arn, Export=export)
+                          print('updated:', json.dumps(res))
                       else:
                           res = client.update_export(ExportArn=old_export_arn, Export=export)
                           print('updated:', json.dumps(res))
