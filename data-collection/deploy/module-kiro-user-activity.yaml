@@ -1,5 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Kiro User Activity - Data Collection Account (Destination) v3.14.5
+
+Metadata:
+  cfn_nag:
+    rules_to_suppress:
+      - id: W2001
+        reason: "Parameters DestinationBucketARN, DataBucketsKmsKeysArns, and LambdaAnalyticsARN are required by the deployment framework but not used internally by this module (no Lambda; collection is via Glue Crawler using the framework-provided GlueRoleARN)"
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001  # Parameters required by deployment framework but not used internally
+
 Parameters:
   DatabaseName:
     Type: String
@@ -37,9 +48,6 @@ Parameters:
     Type: String
     Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if not encrypted with KMS."
     Default: ""
-
-Conditions:
-  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
 
 Resources:
   # Glue Crawler discovers Kiro user activity CSVs at:
