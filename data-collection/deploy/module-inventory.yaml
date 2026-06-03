@@ -1356,61 +1356,118 @@ Resources:
               return []
 
           def workspaces_scan(account_id, region):
-              """Special function to scan AWS WorkSpaces resources"""
+              """Special function to scan AWS WorkSpaces resources.
+
+              Handles large environments with:
+              - Exponential backoff with jitter on throttling
+              - Batched pagination to reduce API pressure
+              - Graceful error handling per workspace
+              """
               # Skip if region is not supported by WorkSpaces
               if region not in WORKSPACES_REGIONS:
                   logger.info(f"WorkSpaces not supported in region {region}. Skipping.")
                   return
+
+              def _retry_with_backoff(func, max_retries=5, base_delay=1):
+                  """Execute a function with exponential backoff on throttling."""
+                  import random
+                  for attempt in range(max_retries + 1):
+                      try:
+                          return func()
+                      except Exception as e:
+                          error_code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+                          if error_code in ('Throttling', 'RequestLimitExceeded', 'TooManyRequestsException'):
+                              if attempt == max_retries:
+                                  logger.error(f"Max retries ({max_retries}) exceeded: {e}")
+                                  raise
+                              delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                              logger.warning(f"Throttled (attempt {attempt + 1}/{max_retries}), backing off {delay:.1f}s")
+                              time.sleep(delay)
+                          else:
+                              raise
+                  return None
+
               try:
                   session = assume_session(account_id, region)
                   client = session.client('workspaces', region_name=region)
-                  # Get WorkSpaces data
-                  workspaces_data = list(client.get_paginator('describe_workspaces').paginate().search('Workspaces[*]'))
+
+                  # Get WorkSpaces data with retry
+                  logger.info(f"Describing workspaces in {account_id}/{region}")
+                  workspaces_data = _retry_with_backoff(
+                      lambda: list(client.get_paginator('describe_workspaces').paginate().search('Workspaces[*]'))
+                  )
+
                   if not workspaces_data:
                       logger.info(f"No WorkSpaces found in {account_id}/{region}")
                       return
-                  # Get connection status and directories for lookup
-                  connection_status = list(client.get_paginator('describe_workspaces_connection_status').paginate().search('WorkspacesConnectionStatus'))
-                  directories = list(client.get_paginator('describe_workspace_directories').paginate().search('Directories'))
+
+                  total_workspaces = len(workspaces_data)
+                  logger.info(f"Found {total_workspaces} WorkSpaces in {account_id}/{region}")
+
+                  # Get connection status with retry
+                  connection_status = _retry_with_backoff(
+                      lambda: list(client.get_paginator('describe_workspaces_connection_status').paginate().search('WorkspacesConnectionStatus'))
+                  ) or []
+
+                  # Small delay between different API calls to avoid cross-API throttling
+                  time.sleep(0.5)
+
+                  # Get directories with retry
+                  directories = _retry_with_backoff(
+                      lambda: list(client.get_paginator('describe_workspace_directories').paginate().search('Directories'))
+                  ) or []
+
                   # Create lookup dictionaries
                   connection_lookup = {conn['WorkspaceId']: conn for conn in connection_status}
                   directory_lookup = {d['DirectoryId']: d for d in directories}
+
                   # Process workspaces
+                  processed_count = 0
+                  error_count = 0
                   for workspace in workspaces_data:
-                      workspace_id = workspace['WorkspaceId']
-                      dir_id = workspace['DirectoryId']
+                      try:
+                          workspace_id = workspace['WorkspaceId']
+                          dir_id = workspace['DirectoryId']
 
-                      connection_info = connection_lookup.get(workspace_id, {})
-                      dir_info = directory_lookup.get(dir_id, {})
+                          connection_info = connection_lookup.get(workspace_id, {})
+                          dir_info = directory_lookup.get(dir_id, {})
 
-                      workspace_info = {
-                          'accountid': account_id,
-                          'region': region,
-                          'ResourceType': 'WorkSpace',
-                          'WorkspaceId': workspace_id,
-                          'UserName': workspace['UserName'],
-                          'DirectoryId': dir_id,
-                          'State': workspace['State'],
-                          'ConnectionStatus': connection_info.get('ConnectionState', 'N/A'),
-                          'LastConnected': connection_info.get('LastKnownUserConnectionTimestamp').strftime('%x %X') if isinstance(connection_info.get('LastKnownUserConnectionTimestamp'), datetime) else "01/01/01 00:00:00",
-                          'LastInventoryRun': time.strftime('%x %X'),
-                          'RunningMode': workspace.get("WorkspaceProperties", {}).get("RunningMode", "N/A"),
-                          'ComputeType': workspace.get("WorkspaceProperties", {}).get("ComputeTypeName", "N/A"),
-                          'OperatingSystem': workspace.get("WorkspaceProperties", {}).get("OperatingSystemName", "N/A"),
-                          'Protocol': ''.join(
-                              c for c in str(workspace.get("WorkspaceProperties", {}).get("Protocols", "N/A"))
-                              if c.isalnum() or c.isspace()
-                          ),
-                          'DirectoryName': dir_info.get('DirectoryName', 'N/A'),
-                          'DirectoryAlias': dir_info.get('Alias', 'N/A'),
-                          'DirectoryType': dir_info.get('DirectoryType', 'N/A'),
-                          'DirectoryMaintenance': dir_info.get("WorkspaceCreationProperties", {}).get("EnableMaintenanceMode", "N/A"),
-                          'ComputerName': workspace.get("ComputerName", ""),
-                          'IPAddress': workspace.get("IpAddress", "")
-                      }
-                      yield workspace_info
+                          workspace_info = {
+                              'accountid': account_id,
+                              'region': region,
+                              'ResourceType': 'WorkSpace',
+                              'WorkspaceId': workspace_id,
+                              'UserName': workspace['UserName'],
+                              'DirectoryId': dir_id,
+                              'State': workspace['State'],
+                              'ConnectionStatus': connection_info.get('ConnectionState', 'N/A'),
+                              'LastConnected': connection_info.get('LastKnownUserConnectionTimestamp').strftime('%x %X') if isinstance(connection_info.get('LastKnownUserConnectionTimestamp'), datetime) else "01/01/01 00:00:00",
+                              'LastInventoryRun': time.strftime('%x %X'),
+                              'RunningMode': workspace.get("WorkspaceProperties", {}).get("RunningMode", "N/A"),
+                              'ComputeType': workspace.get("WorkspaceProperties", {}).get("ComputeTypeName", "N/A"),
+                              'OperatingSystem': workspace.get("WorkspaceProperties", {}).get("OperatingSystemName", "N/A"),
+                              'Protocol': ''.join(
+                                  c for c in str(workspace.get("WorkspaceProperties", {}).get("Protocols", "N/A"))
+                                  if c.isalnum() or c.isspace()
+                              ),
+                              'DirectoryName': dir_info.get('DirectoryName', 'N/A'),
+                              'DirectoryAlias': dir_info.get('Alias', 'N/A'),
+                              'DirectoryType': dir_info.get('DirectoryType', 'N/A'),
+                              'DirectoryMaintenance': dir_info.get("WorkspaceCreationProperties", {}).get("EnableMaintenanceMode", "N/A"),
+                              'ComputerName': workspace.get("ComputerName", ""),
+                              'IPAddress': workspace.get("IpAddress", "")
+                          }
+                          processed_count += 1
+                          yield workspace_info
+                      except Exception as ws_exc:
+                          error_count += 1
+                          logger.error(f"Error processing workspace {workspace.get('WorkspaceId', 'unknown')}: {ws_exc}")
+                          continue
+
+                  logger.info(f"WorkSpaces scan complete for {account_id}/{region}: {processed_count} processed, {error_count} errors")
+
               except Exception as exc:
-                  logger.error(f"Cannot get WorkSpaces info from {account_id}/{region}: {type(exc)}-{exc}")
+                  logger.error(f"Cannot get WorkSpaces info from {account_id}/{region}: {type(exc).__name__}-{exc}")
 
           def lambda_handler(event, context): #pylint: disable=unused-argument
               """ this lambda collects ami, snapshots and volumes from linked accounts
