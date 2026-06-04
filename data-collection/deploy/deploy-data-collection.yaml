@@ -51,7 +51,7 @@ Metadata:
       - Label:
           default: 'Kiro User Activity Module Configuration'
         Parameters:
-          - KiroSourceAccountIds
+          - KiroSourceBuckets
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -121,8 +121,8 @@ Metadata:
         default: 'Include Marketplace Data Collection Module'
       IncludeKiroUserActivityModule:
         default: 'Include Kiro User Activity Data Collection Module'
-      KiroSourceAccountIds:
-        default: 'Kiro Source Account IDs (comma-separated)'
+      KiroSourceBuckets:
+        default: 'Kiro Source Bucket Names (comma-separated)'
 
 Mappings:
   RegionMap:
@@ -308,14 +308,13 @@ Parameters:
    Default: 'no'
   IncludeKiroUserActivityModule:
     Type: String
-    Description: "Crawls Kiro user activity report CSVs replicated from source accounts. Requires deploying module-kiro-user-activity-source.yaml in each account with a Kiro profile."
+    Description: "Collects Kiro user activity report CSVs from customer-managed source buckets (pull-based). Customers apply a bucket policy granting read access to the collection Lambda role."
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  KiroSourceAccountIds:
+  KiroSourceBuckets:
     Type: String
-    Description: "Comma-separated list of AWS Account IDs where Kiro profiles are enabled and user activity source stacks are deployed. Required if IncludeKiroUserActivityModule is yes."
+    Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Required if IncludeKiroUserActivityModule is yes. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
     Default: ""
-    AllowedPattern: ^(\d{12}(,\d{12})*)?$
   IncludeReferenceModule:
     Type: String
     Description: Collects Reference data for other modules
@@ -446,46 +445,6 @@ Resources:
             Condition:
               NumericLessThan:
                 s3:TlsVersion: 1.2
-          - !If
-            - DeployKiroUserActivityModule
-            - Sid: AllowKiroReplicationFromSourceAccounts
-              Effect: Allow
-              Principal:
-                AWS: !Split
-                  - ","
-                  - !Ref KiroSourceAccountIds
-              Action:
-                - s3:ReplicateObject
-                - s3:ReplicateDelete
-                - s3:ReplicateTags
-                - s3:GetObjectVersionTagging
-                - s3:ObjectOwnerOverrideToBucketOwner
-              Resource:
-                - !Sub "${S3Bucket.Arn}/kiro/*"
-              Condition:
-                # Scope to the dedicated replication role in each source account,
-                # so this statement only grants access to the expected replication identity,
-                # not the whole source account.
-                StringLike:
-                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
-            - !Ref AWS::NoValue
-          - !If
-            - DeployKiroUserActivityModule
-            - Sid: AllowKiroReplicationListBucket
-              Effect: Allow
-              Principal:
-                AWS: !Split
-                  - ","
-                  - !Ref KiroSourceAccountIds
-              Action:
-                - s3:GetBucketVersioning
-                - s3:GetReplicationConfiguration
-              Resource:
-                - !Sub "${S3Bucket.Arn}"
-              Condition:
-                StringLike:
-                  "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::*:role/${ResourcePrefix}kiro-user-activity-ReplicationRole"
-            - !Ref AWS::NoValue
 
   # GlueDatabase: # GlueDatabase can be already created by crawler in previous versions. So we cannot create it here. See Init CustomResource
   #   Type: "AWS::Glue::Database"
@@ -1631,15 +1590,16 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployKiroUserActivityModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-kiro-user-activity.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/module-kiro-user-activity.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
         DestinationBucketARN: !GetAtt S3Bucket.Arn
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        GlueRoleARN: !GetAtt GlueRole.Arn
         ResourcePrefix: !Ref ResourcePrefix
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        KiroSourceBuckets: !Ref KiroSourceBuckets
 
   ReferenceModule:
     Type: AWS::CloudFormation::Stack
