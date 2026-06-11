@@ -197,3 +197,4 @@ sqlite_mcp_server.db
 local-test
 .pylintrc
 localruntest.sh
+data-collection/utils/deploy-identity-center.sh

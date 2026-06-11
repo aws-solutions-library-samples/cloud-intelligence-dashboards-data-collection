@@ -20,6 +20,7 @@ Metadata:
           - IncludeComputeOptimizerModule
           - IncludeCostAnomalyModule
           - IncludeHealthEventsModule
+          - IncludeIdentityCenterModule
           - IncludeRightsizingModule
           - IncludeLicenseManagerModule
           - IncludeServiceQuotasModule
@@ -41,6 +42,8 @@ Metadata:
         default: "Include AWS Backup Collection Module"
       IncludeHealthEventsModule:
         default: "Include Health Events Module"
+      IncludeIdentityCenterModule:
+        default: "Include Identity Center Data Collection Module"
       IncludeLicenseManagerModule:
         default: "Include Marketplace Licensing Module"
       IncludeServiceQuotasModule:
@@ -94,6 +97,11 @@ Parameters:
     Description: Collects Service Quotas Information from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeIdentityCenterModule:
+    Type: String
+    Description: Collects AWS Identity Center data from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
   IncludeMarketplaceModule:
     Type: String
     Description: Collects Marketplace Agreement Information from your accounts
@@ -108,6 +116,7 @@ Conditions:
   EnableHealthEventsModule: !Equals [!Ref IncludeHealthEventsModule, "yes"]
   EnableLicenseManagerModule: !Equals [!Ref IncludeLicenseManagerModule, "yes"]
   EnableServiceQuotasModule: !Equals [!Ref IncludeServiceQuotasModule, "yes"]
+  EnableIdentityCenterModule: !Equals [!Ref IncludeIdentityCenterModule, "yes"]
   # EnableMarketplaceModule: !Equals [!Ref IncludeMarketplaceModule, "yes"]  # Currently unused
 
 Outputs:
@@ -143,6 +152,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}license-manager-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}RLS-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}identity-center-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -373,6 +383,34 @@ Resources:
               - "autoscaling:DescribeAccountLimits"
               - "route53:GetAccountLimit"
             Resource: "*" ## Policy is used for scanning a wide range of resources. All service quotas in this case. All of them.
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of resources"
+  IdentityCenterPolicy:
+    Type: "AWS::IAM::Policy"
+    Condition: EnableIdentityCenterModule
+    Properties:
+      PolicyName: IdentityCenterPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "identitystore:ListUsers"
+              - "identitystore:ListGroups"
+              - "identitystore:ListGroupMemberships"
+              - "sso:ListInstances"
+              - "sso:ListPermissionSets"
+              - "sso:DescribePermissionSet"
+              - "sso:ListAccountsForProvisionedPermissionSet"
+              - "sso:ListAccountAssignments"
+              - "sso:ListApplications"
+              - "sso:ListApplicationAssignments"
+            Resource: "*"
       Roles:
         - Ref: LambdaRole
     Metadata:
