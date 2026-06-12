@@ -15,7 +15,7 @@ Parameters:
   CFDataName:
     Type: String
     Description: The name of what this cf is doing.
-    Default: identity_center
+    Default: identity-center
   GlueRoleARN:
     Type: String
     Description: Arn for the Glue Crawler role
