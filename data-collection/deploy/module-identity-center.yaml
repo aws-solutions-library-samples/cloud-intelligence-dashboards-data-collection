@@ -15,7 +15,7 @@ Parameters:
   CFDataName:
     Type: String
     Description: The name of what this cf is doing.
-    Default: identity-center
+    Default: identity_center
   GlueRoleARN:
     Type: String
     Description: Arn for the Glue Crawler role
@@ -222,7 +222,7 @@ Resources:
                       user['collection_timestamp'] = collection_timestamp
 
                   json_lines = "\n".join(json.dumps(user, cls=DateTimeEncoder) for user in users)
-                  key = f"{PREFIX}/{PREFIX}-users-data/payer_id={payer_id}/users.json"
+                  key = f"{PREFIX}/{PREFIX}_users_data/payer_id={payer_id}/users.json"
                   s3_client.put_object(
                       Bucket=BUCKET_NAME,
                       Key=key,
@@ -253,7 +253,7 @@ Resources:
                       group['collection_timestamp'] = collection_timestamp
 
                   json_lines = "\n".join(json.dumps(group, cls=DateTimeEncoder) for group in groups)
-                  key = f"{PREFIX}/{PREFIX}-groups-data/payer_id={payer_id}/groups.json"
+                  key = f"{PREFIX}/{PREFIX}_groups_data/payer_id={payer_id}/groups.json"
                   s3_client.put_object(
                       Bucket=BUCKET_NAME,
                       Key=key,
@@ -292,7 +292,7 @@ Resources:
                   return 0
 
               json_lines = "\n".join(json.dumps(m, cls=DateTimeEncoder) for m in all_memberships)
-              key = f"{PREFIX}/{PREFIX}-memberships-data/payer_id={payer_id}/memberships.json"
+              key = f"{PREFIX}/{PREFIX}_memberships_data/payer_id={payer_id}/memberships.json"
               s3_client.put_object(
                   Bucket=BUCKET_NAME,
                   Key=key,
@@ -339,7 +339,7 @@ Resources:
                   return permission_set_arns
 
               json_lines = "\n".join(json.dumps(ps, cls=DateTimeEncoder) for ps in permission_sets)
-              key = f"{PREFIX}/{PREFIX}-permission-sets-data/payer_id={payer_id}/permission-sets.json"
+              key = f"{PREFIX}/{PREFIX}_permission_sets_data/payer_id={payer_id}/permission_sets.json"
               s3_client.put_object(
                   Bucket=BUCKET_NAME,
                   Key=key,
@@ -389,7 +389,7 @@ Resources:
                   return 0
 
               json_lines = "\n".join(json.dumps(a, cls=DateTimeEncoder) for a in all_assignments)
-              key = f"{PREFIX}/{PREFIX}-account-assignments-data/payer_id={payer_id}/account-assignments.json"
+              key = f"{PREFIX}/{PREFIX}_account_assignments_data/payer_id={payer_id}/account_assignments.json"
               s3_client.put_object(
                   Bucket=BUCKET_NAME,
                   Key=key,
@@ -438,7 +438,7 @@ Resources:
                   return 0
 
               json_lines = "\n".join(json.dumps(a, cls=DateTimeEncoder) for a in all_assignments)
-              key = f"{PREFIX}/{PREFIX}-application-assignments-data/payer_id={payer_id}/application-assignments.json"
+              key = f"{PREFIX}/{PREFIX}_application_assignments_data/payer_id={payer_id}/application_assignments.json"
               s3_client.put_object(
                   Bucket=BUCKET_NAME,
                   Key=key,
@@ -623,12 +623,12 @@ Resources:
       DatabaseName: !Ref DatabaseName
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-users-data/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-groups-data/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-memberships-data/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-permission-sets-data/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-assignments-data/"
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-assignments-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_users_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_groups_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_memberships_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_permission_sets_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_account_assignments_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_application_assignments_data/"
       Configuration: |
         {
           "Version": 1.0,
@@ -668,25 +668,57 @@ Resources:
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
+            - Name: identitystoreid
+              Type: string
             - Name: userid
               Type: string
             - Name: username
               Type: string
+            - Name: externalids
+              Type: array<struct<issuer:string,id:string>>
+            - Name: name
+              Type: struct<formatted:string,familyname:string,givenname:string,middlename:string,honorificprefix:string,honorificsuffix:string>
             - Name: displayname
               Type: string
-            - Name: name
+            - Name: nickname
+              Type: string
+            - Name: profileurl
               Type: string
             - Name: emails
+              Type: array<struct<value:string,type:string,primary:boolean>>
+            - Name: addresses
+              Type: array<struct<streetaddress:string,locality:string,region:string,postalcode:string,country:string,formatted:string,type:string,primary:boolean>>
+            - Name: phonenumbers
+              Type: array<struct<value:string,type:string,primary:boolean>>
+            - Name: usertype
               Type: string
-            - Name: identity_store_id
+            - Name: title
+              Type: string
+            - Name: preferredlanguage
+              Type: string
+            - Name: locale
+              Type: string
+            - Name: timezone
+              Type: string
+            - Name: userstatus
+              Type: string
+            - Name: createdat
+              Type: string
+            - Name: createdby
+              Type: string
+            - Name: updatedat
+              Type: string
+            - Name: updatedby
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-users-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_users_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "Addresses,CreatedAt,CreatedBy,DisplayName,Emails,ExternalIds,IdentityStoreId,Locale,Name,NickName,PhoneNumbers,PreferredLanguage,ProfileUrl,Timezone,Title,UpdatedAt,UpdatedBy,UserId,UserName,UserStatus,UserType,collection_timestamp,payer_id"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -708,17 +740,29 @@ Resources:
               Type: string
             - Name: displayname
               Type: string
+            - Name: externalids
+              Type: array<struct<issuer:string,id:string>>
             - Name: description
               Type: string
-            - Name: identity_store_id
+            - Name: createdat
+              Type: string
+            - Name: updatedat
+              Type: string
+            - Name: createdby
+              Type: string
+            - Name: updatedby
+              Type: string
+            - Name: identitystoreid
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-groups-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_groups_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "CreatedAt,CreatedBy,Description,DisplayName,ExternalIds,GroupId,IdentityStoreId,UpdatedAt,UpdatedBy,collection_timestamp,payer_id"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -748,7 +792,7 @@ Resources:
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-memberships-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_memberships_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
@@ -780,17 +824,19 @@ Resources:
               Type: string
             - Name: relaystate
               Type: string
-            - Name: createdate
+            - Name: createddate
               Type: string
             - Name: sso_instance_arn
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-permission-sets-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_permission_sets_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "CreatedDate,Description,Name,PermissionSetArn,RelayState,SessionDuration,collection_timestamp,payer_id,sso_instance_arn"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -820,11 +866,13 @@ Resources:
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-assignments-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_account_assignments_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "AccountId,PermissionSetArn,PrincipalId,PrincipalType,collection_timestamp,payer_id,sso_instance_arn"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -854,7 +902,7 @@ Resources:
               Type: string
             - Name: collection_timestamp
               Type: string
-          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-application-assignments-data/"
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_application_assignments_data/"
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
