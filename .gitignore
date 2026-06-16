@@ -25,7 +25,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.kiro/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -198,4 +197,3 @@ sqlite_mcp_server.db
 local-test
 .pylintrc
 localruntest.sh
-data-collection/utils/deploy-identity-center.sh
