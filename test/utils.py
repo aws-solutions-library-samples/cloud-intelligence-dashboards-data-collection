@@ -381,7 +381,7 @@ def trigger_update(account_id):
     region = session.region_name
     partition = session.get_partition_for_region(session.region_name)
     state_machine_arns = [
-         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}budgets-StateMachine',
+        f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}budgets-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}ecs-chargeback-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-OpensearchDomains-StateMachine',
         f'arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}inventory-ElasticacheClusters-StateMachine',
