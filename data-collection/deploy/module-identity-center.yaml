@@ -1,0 +1,912 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda to collect AWS Identity Center data and store in S3
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that exists or needs to be created to hold data information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold data information
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: identity_center
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+  ManagementRoleName:
+    Type: String
+    Description: The name of the IAM role that will be deployed in the management account which can retrieve AWS Identity Center data. KEEP THE SAME AS WHAT IS DEPLOYED INTO MANAGEMENT ACCOUNT
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${CFDataName}-ManagementAccount-LambdaRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${ManagementRoleName}"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "S3-Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          import datetime
+
+          import boto3
+          from botocore.exceptions import ClientError
+          from botocore.client import Config
+
+          BUCKET_NAME = os.environ["BUCKET_NAME"]
+          PREFIX = os.environ["PREFIX"]
+          ROLE_NAME = os.environ['ROLE_NAME']
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          RETRY_CONFIG = Config(
+              retries={'max_attempts': 10, 'mode': 'standard'}
+          )
+
+          s3_client = boto3.client('s3')
+
+          class DateTimeEncoder(json.JSONEncoder):
+              """Custom JSON encoder for datetime objects."""
+              def default(self, o):
+                  if isinstance(o, (datetime.datetime, datetime.date)):
+                      return o.isoformat()
+                  return super().default(o)
+
+          def discover_sso_instance(sso_admin_client, account_id):
+              """Discover the SSO instance in the given account.
+
+              Returns:
+                  tuple: (instance_arn, identity_store_id) if found
+                  None: if no instance exists or discovery fails
+              """
+              try:
+                  instances = []
+                  paginator = sso_admin_client.get_paginator('list_instances')
+                  for page in paginator.paginate():
+                      instances.extend(page.get('Instances', []))
+              except ClientError as exc:
+                  error_code = exc.response['Error']['Code']
+                  if error_code == 'AccessDeniedException':
+                      logger.error(
+                          "AccessDeniedException when calling ListInstances in account %s: %s",
+                          account_id, exc
+                      )
+                  else:
+                      logger.error(
+                          "ClientError (%s) when calling ListInstances in account %s: %s",
+                          error_code, account_id, exc
+                      )
+                  return None
+
+              if not instances:
+                  logger.warning(
+                      "No Identity Center instance found in account %s", account_id
+                  )
+                  return None
+
+              if len(instances) > 1:
+                  logger.warning(
+                      "Multiple Identity Center instances (%d) found in account %s, using the first one",
+                      len(instances), account_id
+                  )
+
+              first_instance = instances[0]
+              return (first_instance['InstanceArn'], first_instance['IdentityStoreId'])
+
+          def lambda_handler(event, context): #pylint: disable=W0613
+              logger.info(f"Event data {json.dumps(event)}")
+              account = event.get("account")
+              if not account:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually."
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              account = account if isinstance(account, dict) else json.loads(account)
+              return process_management_acc(account["account_id"])
+
+          def collect_users(identitystore_client, s3_client, payer_id, identity_store_id):
+              """Collect Identity Store users and write to S3 as JSONL."""
+              try:
+                  collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                  users = []
+                  paginator = identitystore_client.get_paginator('list_users')
+                  for page in paginator.paginate(IdentityStoreId=identity_store_id):
+                      users.extend(page.get('Users', []))
+
+                  if not users:
+                      logger.info("No users found in Identity Store %s", identity_store_id)
+                      return 0
+
+                  for user in users:
+                      user['payer_id'] = payer_id
+                      user['collection_timestamp'] = collection_timestamp
+
+                  json_lines = "\n".join(json.dumps(user, cls=DateTimeEncoder) for user in users)
+                  key = f"{PREFIX}/{PREFIX}_users_data/payer_id={payer_id}/users.json"
+                  s3_client.put_object(
+                      Bucket=BUCKET_NAME,
+                      Key=key,
+                      Body=json_lines,
+                      ContentType='application/json'
+                  )
+                  logger.info("Collected %d users to s3://%s/%s", len(users), BUCKET_NAME, key)
+                  return len(users)
+              except Exception as exc:
+                  logger.error("Failed to collect users for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  return 0
+
+          def collect_groups(identitystore_client, s3_client, payer_id, identity_store_id):
+              """Collect Identity Store groups and write to S3 as JSONL."""
+              try:
+                  collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                  groups = []
+                  paginator = identitystore_client.get_paginator('list_groups')
+                  for page in paginator.paginate(IdentityStoreId=identity_store_id):
+                      groups.extend(page.get('Groups', []))
+
+                  if not groups:
+                      logger.info("No groups found in Identity Store %s", identity_store_id)
+                      return []
+
+                  for group in groups:
+                      group['payer_id'] = payer_id
+                      group['collection_timestamp'] = collection_timestamp
+
+                  json_lines = "\n".join(json.dumps(group, cls=DateTimeEncoder) for group in groups)
+                  key = f"{PREFIX}/{PREFIX}_groups_data/payer_id={payer_id}/groups.json"
+                  s3_client.put_object(
+                      Bucket=BUCKET_NAME,
+                      Key=key,
+                      Body=json_lines,
+                      ContentType='application/json'
+                  )
+                  logger.info("Collected %d groups to s3://%s/%s", len(groups), BUCKET_NAME, key)
+                  return groups
+              except Exception as exc:
+                  logger.error("Failed to collect groups for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  return []
+
+          def collect_memberships(identitystore_client, s3_client, payer_id, groups, identity_store_id):
+              """Collect group memberships for all groups and write to S3 as JSONL."""
+              collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              all_memberships = []
+              for group in groups:
+                  group_id = group['GroupId']
+                  group_display_name = group.get('DisplayName', '')
+                  try:
+                      paginator = identitystore_client.get_paginator('list_group_memberships')
+                      for page in paginator.paginate(IdentityStoreId=identity_store_id, GroupId=group_id):
+                          memberships = page.get('GroupMemberships', [])
+                          for membership in memberships:
+                              membership['GroupId'] = group_id
+                              membership['GroupDisplayName'] = group_display_name
+                              membership['payer_id'] = payer_id
+                              membership['collection_timestamp'] = collection_timestamp
+                          all_memberships.extend(memberships)
+                  except Exception as exc:
+                      logger.error("Failed to collect memberships for group %s in account %s: %s: %s", group_id, payer_id, type(exc).__name__, exc)
+                      continue
+
+              if not all_memberships:
+                  logger.info("No memberships found across all groups for account %s", payer_id)
+                  return 0
+
+              json_lines = "\n".join(json.dumps(m, cls=DateTimeEncoder) for m in all_memberships)
+              key = f"{PREFIX}/{PREFIX}_memberships_data/payer_id={payer_id}/memberships.json"
+              s3_client.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json_lines,
+                  ContentType='application/json'
+              )
+              logger.info("Collected %d memberships to s3://%s/%s", len(all_memberships), BUCKET_NAME, key)
+              return len(all_memberships)
+
+          def collect_permission_sets(sso_admin_client, s3_client, payer_id, instance_arn):
+              """Collect SSO permission sets and write to S3 as JSONL."""
+              collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              permission_set_arns = []
+              try:
+                  paginator = sso_admin_client.get_paginator('list_permission_sets')
+                  for page in paginator.paginate(InstanceArn=instance_arn):
+                      permission_set_arns.extend(page.get('PermissionSets', []))
+              except Exception as exc:
+                  logger.error("Failed to list permission sets for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  return []
+
+              if not permission_set_arns:
+                  logger.info("No permission sets found for SSO instance %s", instance_arn)
+                  return []
+
+              permission_sets = []
+              for ps_arn in permission_set_arns:
+                  try:
+                      response = sso_admin_client.describe_permission_set(
+                          InstanceArn=instance_arn,
+                          PermissionSetArn=ps_arn
+                      )
+                      ps = response.get('PermissionSet', {})
+                      ps['sso_instance_arn'] = instance_arn
+                      ps['payer_id'] = payer_id
+                      ps['collection_timestamp'] = collection_timestamp
+                      permission_sets.append(ps)
+                  except Exception as exc:
+                      logger.error("Failed to describe permission set %s for account %s: %s: %s", ps_arn, payer_id, type(exc).__name__, exc)
+                      continue
+
+              if not permission_sets:
+                  logger.info("No permission sets described successfully for account %s", payer_id)
+                  return permission_set_arns
+
+              json_lines = "\n".join(json.dumps(ps, cls=DateTimeEncoder) for ps in permission_sets)
+              key = f"{PREFIX}/{PREFIX}_permission_sets_data/payer_id={payer_id}/permission_sets.json"
+              s3_client.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json_lines,
+                  ContentType='application/json'
+              )
+              logger.info("Collected %d permission sets to s3://%s/%s", len(permission_sets), BUCKET_NAME, key)
+              return permission_set_arns
+
+          def collect_account_assignments(sso_admin_client, s3_client, payer_id, permission_set_arns, instance_arn):
+              """Collect account assignments for all permission sets and write to S3 as JSONL."""
+              collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              all_assignments = []
+
+              for ps_arn in permission_set_arns:
+                  try:
+                      accounts_paginator = sso_admin_client.get_paginator('list_accounts_for_provisioned_permission_set')
+                      account_ids = []
+                      for page in accounts_paginator.paginate(InstanceArn=instance_arn, PermissionSetArn=ps_arn):
+                          account_ids.extend(page.get('AccountIds', []))
+                  except Exception as exc:
+                      logger.error("Failed to list accounts for permission set %s in account %s: %s: %s", ps_arn, payer_id, type(exc).__name__, exc)
+                      continue
+
+                  if not account_ids:
+                      continue
+
+                  for account_id in account_ids:
+                      try:
+                          assignments_paginator = sso_admin_client.get_paginator('list_account_assignments')
+                          for page in assignments_paginator.paginate(
+                              InstanceArn=instance_arn,
+                              AccountId=account_id,
+                              PermissionSetArn=ps_arn
+                          ):
+                              for assignment in page.get('AccountAssignments', []):
+                                  assignment['sso_instance_arn'] = instance_arn
+                                  assignment['payer_id'] = payer_id
+                                  assignment['collection_timestamp'] = collection_timestamp
+                                  all_assignments.append(assignment)
+                      except Exception as exc:
+                          logger.error("Failed to list account assignments for permission set %s and account %s in payer %s: %s: %s", ps_arn, account_id, payer_id, type(exc).__name__, exc)
+                          continue
+
+              if not all_assignments:
+                  logger.info("No account assignments found for account %s", payer_id)
+                  return 0
+
+              json_lines = "\n".join(json.dumps(a, cls=DateTimeEncoder) for a in all_assignments)
+              key = f"{PREFIX}/{PREFIX}_account_assignments_data/payer_id={payer_id}/account_assignments.json"
+              s3_client.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json_lines,
+                  ContentType='application/json'
+              )
+              logger.info("Collected %d account assignments to s3://%s/%s", len(all_assignments), BUCKET_NAME, key)
+              return len(all_assignments)
+
+          def collect_application_assignments(sso_admin_client, s3_client, payer_id, instance_arn):
+              """Collect application assignments for all applications and write to S3 as JSONL."""
+              collection_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              applications = []
+              try:
+                  paginator = sso_admin_client.get_paginator('list_applications')
+                  for page in paginator.paginate(InstanceArn=instance_arn):
+                      applications.extend(page.get('Applications', []))
+              except Exception as exc:
+                  logger.error("Failed to list applications for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  return 0
+
+              if not applications:
+                  logger.info("No applications found for SSO instance %s", instance_arn)
+                  return 0
+
+              all_assignments = []
+              for app in applications:
+                  app_arn = app.get('ApplicationArn', '')
+                  app_name = app.get('Name', '')
+                  try:
+                      assignments_paginator = sso_admin_client.get_paginator('list_application_assignments')
+                      for page in assignments_paginator.paginate(ApplicationArn=app_arn):
+                          for assignment in page.get('ApplicationAssignments', []):
+                              assignment['ApplicationArn'] = app_arn
+                              assignment['ApplicationName'] = app_name
+                              assignment['sso_instance_arn'] = instance_arn
+                              assignment['payer_id'] = payer_id
+                              assignment['collection_timestamp'] = collection_timestamp
+                              all_assignments.append(assignment)
+                  except Exception as exc:
+                      logger.warning("Failed to list application assignments for application %s in account %s: %s: %s", app_arn, payer_id, type(exc).__name__, exc)
+                      continue
+
+              if not all_assignments:
+                  logger.info("No application assignments found for account %s", payer_id)
+                  return 0
+
+              json_lines = "\n".join(json.dumps(a, cls=DateTimeEncoder) for a in all_assignments)
+              key = f"{PREFIX}/{PREFIX}_application_assignments_data/payer_id={payer_id}/application_assignments.json"
+              s3_client.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json_lines,
+                  ContentType='application/json'
+              )
+              logger.info("Collected %d application assignments to s3://%s/%s", len(all_assignments), BUCKET_NAME, key)
+              return len(all_assignments)
+
+          def process_management_acc(management_account_id):
+              """Assume role in management account and collect Identity Center data."""
+              region_name = os.environ['AWS_REGION']
+              partition = boto3.session.Session().get_partition_for_region(region_name=region_name)
+              role_arn = f"arn:{partition}:iam::{management_account_id}:role/{ROLE_NAME}"
+              logger.info(f"Assuming role {role_arn} in {management_account_id}")
+              try:
+                  cred = boto3.client('sts', region_name=region_name).assume_role(
+                      RoleArn=role_arn,
+                      RoleSessionName="data_collection"
+                  )['Credentials']
+              except Exception as exc:
+                  logger.error("Failed to assume role %s in account %s: %s: %s", role_arn, management_account_id, type(exc).__name__, exc)
+                  raise
+
+              sso_admin_client = boto3.client(
+                  'sso-admin',
+                  region_name=region_name,
+                  aws_access_key_id=cred['AccessKeyId'],
+                  aws_secret_access_key=cred['SecretAccessKey'],
+                  aws_session_token=cred['SessionToken'],
+                  config=RETRY_CONFIG,
+              )
+
+              # Discover SSO instance
+              discovery_result = discover_sso_instance(sso_admin_client, management_account_id)
+              if discovery_result is None:
+                  return {
+                      "statusCode": 200,
+                      "body": {
+                          "status": "SKIPPED",
+                          "reason": f"No Identity Center instance found in account {management_account_id}"
+                      }
+                  }
+
+              instance_arn, identity_store_id = discovery_result
+
+              identitystore_client = boto3.client(
+                  'identitystore',
+                  region_name=region_name,
+                  aws_access_key_id=cred['AccessKeyId'],
+                  aws_secret_access_key=cred['SecretAccessKey'],
+                  aws_session_token=cred['SessionToken'],
+                  config=RETRY_CONFIG,
+              )
+
+              payer_id = management_account_id
+              summary = {}
+
+              # Collect users
+              try:
+                  user_count = collect_users(identitystore_client, s3_client, payer_id, identity_store_id)
+                  summary['users'] = {'status': 'success', 'count': user_count}
+              except Exception as exc:
+                  logger.error("Failed to collect users for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['users'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+
+              # Collect groups
+              try:
+                  groups = collect_groups(identitystore_client, s3_client, payer_id, identity_store_id)
+                  summary['groups'] = {'status': 'success', 'count': len(groups)}
+              except Exception as exc:
+                  logger.error("Failed to collect groups for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['groups'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+                  groups = []
+
+              # Collect memberships
+              try:
+                  membership_count = collect_memberships(identitystore_client, s3_client, payer_id, groups, identity_store_id)
+                  summary['memberships'] = {'status': 'success', 'count': membership_count}
+              except Exception as exc:
+                  logger.error("Failed to collect memberships for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['memberships'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+
+              # Collect permission sets
+              try:
+                  permission_set_arns = collect_permission_sets(sso_admin_client, s3_client, payer_id, instance_arn)
+                  summary['permission_sets'] = {'status': 'success', 'count': len(permission_set_arns)}
+              except Exception as exc:
+                  logger.error("Failed to collect permission sets for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['permission_sets'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+                  permission_set_arns = []
+
+              # Collect account assignments
+              try:
+                  account_assignment_count = collect_account_assignments(sso_admin_client, s3_client, payer_id, permission_set_arns, instance_arn)
+                  summary['account_assignments'] = {'status': 'success', 'count': account_assignment_count}
+              except Exception as exc:
+                  logger.error("Failed to collect account assignments for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['account_assignments'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+
+              # Collect application assignments
+              try:
+                  app_assignment_count = collect_application_assignments(sso_admin_client, s3_client, payer_id, instance_arn)
+                  summary['application_assignments'] = {'status': 'success', 'count': app_assignment_count}
+              except Exception as exc:
+                  logger.error("Failed to collect application assignments for account %s: %s: %s", payer_id, type(exc).__name__, exc)
+                  summary['application_assignments'] = {'status': 'error', 'error': f"{type(exc).__name__}: {exc}"}
+
+              # Check if all collectors failed
+              if all(v['status'] == 'error' for v in summary.values()):
+                  raise Exception(f"All data type collections failed for account {payer_id}: {json.dumps(summary)}")
+
+              # Log counts for successful data types
+              for data_type, result in summary.items():
+                  if result['status'] == 'success':
+                      logger.info("Collected %s: %d records", data_type, result['count'])
+
+              return {"statusCode": 200, "body": summary}
+      Handler: 'index.lambda_handler'
+      MemorySize: 2688
+      Timeout: 900
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          ROLE_NAME: !Ref ManagementRoleName
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: "Payers"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  IdentityCenterCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_users_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_groups_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_memberships_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_permission_sets_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_account_assignments_data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_application_assignments_data/"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 6,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: LOG
+        DeleteBehavior: LOG
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
+
+  UsersTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_users_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: identitystoreid
+              Type: string
+            - Name: userid
+              Type: string
+            - Name: username
+              Type: string
+            - Name: externalids
+              Type: array<struct<issuer:string,id:string>>
+            - Name: name
+              Type: struct<formatted:string,familyname:string,givenname:string,middlename:string,honorificprefix:string,honorificsuffix:string>
+            - Name: displayname
+              Type: string
+            - Name: nickname
+              Type: string
+            - Name: profileurl
+              Type: string
+            - Name: emails
+              Type: array<struct<value:string,type:string,primary:boolean>>
+            - Name: addresses
+              Type: array<struct<streetaddress:string,locality:string,region:string,postalcode:string,country:string,formatted:string,type:string,primary:boolean>>
+            - Name: phonenumbers
+              Type: array<struct<value:string,type:string,primary:boolean>>
+            - Name: usertype
+              Type: string
+            - Name: title
+              Type: string
+            - Name: preferredlanguage
+              Type: string
+            - Name: locale
+              Type: string
+            - Name: timezone
+              Type: string
+            - Name: userstatus
+              Type: string
+            - Name: createdat
+              Type: string
+            - Name: createdby
+              Type: string
+            - Name: updatedat
+              Type: string
+            - Name: updatedby
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_users_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "Addresses,CreatedAt,CreatedBy,DisplayName,Emails,ExternalIds,IdentityStoreId,Locale,Name,NickName,PhoneNumbers,PreferredLanguage,ProfileUrl,Timezone,Title,UpdatedAt,UpdatedBy,UserId,UserName,UserStatus,UserType,collection_timestamp,payer_id"
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+
+  GroupsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_groups_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: groupid
+              Type: string
+            - Name: displayname
+              Type: string
+            - Name: externalids
+              Type: array<struct<issuer:string,id:string>>
+            - Name: description
+              Type: string
+            - Name: createdat
+              Type: string
+            - Name: updatedat
+              Type: string
+            - Name: createdby
+              Type: string
+            - Name: updatedby
+              Type: string
+            - Name: identitystoreid
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_groups_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "CreatedAt,CreatedBy,Description,DisplayName,ExternalIds,GroupId,IdentityStoreId,UpdatedAt,UpdatedBy,collection_timestamp,payer_id"
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+
+  MembershipsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_memberships_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: membershipid
+              Type: string
+            - Name: groupid
+              Type: string
+            - Name: groupdisplayname
+              Type: string
+            - Name: memberid
+              Type: string
+            - Name: identity_store_id
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_memberships_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+
+  PermissionSetsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_permission_sets_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: permissionsetarn
+              Type: string
+            - Name: name
+              Type: string
+            - Name: description
+              Type: string
+            - Name: sessionduration
+              Type: string
+            - Name: relaystate
+              Type: string
+            - Name: createddate
+              Type: string
+            - Name: sso_instance_arn
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_permission_sets_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "CreatedDate,Description,Name,PermissionSetArn,RelayState,SessionDuration,collection_timestamp,payer_id,sso_instance_arn"
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+
+  AccountAssignmentsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_account_assignments_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: accountid
+              Type: string
+            - Name: permissionsetarn
+              Type: string
+            - Name: principaltype
+              Type: string
+            - Name: principalid
+              Type: string
+            - Name: sso_instance_arn
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_account_assignments_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "AccountId,PermissionSetArn,PrincipalId,PrincipalType,collection_timestamp,payer_id,sso_instance_arn"
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+
+  ApplicationAssignmentsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: !Sub "${CFDataName}_application_assignments_data"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        StorageDescriptor:
+          Columns:
+            - Name: applicationarn
+              Type: string
+            - Name: applicationname
+              Type: string
+            - Name: principaltype
+              Type: string
+            - Name: principalid
+              Type: string
+            - Name: sso_instance_arn
+              Type: string
+            - Name: collection_timestamp
+              Type: string
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_application_assignments_data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
