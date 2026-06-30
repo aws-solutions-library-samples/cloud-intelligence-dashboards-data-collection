@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Setup for Daily automated Athena query execution for S3 cost data extraction with monitoring'
+
+Parameters:
+
+  DataCollectionAccountId:
+    Type: String
+    Default: ''
+    Description: 'AWS account ID to grant cross-account S3 access'
+
+
+Resources:
+  # --- TARGET PATH RESOURCES ---
+  TargetDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  TargetDataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TargetDataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CrossAccountLambdaAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${DataCollectionAccountId}:root'
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !GetAtt TargetDataBucket.Arn
+              - !Sub '${TargetDataBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*Lambda*'
+                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*lambda*'
+          
+          - Sid: AllowRead
+            Effect: Allow
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'            
+            Action: 
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning            
+            Resource:
+              - !GetAtt TargetDataBucket.Arn
+              - !Sub '${TargetDataBucket.Arn}/*'
+              
+          
+  
+Outputs:  
+  AggregateBucketName:
+    Description: Bucket with aggregate Data Exports
+    Value: !Ref TargetDataBucket
+    Export: { Name: 'cid-DataExports-Bucket'}  
