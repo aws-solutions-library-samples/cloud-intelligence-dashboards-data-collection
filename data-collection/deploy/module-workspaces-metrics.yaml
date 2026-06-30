@@ -108,7 +108,11 @@ Resources:
               Type: string
             - Name: CPUUsage
               Type: int
+            - Name: CPUMax
+              Type: int
             - Name: MemoryUsage
+              Type: int
+            - Name: MemoryMax
               Type: int
             - Name: InSessionLatency
               Type: int
@@ -118,13 +122,15 @@ Resources:
               Type: int
             - Name: UpTime
               Type: int
+            - Name: UserConnected
+              Type: int
           InputFormat: org.apache.hadoop.mapred.TextInputFormat
           Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
           OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
-              paths: WorkspaceId,UserName,State,BundleId,DirectoryId,ComputerName,RunningMode,RootVolumeSizeGib,UserVolumeSizeGib,ComputeTypeName,Environment,Schedule,Application,Project,Timestamp,CPUUsage,MemoryUsage,InSessionLatency,UserVolumeDiskUsage,RootVolumeDiskUsage,UpTime
+              paths: WorkspaceId,UserName,State,BundleId,DirectoryId,ComputerName,RunningMode,RootVolumeSizeGib,UserVolumeSizeGib,ComputeTypeName,Environment,Schedule,Application,Project,Timestamp,CPUUsage,CPUMax,MemoryUsage,MemoryMax,InSessionLatency,UserVolumeDiskUsage,RootVolumeDiskUsage,UpTime,UserConnected
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -202,13 +208,16 @@ Resources:
         - x86_64
       Code:
         ZipFile: |
-          """ Scan workspaces cloudwatch metrics and store info to s3 bucket
+          """ Scan workspaces cloudwatch metrics and store info to s3 bucket.
+          Uses batch GetMetricData API with exponential backoff for large environments.
+          Falls back to GetMetricStatistics if GetMetricData is not authorized.
           """
           import os
           import json
+          import time
+          import random
           import logging
-          from datetime import datetime, timedelta, date
-          import concurrent.futures
+          from datetime import datetime, timedelta
 
           import boto3
           from botocore.exceptions import ClientError
@@ -221,11 +230,23 @@ Resources:
           REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
           ROLE_SESSION_NAME = os.environ['ROLE_SESSION_NAME']
           METRIC_NAMESPACE = 'AWS/WorkSpaces'
-          METRIC_PERIOD = 3600
-          BATCH_SIZE = 100  # Number of workspaces to process in each batch
+          METRIC_PERIOD = 86400  # 24 hours (daily average, aligned with daily schedule)
+          BATCH_SIZE = 100  # Number of workspaces to store per S3 file
+          # GetMetricData supports up to 500 metric queries per call.
+          # 9 queries per workspace (7 avg + 2 max) means we can query ~55 workspaces per call.
+          METRIC_BATCH_SIZE = 55  # Workspaces per GetMetricData call (55 * 9 = 495 queries)
+          MAX_RETRIES = 5
+          BASE_DELAY = 1  # Base delay in seconds for exponential backoff
+          LAMBDA_TIMEOUT_BUFFER = 30  # Reserve 30s before timeout for cleanup
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          # Lambda context reference for timeout checks
+          _lambda_context = None
+
+          # Flag to track whether GetMetricData is available (set to False on AccessDenied)
+          _use_batch_api = True
 
           functions = {
               'workspaces': {
@@ -247,8 +268,12 @@ Resources:
               'InSessionLatency',
               'UserVolumeDiskUsage',
               'RootVolumeDiskUsage',
-              'UpTime'
+              'UpTime',
+              'UserConnected'
           ]
+
+          # Metrics that also need Maximum stat for rightsizing analysis
+          METRICS_WITH_MAX = ['CPUUsage', 'MemoryUsage']
 
           TAGS_TO_RETRIEVE = [
               'Environment',
@@ -256,6 +281,39 @@ Resources:
               'Application',
               'Project',
           ]
+
+          def get_remaining_time_ms():
+              """Get remaining Lambda execution time in milliseconds."""
+              if _lambda_context:
+                  return _lambda_context.get_remaining_time_in_millis()
+              return float('inf')
+
+          def has_time_remaining():
+              """Check if enough time remains for another batch."""
+              remaining_ms = get_remaining_time_ms()
+              return remaining_ms > (LAMBDA_TIMEOUT_BUFFER * 1000)
+
+          def retry_with_backoff(func, *args, **kwargs):
+              """Execute a function with exponential backoff and jitter on throttling.
+
+              Retries on Throttling, RequestLimitExceeded, and TooManyRequestsException.
+              Does NOT retry on AccessDenied - re-raises immediately.
+              """
+              for attempt in range(MAX_RETRIES + 1):
+                  try:
+                      return func(*args, **kwargs)
+                  except ClientError as e:
+                      error_code = e.response['Error']['Code']
+                      if error_code in ('Throttling', 'RequestLimitExceeded', 'TooManyRequestsException'):
+                          if attempt == MAX_RETRIES:
+                              logger.error(f"Max retries ({MAX_RETRIES}) exceeded for throttling: {e}")
+                              raise
+                          delay = (BASE_DELAY * (2 ** attempt)) + random.uniform(0, 1)
+                          logger.warning(f"Throttled (attempt {attempt + 1}/{MAX_RETRIES}), backing off {delay:.1f}s")
+                          time.sleep(delay)
+                      else:
+                          raise
+              return None
 
           def format_workspace(workspace):
               output = {
@@ -266,18 +324,14 @@ Resources:
                   "DirectoryId": workspace.get("DirectoryId", ""),
                   "ComputerName": workspace.get("ComputerName", ""),
               }
-              # Flatten WorkspaceProperties into individual columns
               if "WorkspaceProperties" in workspace:
                   props = workspace.get("WorkspaceProperties", {})
-                  # Add each property as a top-level field
                   output["RunningMode"] = props.get("RunningMode", "")
                   output["RunningModeAutoStopTimeoutInMinutes"] = props.get("RunningModeAutoStopTimeoutInMinutes", 0)
                   output["RootVolumeSizeGib"] = props.get("RootVolumeSizeGib", 0)
                   output["UserVolumeSizeGib"] = props.get("UserVolumeSizeGib", 0)
                   output["ComputeTypeName"] = props.get("ComputeTypeName", "")
                   output["OperatingSystemName"] = props.get("OperatingSystemName", "")
-
-                  # Handle the Protocols array
                   if "Protocols" in props:
                       output["Protocols"] = ",".join(props.get("Protocols", []))
 
@@ -289,60 +343,189 @@ Resources:
                   for tags_required in TAGS_TO_RETRIEVE:
                       filtered_tags[tags_required] = tags[tags_required] if tags_required in tags else ''
               output["tags"] = filtered_tags
+              output.update(filtered_tags)
               return output
 
-          def get_metric_data(cwclient, metric_name, workspace_id, start_time, end_time):
-              try:
-                  response = cwclient.get_metric_statistics(
-                      Namespace=METRIC_NAMESPACE,
-                      MetricName=metric_name,
-                      Dimensions=[{'Name': 'WorkspaceId', 'Value': workspace_id}],
-                      StartTime=start_time,
-                      EndTime=end_time,
-                      Period=METRIC_PERIOD,
-                      Statistics=['Average']
-                  )
+          # === Batch API path (GetMetricData) - preferred ===
 
-                  if response['Datapoints']:
+          def build_metric_queries(workspace_ids):
+              """Build GetMetricData queries for a batch of workspace IDs."""
+              queries = []
+              query_map = {}
+              query_counter = 0
+              for idx, ws_id in enumerate(workspace_ids):
+                  for metric_name in METRICS_FOR_WORKSPACES:
+                      query_id = f"m{idx}_avg_{query_counter}"
+                      queries.append({
+                          'Id': query_id,
+                          'MetricStat': {
+                              'Metric': {
+                                  'Namespace': METRIC_NAMESPACE,
+                                  'MetricName': metric_name,
+                                  'Dimensions': [{'Name': 'WorkspaceId', 'Value': ws_id}]
+                              },
+                              'Period': METRIC_PERIOD,
+                              'Stat': 'Average'
+                          },
+                          'ReturnData': True
+                      })
+                      query_map[query_id] = (ws_id, metric_name, 'Average')
+                      query_counter += 1
+
+                      if metric_name in METRICS_WITH_MAX:
+                          query_id = f"m{idx}_max_{query_counter}"
+                          queries.append({
+                              'Id': query_id,
+                              'MetricStat': {
+                                  'Metric': {
+                                      'Namespace': METRIC_NAMESPACE,
+                                      'MetricName': metric_name,
+                                      'Dimensions': [{'Name': 'WorkspaceId', 'Value': ws_id}]
+                                  },
+                                  'Period': METRIC_PERIOD,
+                                  'Stat': 'Maximum'
+                              },
+                              'ReturnData': True
+                          })
+                          query_map[query_id] = (ws_id, metric_name, 'Maximum')
+                          query_counter += 1
+
+              return queries, query_map
+
+          def fetch_batch_metrics(cwclient, workspace_ids, start_time, end_time):
+              """Fetch metrics using GetMetricData batch API. Raises ClientError on AccessDenied."""
+              if not workspace_ids:
+                  return {}
+
+              queries, query_map = build_metric_queries(workspace_ids)
+              results = {ws_id: {} for ws_id in workspace_ids}
+
+              paginator_params = {
+                  'MetricDataQueries': queries,
+                  'StartTime': start_time,
+                  'EndTime': end_time,
+                  'ScanBy': 'TimestampDescending'
+              }
+
+              def _get_metric_data():
+                  return cwclient.get_metric_data(**paginator_params)
+
+              response = retry_with_backoff(_get_metric_data)
+              all_results = response.get('MetricDataResults', [])
+
+              while response.get('NextToken'):
+                  paginator_params['NextToken'] = response['NextToken']
+                  response = retry_with_backoff(_get_metric_data)
+                  all_results.extend(response.get('MetricDataResults', []))
+
+              for result in all_results:
+                  query_id = result['Id']
+                  if query_id in query_map and result.get('Values'):
+                      ws_id, metric_name, stat = query_map[query_id]
+                      key = f"{metric_name}Max" if stat == 'Maximum' else metric_name
+                      results[ws_id][key] = result['Values'][0]
+
+              return results
+
+          # === Fallback path (GetMetricStatistics) - slower but no extra permissions needed ===
+
+          def get_metric_statistics_single(cwclient, metric_name, workspace_id, start_time, end_time, stat='Average'):
+              """Fetch a single metric using GetMetricStatistics (legacy fallback)."""
+              try:
+                  def _call():
+                      return cwclient.get_metric_statistics(
+                          Namespace=METRIC_NAMESPACE,
+                          MetricName=metric_name,
+                          Dimensions=[{'Name': 'WorkspaceId', 'Value': workspace_id}],
+                          StartTime=start_time,
+                          EndTime=end_time,
+                          Period=METRIC_PERIOD,
+                          Statistics=[stat]
+                      )
+                  response = retry_with_backoff(_call)
+                  if response and response.get('Datapoints'):
                       latest_datapoint = max(response['Datapoints'], key=lambda x: x['Timestamp'])
-                      return {
-                          'Timestamp': latest_datapoint['Timestamp'].isoformat(),
-                          'Average': latest_datapoint['Average']
-                      }
-                  else:
-                      logger.info(f"No datapoints found for metric {metric_name} and workspace {workspace_id}")
-                      return None
-
+                      return latest_datapoint.get(stat, 0)
+                  return 0
               except ClientError as e:
-                  logger.error(f"Error getting metric data for {workspace_id}: {e}")
-                  return None
+                  logger.error(f"Error getting metric {metric_name}/{stat} for {workspace_id}: {e}")
+                  return 0
               except Exception as e:
-                  logger.error(f"Unexpected error getting metric data for {workspace_id}: {e}")
-                  return None
+                  logger.error(f"Unexpected error getting metric {metric_name}/{stat} for {workspace_id}: {e}")
+                  return 0
 
-          def process_single_workspace(workspace, cwclient, start_time, end_time):
-              try:
-                  datapoints = {}
-                  for metric in METRICS_FOR_WORKSPACES:
-                      metric_data = get_metric_data(cwclient, metric, workspace['WorkspaceId'],
-                                                  start_time, end_time)
-                      if metric_data:
-                          datapoints[metric] = metric_data
+          def fetch_metrics_fallback(cwclient, workspace_ids, start_time, end_time):
+              """Fetch metrics using per-workspace GetMetricStatistics (fallback)."""
+              results = {ws_id: {} for ws_id in workspace_ids}
+              for ws_id in workspace_ids:
+                  if not has_time_remaining():
+                      logger.warning("Approaching timeout during fallback metrics collection")
+                      break
+                  for metric_name in METRICS_FOR_WORKSPACES:
+                      avg_val = get_metric_statistics_single(cwclient, metric_name, ws_id, start_time, end_time, 'Average')
+                      results[ws_id][metric_name] = avg_val
+                      if metric_name in METRICS_WITH_MAX:
+                          max_val = get_metric_statistics_single(cwclient, metric_name, ws_id, start_time, end_time, 'Maximum')
+                          results[ws_id][f"{metric_name}Max"] = max_val
+                  time.sleep(0.1)
+              return results
 
-                  workspace_data = format_workspace(workspace)
-                  workspace_data.update({
-                      'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                      'CPUUsage': int(round(datapoints['CPUUsage']['Average'])) if 'CPUUsage' in datapoints else 0,
-                      'MemoryUsage': int(round(datapoints['MemoryUsage']['Average'])) if 'MemoryUsage' in datapoints else 0,
-                      'InSessionLatency': int(round(datapoints['InSessionLatency']['Average'])) if 'InSessionLatency' in datapoints else 0,
-                      'UserVolumeDiskUsage': int(round(datapoints['UserVolumeDiskUsage']['Average'])) if 'UserVolumeDiskUsage' in datapoints else 0,
-                      'RootVolumeDiskUsage': int(round(datapoints['RootVolumeDiskUsage']['Average'])) if 'RootVolumeDiskUsage' in datapoints else 0,
-                      'UpTime': int(round(datapoints['UpTime']['Average'])) if 'UpTime' in datapoints else 0
-                  })
-                  return workspace_data
-              except Exception as e:
-                  logger.error(f"Error processing workspace {workspace.get('WorkspaceId', 'unknown')}: {str(e)}")
-                  return None
+          # === Main processing logic ===
+
+          def process_workspace_batch(workspaces, cwclient, start_time, end_time):
+              """Process a batch of workspaces. Tries GetMetricData first, falls back to GetMetricStatistics."""
+              global _use_batch_api
+
+              workspace_ids = [ws['WorkspaceId'] for ws in workspaces]
+
+              if _use_batch_api:
+                  try:
+                      metrics_map = fetch_batch_metrics(cwclient, workspace_ids, start_time, end_time)
+                  except ClientError as e:
+                      error_code = e.response['Error']['Code']
+                      if error_code in ('AccessDenied', 'AccessDeniedException'):
+                          logger.warning(
+                              "GetMetricData not authorized. Falling back to GetMetricStatistics. "
+                              "To improve performance, add cloudwatch:GetMetricData to your multi-account role."
+                          )
+                          _use_batch_api = False
+                          metrics_map = fetch_metrics_fallback(cwclient, workspace_ids, start_time, end_time)
+                      else:
+                          logger.error(f"Error in batch GetMetricData: {e}")
+                          metrics_map = {ws_id: {} for ws_id in workspace_ids}
+                  except Exception as e:
+                      logger.error(f"Unexpected error in batch GetMetricData: {e}")
+                      metrics_map = {ws_id: {} for ws_id in workspace_ids}
+              else:
+                  metrics_map = fetch_metrics_fallback(cwclient, workspace_ids, start_time, end_time)
+
+              processed = []
+              failed = []
+
+              for workspace in workspaces:
+                  try:
+                      ws_id = workspace['WorkspaceId']
+                      ws_metrics = metrics_map.get(ws_id, {})
+
+                      workspace_data = format_workspace(workspace)
+                      workspace_data.update({
+                          'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                          'CPUUsage': int(round(ws_metrics.get('CPUUsage', 0))),
+                          'CPUMax': int(round(ws_metrics.get('CPUUsageMax', 0))),
+                          'MemoryUsage': int(round(ws_metrics.get('MemoryUsage', 0))),
+                          'MemoryMax': int(round(ws_metrics.get('MemoryUsageMax', 0))),
+                          'InSessionLatency': int(round(ws_metrics.get('InSessionLatency', 0))),
+                          'UserVolumeDiskUsage': int(round(ws_metrics.get('UserVolumeDiskUsage', 0))),
+                          'RootVolumeDiskUsage': int(round(ws_metrics.get('RootVolumeDiskUsage', 0))),
+                          'UpTime': int(round(ws_metrics.get('UpTime', 0))),
+                          'UserConnected': int(round(ws_metrics.get('UserConnected', 0)))
+                      })
+                      processed.append(workspace_data)
+                  except Exception as e:
+                      logger.error(f"Error formatting workspace {workspace.get('WorkspaceId', 'unknown')}: {e}")
+                      failed.append(workspace.get('WorkspaceId', 'unknown'))
+
+              return processed, failed
 
           def store_data_to_s3(data, region, service, path, filename, accountID, payer_id):
               if not data:
@@ -381,78 +564,94 @@ Resources:
                   except Exception as e:
                       logger.warning(f"Failed to remove temporary file {local_file}: {str(e)}")
 
+          def describe_workspaces_with_retry(client):
+              """Paginate describe_workspaces with retry on throttling."""
+              workspaces = []
+              paginator = client.get_paginator('describe_workspaces')
+              try:
+                  def _paginate():
+                      return list(paginator.paginate())
+                  pages = retry_with_backoff(_paginate)
+                  for page in pages:
+                      workspaces.extend(page.get('Workspaces', []))
+              except ClientError as e:
+                  logger.error(f"Error describing workspaces: {e}")
+                  raise
+              return workspaces
+
           def get_workspace_stats(cwclient, client, s3client, region, service, path, filename, accountID, payer_id):
               try:
-                  paginator = client.get_paginator('describe_workspaces')
                   end_time = datetime.utcnow()
-                  start_time = end_time - timedelta(hours=1)
+                  start_time = end_time - timedelta(hours=24)
+
+                  logger.info(f"Describing workspaces in region {region}")
+                  all_workspaces = describe_workspaces_with_retry(client)
+                  total_workspaces = len(all_workspaces)
+                  logger.info(f"Found {total_workspaces} workspaces in region {region}")
+
+                  if total_workspaces == 0:
+                      logger.info(f"No workspaces found in region {region}")
+                      return
 
                   workspace_data_list = []
                   failed_workspaces = []
-                  current_batch = []
                   batch_counter = 0
+                  s3_batch = []
 
-                  for page in paginator.paginate():
-                      for workspace in page['Workspaces']:
+                  for i in range(0, total_workspaces, METRIC_BATCH_SIZE):
+                      if not has_time_remaining():
+                          logger.warning(f"Approaching Lambda timeout. Processed {len(workspace_data_list)}/{total_workspaces} workspaces. Saving progress.")
+                          break
+
+                      batch = all_workspaces[i:i + METRIC_BATCH_SIZE]
+                      logger.info(f"Processing metric batch {i // METRIC_BATCH_SIZE + 1} ({len(batch)} workspaces, {i + len(batch)}/{total_workspaces} total)")
+
+                      processed, failed = process_workspace_batch(batch, cwclient, start_time, end_time)
+                      workspace_data_list.extend(processed)
+                      failed_workspaces.extend(failed)
+                      s3_batch.extend(processed)
+
+                      while len(s3_batch) >= BATCH_SIZE:
+                          chunk = s3_batch[:BATCH_SIZE]
+                          s3_batch = s3_batch[BATCH_SIZE:]
                           try:
-                              workspace_data = process_single_workspace(workspace, cwclient, start_time, end_time)
-
-                              if workspace_data:
-                                  current_batch.append(workspace_data)
-                              else:
-                                  failed_workspaces.append(workspace.get('WorkspaceId', 'unknown'))
-
-                              # When batch size is reached, store the batch
-                              if len(current_batch) >= BATCH_SIZE:
-                                  try:
-                                      store_data_to_s3(
-                                          current_batch,
-                                          region,
-                                          service,
-                                          path,
-                                          f"workspaces_batch_{batch_counter}.json",
-                                          accountID,
-                                          payer_id
-                                      )
-                                      workspace_data_list.extend(current_batch)
-                                      current_batch = []
-                                      batch_counter += 1
-                                  except Exception as e:
-                                      logger.error(f"Error storing batch to S3: {str(e)}")
-                                      failed_workspaces.extend([w.get('WorkspaceId', 'unknown') for w in current_batch])
-                                      current_batch = []
-
+                              store_data_to_s3(
+                                  chunk, region, service, path,
+                                  f"workspaces_batch_{batch_counter}.json",
+                                  accountID, payer_id
+                              )
+                              batch_counter += 1
                           except Exception as e:
-                              logger.error(f"Error processing workspace {workspace.get('WorkspaceId', 'unknown')}: {str(e)}")
-                              failed_workspaces.append(workspace.get('WorkspaceId', 'unknown'))
+                              logger.error(f"Error storing batch {batch_counter} to S3: {e}")
+                              failed_workspaces.extend([w.get('WorkspaceId', 'unknown') for w in chunk])
 
-                  # Store any remaining workspaces in the final batch
-                  if current_batch:
+                      if i + METRIC_BATCH_SIZE < total_workspaces:
+                          time.sleep(0.5)
+
+                  if s3_batch:
                       try:
                           store_data_to_s3(
-                              current_batch,
-                              region,
-                              service,
-                              path,
+                              s3_batch, region, service, path,
                               f"workspaces_batch_final.json",
-                              accountID,
-                              payer_id
+                              accountID, payer_id
                           )
-                          workspace_data_list.extend(current_batch)
                       except Exception as e:
-                          logger.error(f"Error storing final batch to S3: {str(e)}")
-                          failed_workspaces.extend([w.get('WorkspaceId', 'unknown') for w in current_batch])
+                          logger.error(f"Error storing final batch to S3: {e}")
+                          failed_workspaces.extend([w.get('WorkspaceId', 'unknown') for w in s3_batch])
 
-                  # Create and store processing summary
                   total_processed = len(workspace_data_list)
                   total_failed = len(failed_workspaces)
 
                   logger.info(f"Processing complete for region {region}:")
-                  logger.info(f"Successfully processed: {total_processed} workspaces")
-                  logger.info(f"Failed to process: {total_failed} workspaces")
+                  logger.info(f"  Total workspaces found: {total_workspaces}")
+                  logger.info(f"  Successfully processed: {total_processed}")
+                  logger.info(f"  Failed to process: {total_failed}")
+                  logger.info(f"  API mode: {'GetMetricData (batch)' if _use_batch_api else 'GetMetricStatistics (fallback)'}")
 
                   if failed_workspaces:
-                      logger.warning(f"Failed WorkspaceIds: {', '.join(failed_workspaces)}")
+                      logger.warning(f"Failed WorkspaceIds: {', '.join(failed_workspaces[:50])}")
+                      if len(failed_workspaces) > 50:
+                          logger.warning(f"  ...and {len(failed_workspaces) - 50} more")
 
               except Exception as e:
                   logger.error(f"Error in main workspace processing loop for region {region}: {str(e)}")
@@ -474,6 +673,9 @@ Resources:
               )
 
           def lambda_handler(event, context):
+              global _lambda_context, _use_batch_api
+              _lambda_context = context
+              _use_batch_api = True  # Reset for each invocation
               logger.info(f"Event: {event}")
               try:
                   account = json.loads(event["account"])
@@ -492,6 +694,9 @@ Resources:
               for service in functions.keys():
                   if functions[service]['regional']:
                       for region in REGIONS:
+                          if not has_time_remaining():
+                              logger.warning(f"Approaching Lambda timeout, stopping before region {region}")
+                              return "Partial"
                           logger.info(f"Processing region {region}")
                           client = assume_role(account_id, functions[service]['api'], region)
                           for f in functions[service]['functions']:
@@ -532,7 +737,7 @@ Resources:
 
       Handler: index.lambda_handler
       MemorySize: 5376
-      Timeout: 300
+      Timeout: 900
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
@@ -628,7 +833,8 @@ Resources:
           "WorkspaceId" , "UserName" , "State" , "BundleId" , "DirectoryId" ,
           "ComputerName" , "RunningMode" , "RootVolumeSizeGib" ,
           "UserVolumeSizeGib" , "accountid" , "region" , "CPUUsage" ,
-          "MemoryUsage" , "InSessionLatency" , "UserVolumeDiskUsage" ,
-          "RootVolumeDiskUsage" , "UpTime"
+          "CPUMax" , "MemoryUsage" , "MemoryMax" , "InSessionLatency" ,
+          "UserVolumeDiskUsage" , "RootVolumeDiskUsage" , "UpTime" ,
+          "UserConnected"
         FROM
           "workspaces_metrics_data"

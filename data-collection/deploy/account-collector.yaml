@@ -287,12 +287,20 @@ Resources:
 
             def iterate_accounts_with_filter(filter_accounts):
                 """ same as iterate_linked_accounts but with additional filtering
-                filter_accounts: a comma separated list of accounts OR '*'
+                filter_accounts: a comma separated list of accounts OR '*' or empty string
+                If filter_accounts is empty or '*', returns all linked accounts in the org.
+                If filter_accounts is a comma separated list of account IDs, returns only those accounts.
                 """
-                for acc in iterate_linked_accounts():
-                    account_id = json.loads(acc['account'])['account_id']
-                    if account_id in filter_accounts.split(',') or filter_accounts.strip() == '*':
-                        yield acc
+                if not filter_accounts or filter_accounts.strip() == '' or filter_accounts.strip() == '*':
+                    logger.info("No specific accounts filter provided, collecting from all linked accounts in organization")
+                    yield from iterate_linked_accounts()
+                else:
+                    filter_list = [a.strip() for a in filter_accounts.split(',') if a.strip()]
+                    logger.info(f"Filtering accounts to specified list: {filter_list}")
+                    for acc in iterate_linked_accounts():
+                        account_id = json.loads(acc['account'])['account_id']
+                        if account_id in filter_list:
+                            yield acc
 
             def get_defined_list(bucket, key):
                 """Try to load a predefined account list from S3 as JSON or CSV."""
