@@ -44,6 +44,7 @@ List of modules and objects collected:
 | `quicksight`                 |  [Amazon QuickSight](https://aws.amazon.com/quicksight/)    | Data Collection Account | Collects QuickSight User and Group information in the Data Collection Account only |
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
 | `marketplace`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace data and terms |
+| `kiro-user-activity`          |   [Kiro](https://kiro.dev/) | Source Accounts (via S3 replication) | Collects per-user Kiro usage reports (messages, credits, overage). Requires deploying `module-kiro-user-activity-source.yaml` in each account where a Kiro profile is enabled, then configuring the Kiro console to write reports to the created bucket. |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
 
 ### Deployment Overview

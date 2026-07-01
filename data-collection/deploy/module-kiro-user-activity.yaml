@@ -1,0 +1,481 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kiro User Activity - Pull-based Data Collection v3.14.6
+
+Metadata:
+  cfn_nag:
+    rules_to_suppress:
+      - id: W2001
+        reason: "Parameters DestinationBucketARN and LambdaAnalyticsARN are required by the deployment framework"
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to hold the Kiro user activity table
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that holds collected data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that holds collected data
+  CFDataName:
+    Type: String
+    Description: The name of what this CloudFormation stack is doing.
+    Default: kiro-user-activity
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created.
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+    Default: ""
+  Schedule:
+    Type: String
+    Description: "EventBridge schedule for data collection. Default runs daily at 3AM UTC (after Kiro generates reports at 2AM UTC)."
+    Default: "cron(0 3 * * ? *)"
+  KiroSourceBuckets:
+    Type: String
+    Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
+    AllowedPattern: ^[a-z0-9][a-z0-9.\-]*(,[a-z0-9][a-z0-9.\-]*)*$
+  KiroActivityPrefix:
+    Type: String
+    Description: "S3 prefix where Kiro writes user activity reports in each source bucket (include trailing slash)."
+    Default: "kiro/"
+    AllowedPattern: ^.+\/$
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for source data buckets. Comma separated list, no spaces. Keep empty if source buckets are not encrypted with KMS."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  HasAnalyticsLambda: !Not [ !Equals [ !Ref LambdaAnalyticsARN, "" ] ]
+
+Outputs:
+  LambdaRoleArn:
+    Description: "ARN of the Lambda execution role — customers reference this in their bucket policy"
+    Value: !GetAtt LambdaRole.Arn
+  LambdaRoleName:
+    Description: "Name of the Lambda execution role"
+    Value: !Ref LambdaRole
+  CollectorLambdaArn:
+    Description: "ARN of the collector Lambda function"
+    Value: !GetAtt KiroCollectorLambda.Arn
+  TableName:
+    Description: "Athena table name for the Kiro user activity data"
+    Value: !Sub "${DatabaseName}.kiro_user_activity"
+  BucketPolicyExample:
+    Description: "Example bucket policy statement for customers to apply to their Kiro log buckets"
+    Value: !Sub |
+      {
+        "Sid": "AllowCIDKiroDataCollection",
+        "Effect": "Allow",
+        "Principal": {"AWS": "${LambdaRole.Arn}"},
+        "Action": ["s3:GetObject", "s3:ListBucket"],
+        "Resource": ["arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME", "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME/*"]
+      }
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: "S3WriteDestination"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/kiro-user-activity/*"
+        - PolicyName: "S3ReadSourceBuckets"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*/*"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:Decrypt"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name so customers can reference it in their bucket policies"
+          - id: W11
+            reason: "S3 read is scoped to the S3 service in this partition because the source bucket list is customer-supplied and variable; actual object access is gated by bucket policies on the source side"
+
+  KiroCollectorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: "Pulls Kiro user activity CSVs from source buckets into the central data collection bucket"
+      Runtime: python3.13
+      Architectures: [arm64]
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import io
+          import csv
+          import boto3
+          from datetime import datetime, timedelta, timezone
+
+          s3 = boto3.client('s3')
+
+          DEST_BUCKET = os.environ['DEST_BUCKET']
+          SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
+          SOURCE_PREFIX = os.environ['SOURCE_PREFIX']
+          DEST_PREFIX = 'kiro-user-activity'
+
+          # Validation marker pattern: UUID-formatted filenames
+          def is_validation_marker(key):
+              parts = key.split('/')
+              filename = parts[-1] if parts else key
+              segments = filename.split('-')
+              return (len(segments) == 5 and
+                      all(len(s) in (8, 4, 4, 4, 12) for s in segments) and
+                      all(c in '0123456789abcdef-' for c in filename))
+
+          def extract_account_id_from_path(key):
+              """Extract account ID from Kiro path: {prefix}AWSLogs/{accountId}/KiroLogs/..."""
+              parts = key.split('/')
+              try:
+                  aws_logs_idx = parts.index('AWSLogs')
+                  return parts[aws_logs_idx + 1]
+              except (ValueError, IndexError):
+                  return 'unknown'
+
+          def extract_region_from_path(key):
+              """Extract region from Kiro path: .../user_report/{region}/{year}/..."""
+              parts = key.split('/')
+              try:
+                  report_idx = parts.index('user_report')
+                  return parts[report_idx + 1]
+              except (ValueError, IndexError):
+                  return 'unknown'
+
+          def discover_account_ids(bucket, prefix):
+              """List account IDs under {prefix}AWSLogs/ using delimiter for shallow listing."""
+              account_ids = []
+              try:
+                  resp = s3.list_objects_v2(
+                      Bucket=bucket,
+                      Prefix=f'{prefix}AWSLogs/',
+                      Delimiter='/'
+                  )
+                  for cp in resp.get('CommonPrefixes', []):
+                      # e.g. "kiro/AWSLogs/123456789012/"
+                      parts = cp['Prefix'].rstrip('/').split('/')
+                      account_ids.append(parts[-1])
+              except Exception as e:
+                  print(f'Error discovering accounts in {bucket}: {e}')
+              return account_ids
+
+          def discover_regions(bucket, prefix, account_id):
+              """List regions under .../user_report/ using delimiter."""
+              regions = []
+              try:
+                  resp = s3.list_objects_v2(
+                      Bucket=bucket,
+                      Prefix=f'{prefix}AWSLogs/{account_id}/KiroLogs/user_report/',
+                      Delimiter='/'
+                  )
+                  for cp in resp.get('CommonPrefixes', []):
+                      parts = cp['Prefix'].rstrip('/').split('/')
+                      regions.append(parts[-1])
+              except Exception:
+                  pass
+              return regions
+
+          # Base columns that are always present (order matters for CSV output)
+          BASE_COLUMNS = [
+              'date', 'userid', 'client_type', 'chat_conversations',
+              'credits_used', 'overage_cap', 'overage_credits_used',
+              'overage_enabled', 'profileid', 'subscription_tier',
+              'total_messages', 'new_user', 'user_email',
+              'account_id', 'region', 'model_name', 'model_messages'
+          ]
+
+          def transform_csv(original_text, account_id, region):
+              """Parse CSV, pivot model columns into rows, append account_id/region."""
+              reader = csv.DictReader(io.StringIO(original_text))
+              headers = reader.fieldnames or []
+
+              # Identify model columns (pattern: *_messages but not total_messages)
+              model_cols = [h for h in headers if h.endswith('_messages') and h != 'Total_Messages' and h.lower() != 'total_messages']
+
+              output = io.StringIO()
+              writer = csv.DictWriter(output, fieldnames=BASE_COLUMNS, extrasaction='ignore')
+              writer.writeheader()
+
+              row_count = 0
+              for row in reader:
+                  base = {
+                      'date': row.get('Date', ''),
+                      'userid': row.get('UserId', ''),
+                      'client_type': row.get('Client_Type', ''),
+                      'chat_conversations': row.get('Chat_Conversations', ''),
+                      'credits_used': row.get('Credits_Used', ''),
+                      'overage_cap': row.get('Overage_Cap', ''),
+                      'overage_credits_used': row.get('Overage_Credits_Used', ''),
+                      'overage_enabled': row.get('Overage_Enabled', ''),
+                      'profileid': row.get('ProfileId', ''),
+                      'subscription_tier': row.get('Subscription_Tier', ''),
+                      'total_messages': row.get('Total_Messages', ''),
+                      'new_user': row.get('New_User', ''),
+                      'user_email': row.get('User_Email', ''),
+                      'account_id': account_id,
+                      'region': region,
+                  }
+
+                  if model_cols:
+                      for col in model_cols:
+                          msg_count = row.get(col, '0')
+                          if not msg_count or msg_count == '0':
+                              continue
+                          # Convert column name to friendly model name
+                          # e.g. "claude_opus_4.8_messages" -> "claude_opus_4.8"
+                          model_name = col.replace('_messages', '').replace('_', ' ').title()
+                          base['model_name'] = model_name
+                          base['model_messages'] = msg_count
+                          writer.writerow(base)
+                          row_count += 1
+                  else:
+                      base['model_name'] = 'unknown'
+                      base['model_messages'] = row.get('Total_Messages', '0')
+                      writer.writerow(base)
+                      row_count += 1
+
+              return output.getvalue(), row_count
+
+          def lambda_handler(event, context):
+              now = datetime.now(timezone.utc)
+              dates_to_collect = [
+                  now - timedelta(days=1),
+                  now,
+              ]
+
+              total_copied = 0
+              total_rows = 0
+              errors = []
+
+              for source_bucket in SOURCE_BUCKETS:
+                  source_bucket = source_bucket.strip()
+                  if not source_bucket:
+                      continue
+
+                  account_ids = discover_account_ids(source_bucket, SOURCE_PREFIX)
+                  if not account_ids:
+                      errors.append(f'{source_bucket}: no account IDs found under {SOURCE_PREFIX}AWSLogs/')
+                      continue
+
+                  for account_id in account_ids:
+                      regions = discover_regions(source_bucket, SOURCE_PREFIX, account_id)
+
+                      for region in regions:
+                          for target_date in dates_to_collect:
+                              year = target_date.strftime('%Y')
+                              month = target_date.strftime('%m')
+                              day = target_date.strftime('%d')
+
+                              date_prefix = f'{SOURCE_PREFIX}AWSLogs/{account_id}/KiroLogs/user_report/{region}/{year}/{month}/{day}/'
+
+                              try:
+                                  paginator = s3.get_paginator('list_objects_v2')
+                                  for page in paginator.paginate(Bucket=source_bucket, Prefix=date_prefix):
+                                      for obj in page.get('Contents', []):
+                                          key = obj['Key']
+
+                                          if not key.endswith('.csv'):
+                                              continue
+                                          if is_validation_marker(key):
+                                              continue
+
+                                          filename = key.split('/')[-1]
+                                          dest_key = f'{DEST_PREFIX}/year={year}/month={month}/day={day}/{account_id}_{region}_{filename}'
+
+                                          try:
+                                              response = s3.get_object(Bucket=source_bucket, Key=key)
+                                              original = response['Body'].read().decode('utf-8')
+                                              transformed, rows = transform_csv(original, account_id, region)
+                                              if rows > 0:
+                                                  s3.put_object(
+                                                      Bucket=DEST_BUCKET,
+                                                      Key=dest_key,
+                                                      Body=transformed.encode('utf-8'),
+                                                      ContentType='text/csv'
+                                                  )
+                                                  total_copied += 1
+                                                  total_rows += rows
+                                          except Exception as e:
+                                              errors.append(f'{source_bucket}/{key}: {str(e)}')
+
+                              except Exception as e:
+                                  errors.append(f'Error listing {source_bucket}/{date_prefix}: {str(e)}')
+
+              result = {
+                  'statusCode': 200,
+                  'total_files_copied': total_copied,
+                  'total_rows_written': total_rows,
+                  'errors': errors[:20]
+              }
+              print(json.dumps(result))
+              return result
+      Handler: 'index.lambda_handler'
+      MemorySize: 256
+      Timeout: 600
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DEST_BUCKET: !Ref DestinationBucket
+          SOURCE_BUCKETS: !Ref KiroSourceBuckets
+          SOURCE_PREFIX: !Ref KiroActivityPrefix
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC — accessing S3 over public endpoints"
+          - id: W92
+            reason: "No need for reserved concurrency — runs once daily"
+
+  LambdaSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      Description: "Daily trigger for Kiro user activity data collection"
+      ScheduleExpression: !Ref Schedule
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 30
+      Target:
+        Arn: !GetAtt KiroCollectorLambda.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  LambdaSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KiroCollectorLambda
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt LambdaSchedule.Arn
+
+  # Explicit Glue Table with partition projection — no crawler needed.
+  # The Lambda writes CSVs to Hive-style paths:
+  #   s3://{bucket}/kiro-user-activity/year=YYYY/month=MM/day=DD/{account_id}_{region}_{filename}.csv
+  KiroUserActivityTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: kiro_user_activity
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: csv
+          skip.header.line.count: "1"
+          projection.enabled: "true"
+          projection.year.type: integer
+          projection.year.range: "2024,2030"
+          projection.month.type: integer
+          projection.month.range: "1,12"
+          projection.month.digits: "2"
+          projection.day.type: integer
+          projection.day.range: "1,31"
+          projection.day.digits: "2"
+          storage.location.template: !Sub "s3://${DestinationBucket}/kiro-user-activity/year=${!year}/month=${!month}/day=${!day}/"
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/kiro-user-activity/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+          Columns:
+            - Name: date
+              Type: string
+            - Name: userid
+              Type: string
+            - Name: client_type
+              Type: string
+            - Name: chat_conversations
+              Type: string
+            - Name: credits_used
+              Type: string
+            - Name: overage_cap
+              Type: string
+            - Name: overage_credits_used
+              Type: string
+            - Name: overage_enabled
+              Type: string
+            - Name: profileid
+              Type: string
+            - Name: subscription_tier
+              Type: string
+            - Name: total_messages
+              Type: string
+            - Name: new_user
+              Type: string
+            - Name: user_email
+              Type: string
+            - Name: account_id
+              Type: string
+            - Name: region
+              Type: string
+            - Name: model_name
+              Type: string
+            - Name: model_messages
+              Type: string
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Condition: HasAnalyticsLambda
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
