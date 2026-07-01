@@ -114,9 +114,14 @@ Resources:
             Statement:
               - Effect: "Allow"
                 Action:
-                  - "s3:GetObject"
                   - "s3:ListBucket"
-                Resource: "*"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*/*"
         - !If
           - NeedDataBucketsKms
           - PolicyName: "KMS"
@@ -134,7 +139,7 @@ Resources:
           - id: W28
             reason: "Need explicit name so customers can reference it in their bucket policies"
           - id: W11
-            reason: "S3 read access requires wildcard because source bucket list is dynamic; actual access is gated by bucket policies on the source side"
+            reason: "S3 read is scoped to the S3 service in this partition because the source bucket list is customer-supplied and variable; actual object access is gated by bucket policies on the source side"
 
   KiroCollectorLambda:
     Type: AWS::Lambda::Function
