@@ -459,11 +459,13 @@ Resources:
               Type: string
             - Name: user_email
               Type: string
-            - Name: claude_opus_4_8_messages
-              Type: string
             - Name: account_id
               Type: string
             - Name: region
+              Type: string
+            - Name: model_name
+              Type: string
+            - Name: model_messages
               Type: string
 
   AnalyticsExecutor:
