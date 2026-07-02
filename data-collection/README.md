@@ -45,6 +45,7 @@ List of modules and objects collected:
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
 | `marketplace`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace data and terms |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
+| `instances-details`                 |   Various services      | Data Collection Account | Collects EC2, RDS, ElastiCache, and OpenSearch available instances details |
 
 ### Deployment Overview
 

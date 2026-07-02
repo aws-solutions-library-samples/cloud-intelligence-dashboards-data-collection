@@ -251,6 +251,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeMarketplaceModule',        'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeInstancesDetailsModule',   'ParameterValue': "yes"},
         ]
     )
 
@@ -430,6 +431,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}identity-center-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}instances-details-StateMachine",
     ]
     lambda_arns = []
     lambda_norun_arns = []
