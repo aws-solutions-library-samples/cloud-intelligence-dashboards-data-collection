@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Kiro User Activity - Pull-based Data Collection v3.14.6
+Description: Kiro User Activity - Pull-based Data Collection v3.14.5
 
 Metadata:
   cfn_nag:
