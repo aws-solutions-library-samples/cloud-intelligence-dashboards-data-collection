@@ -91,9 +91,9 @@
           "Key": "{% $MAP_KEY %}"
         }
       },
-      "MaxConcurrency": 1,
+      "MaxConcurrency": ${MaxConcurrentBatches},
       "ItemBatcher": {
-        "MaxItemsPerBatch": 500,
+        "MaxItemsPerBatch": ${ItemsPerBatch},
         "BatchInput": {
           "account": "{% $ACCOUNT %}",
           "ingestion_time": "{% $INGEST_TIME %}",
