@@ -1600,7 +1600,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployKiroUserActivityModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/module-kiro-user-activity.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-kiro-user-activity.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DestinationBucket: !Ref S3Bucket
