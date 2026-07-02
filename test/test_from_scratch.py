@@ -363,6 +363,10 @@ def test_elasticache_reserved_cache_nodes_offerings_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_elasticache_reserved_cache_nodes_offerings" LIMIT 10;')
     assert len(data) > 0, 'elasticache_reserved_cache_nodes_offerings is empty'
 
+def test_kiro_user_activity_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."kiro_user_activity" LIMIT 10;')
+    assert len(data) > 0, 'kiro_user_activity is empty'
+
 if __name__ == '__main__':
     pytest.params = {}
     if '--no-teardown' in sys.argv:

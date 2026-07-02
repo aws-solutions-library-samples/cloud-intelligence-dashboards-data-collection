@@ -55,6 +55,19 @@ except Exception as e:
     exit 0
 fi
 
+# create the CFN template bucket if it does not exist yet
+region=$(aws configure get region)
+region=${region:-us-east-1}
+if ! aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+    echo "Creating template bucket $bucket in $region"
+    if [ "$region" = "us-east-1" ]; then
+        aws s3api create-bucket --bucket "$bucket" --region "$region"
+    else
+        aws s3api create-bucket --bucket "$bucket" --region "$region" \
+            --create-bucket-configuration LocationConstraint="$region"
+    fi
+fi
+
 # build lambda layers
 ./data-collection/utils/layer-utils/boto3-layer-build.sh
 

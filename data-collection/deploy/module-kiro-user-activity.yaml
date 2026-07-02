@@ -411,8 +411,9 @@ Resources:
           classification: csv
           skip.header.line.count: "1"
           projection.enabled: "true"
-          projection.year.type: integer
-          projection.year.range: "2024,2030"
+          projection.year.type: date
+          projection.year.format: "yyyy"
+          projection.year.range: "2024,NOW"
           projection.month.type: integer
           projection.month.range: "1,12"
           projection.month.digits: "2"
