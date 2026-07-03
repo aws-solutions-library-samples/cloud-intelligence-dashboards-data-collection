@@ -44,7 +44,6 @@ Metadata:
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
           - IncludeReferenceModule          
-          - IncludeInstancesDetailsModule
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -118,8 +117,6 @@ Metadata:
         default: 'Include Identity Center Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
-      IncludeInstancesDetailsModule:
-        default: 'Include Instances Details Data Collection Module'
 
 Mappings:
   RegionMap:
@@ -314,11 +311,6 @@ Parameters:
     Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  IncludeInstancesDetailsModule:
-    Type: String
-    Description: Collects instances details data
-    AllowedValues: ['yes', 'no']
-    Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -343,7 +335,6 @@ Conditions:
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
-  DeployInstancesDetailsModule: !Equals [ !Ref IncludeInstancesDetailsModule, "yes"]
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -1608,25 +1599,6 @@ Resources:
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
-
-  InstancesDetailsModule:
-    Type: AWS::CloudFormation::Stack
-    Condition: DeployInstancesDetailsModule
-    Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-instances-details.yaml"
-      Parameters:
-        DatabaseName: !Ref DatabaseName
-        DestinationBucket: !Ref S3Bucket
-        DestinationBucketARN: !GetAtt S3Bucket.Arn
-        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
-        Schedule: !Ref ScheduleFrequent
-        GlueRoleARN: !GetAtt GlueRole.Arn
-        ResourcePrefix: !Ref ResourcePrefix
-        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
-        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
-        StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
-        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
-        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
   ReferenceModule:
     Type: AWS::CloudFormation::Stack

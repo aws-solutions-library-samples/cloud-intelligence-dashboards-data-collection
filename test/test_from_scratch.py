@@ -272,9 +272,17 @@ def test_marketplace_data(athena): #marketplace - specific
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."agreements" LIMIT 10;')
     assert len(data) > 0, 'marketplace data is empty'
 
-def test_instances_details_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."instances_details" LIMIT 10;')
-    assert len(data) > 0, 'instances_details is empty'
+def test_pricing_elasticache_instances(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_pricing_elasticache_instances" LIMIT 10;')
+    assert len(data) > 0, 'pricing_elasticache_instances is empty'
+
+def test_pricing_rds_instances(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_pricing_rds_instances" LIMIT 10;')
+    assert len(data) > 0, 'pricing_rds_instances is empty'
+
+def test_pricing_opensearch_instances(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_pricing_opensearch_instances" LIMIT 10;')
+    assert len(data) > 0, 'pricing_opensearch_instances is empty'
 
 def test_content_of_summary_not_empty(s3):
     s3_client = boto3.client('s3')
