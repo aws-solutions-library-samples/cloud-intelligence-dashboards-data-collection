@@ -1,5 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Kiro User Activity - Pull-based Data Collection v3.14.5
+Transform: 'AWS::LanguageExtensions'
 
 Metadata:
   cfn_nag:
@@ -39,9 +40,8 @@ Parameters:
     Description: "EventBridge schedule for data collection. Default runs daily at 3AM UTC (after Kiro generates reports at 2AM UTC)."
     Default: "cron(0 3 * * ? *)"
   KiroSourceBuckets:
-    Type: String
+    Type: CommaDelimitedList
     Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
-    AllowedPattern: ^[a-z0-9][a-z0-9.\-]*(,[a-z0-9][a-z0-9.\-]*)*$
   KiroActivityPrefix:
     Type: String
     Description: "S3 prefix where Kiro writes user activity reports in each source bucket (include trailing slash)."
@@ -108,20 +108,6 @@ Resources:
                   - "s3:PutObject"
                 Resource:
                   - !Sub "${DestinationBucketARN}/kiro-user-activity/*"
-        - PolicyName: "S3ReadSourceBuckets"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "s3:ListBucket"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::*"
-              - Effect: "Allow"
-                Action:
-                  - "s3:GetObject"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::*/*"
         - !If
           - NeedDataBucketsKms
           - PolicyName: "KMS"
@@ -138,8 +124,28 @@ Resources:
         rules_to_suppress:
           - id: W28
             reason: "Need explicit name so customers can reference it in their bucket policies"
-          - id: W11
-            reason: "S3 read is scoped to the S3 service in this partition because the source bucket list is customer-supplied and variable; actual object access is gated by bucket policies on the source side"
+
+  'Fn::ForEach::KiroSourceReadPolicies':
+    - Bucket
+    - !Ref KiroSourceBuckets
+    - 'KiroSourceReadPolicy&{Bucket}':
+        Type: AWS::IAM::RolePolicy
+        Properties:
+          RoleName: !Ref LambdaRole
+          PolicyName: !Sub "S3Read-${Bucket}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/${KiroActivityPrefix}*"
 
   KiroCollectorLambda:
     Type: AWS::Lambda::Function
@@ -365,7 +371,7 @@ Resources:
       Environment:
         Variables:
           DEST_BUCKET: !Ref DestinationBucket
-          SOURCE_BUCKETS: !Ref KiroSourceBuckets
+          SOURCE_BUCKETS: !Join [ ',', !Ref KiroSourceBuckets ]
           SOURCE_PREFIX: !Ref KiroActivityPrefix
     Metadata:
       cfn_nag:
