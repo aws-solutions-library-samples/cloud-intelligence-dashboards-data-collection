@@ -73,15 +73,25 @@ Outputs:
     Description: "Athena table name for the Kiro user activity data"
     Value: !Sub "${DatabaseName}.kiro_user_activity"
   BucketPolicyExample:
-    Description: "Example bucket policy statement for customers to apply to their Kiro log buckets"
+    Description: "Example bucket policy statements for customers to apply to their Kiro log buckets. GetObject is scoped to the Kiro prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy."
     Value: !Sub |
-      {
-        "Sid": "AllowCIDKiroDataCollection",
-        "Effect": "Allow",
-        "Principal": {"AWS": "${LambdaRole.Arn}"},
-        "Action": ["s3:GetObject", "s3:ListBucket"],
-        "Resource": ["arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME", "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME/*"]
-      }
+      [
+        {
+          "Sid": "AllowCIDKiroDataCollectionRead",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:GetObject",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME/${KiroActivityPrefix}*"
+        },
+        {
+          "Sid": "AllowCIDKiroDataCollectionList",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:ListBucket",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME",
+          "Condition": {"StringLike": {"s3:prefix": "${KiroActivityPrefix}*"}}
+        }
+      ]
 
 Resources:
   LambdaRole:
