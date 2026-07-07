@@ -249,8 +249,28 @@ Resources:
               'account_id', 'region', 'model_name', 'model_messages'
           ]
 
+          # Per-user/day aggregate fields. The Kiro report has ONE row per user per
+          # day; these columns describe the whole day, not any single model (credits
+          # are billed per user, messages are the user's daily total, etc.). When we
+          # pivot the per-model columns into rows we must NOT repeat these on every
+          # row or a downstream SUM() would multiply them by the number of models.
+          # They are written on the first model row only and zeroed on the rest, so
+          # SUM() reconstructs the true per-user/day value while model_messages stays
+          # per row for model-level breakdowns.
+          USER_DAY_AGGREGATE_ZEROS = {
+              'chat_conversations': '0',
+              'credits_used': '0',
+              'overage_credits_used': '0',
+              'total_messages': '0',
+              'new_user': 'false',
+          }
+
           def transform_csv(original_text, account_id, region):
-              """Parse CSV, pivot model columns into rows, append account_id/region."""
+              """Parse CSV, pivot model columns into rows, append account_id/region.
+
+              Per-user/day aggregates land on one representative (first) model row;
+              subsequent model rows carry only the per-model message count.
+              """
               reader = csv.DictReader(io.StringIO(original_text))
               headers = reader.fieldnames or []
 
@@ -281,19 +301,24 @@ Resources:
                       'region': region,
                   }
 
-                  if model_cols:
-                      for col in model_cols:
-                          msg_count = row.get(col, '0')
-                          if not msg_count or msg_count == '0':
-                              continue
+                  # Only models the user actually used that day (non-zero counts).
+                  used_models = [c for c in model_cols if (row.get(c, '0') or '0') != '0']
+
+                  if used_models:
+                      for idx, col in enumerate(used_models):
                           # Convert column name to friendly model name
                           # e.g. "claude_opus_4.8_messages" -> "claude_opus_4.8"
                           model_name = col.replace('_messages', '').replace('_', ' ').title()
-                          base['model_name'] = model_name
-                          base['model_messages'] = msg_count
-                          writer.writerow(base)
+                          out = dict(base)
+                          out['model_name'] = model_name
+                          out['model_messages'] = row.get(col, '0')
+                          # Carry per-user/day aggregates on the first model row only.
+                          if idx > 0:
+                              out.update(USER_DAY_AGGREGATE_ZEROS)
+                          writer.writerow(out)
                           row_count += 1
                   else:
+                      # No per-model breakdown available: single row keeps the aggregates.
                       base['model_name'] = 'unknown'
                       base['model_messages'] = row.get('Total_Messages', '0')
                       writer.writerow(base)
