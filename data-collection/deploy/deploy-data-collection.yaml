@@ -42,6 +42,7 @@ Metadata:
           - IncludeEUCUtilizationModule
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
+          - IncludeIamCredentialReportModule
           - IncludeMarketplaceModule
           - IncludeReferenceModule          
       - Label:
@@ -115,6 +116,8 @@ Metadata:
         default: 'Include Resilience Hub Data Collection Module'
       IncludeIdentityCenterModule:
         default: 'Include Identity Center Data Collection Module'
+      IncludeIamCredentialReportModule:
+        default: 'Include IAM Credential Report Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
 
@@ -305,6 +308,11 @@ Parameters:
     Description: Collects AWS Identity Center data
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeIamCredentialReportModule:
+    Type: String
+    Description: Collects IAM credential reports from linked accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
   IncludeReferenceModule:
     Type: String
@@ -334,6 +342,7 @@ Conditions:
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
+  DeployIamCredentialReportModule: !Equals [ !Ref IncludeIamCredentialReportModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
@@ -361,7 +370,9 @@ Conditions:
       - !Condition DeployServiceQuotasModule
       - !Condition DeployEUCUtilizationModule
       - !Condition DeployComputeOptimizerModule
+    - !Or
       - !Condition DeployIdentityCenterModule
+      - !Condition DeployIamCredentialReportModule
   RegionsInScopeIsEmpty: !Equals
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
@@ -1599,6 +1610,27 @@ Resources:
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
+
+  IamCredentialReportModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployIamCredentialReportModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-iam-credential-report.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
+        Schedule: !Ref ScheduleFrequent
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
   ReferenceModule:
     Type: AWS::CloudFormation::Stack

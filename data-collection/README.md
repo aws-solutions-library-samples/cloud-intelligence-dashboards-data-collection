@@ -44,6 +44,7 @@ List of modules and objects collected:
 | `quicksight`                 |  [Amazon QuickSight](https://aws.amazon.com/quicksight/)    | Data Collection Account | Collects QuickSight User and Group information in the Data Collection Account only |
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
 | `marketplace`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace data and terms |
+| `iam-credential-report`      | [AWS IAM](https://aws.amazon.com/iam/) | Linked Accounts | Collects IAM credential report CSV snapshots for Athena and QuickSight |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
 
 ### Deployment Overview

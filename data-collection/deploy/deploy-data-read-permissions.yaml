@@ -34,6 +34,7 @@ Metadata:
           - IncludeServiceQuotasModule
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
+          - IncludeIamCredentialReportModule
           - IncludeMarketplaceModule
     ParameterLabels:
       ManagementAccountRole:
@@ -84,6 +85,8 @@ Metadata:
         default: "Include ResilienceHub Module"
       IncludeIdentityCenterModule:
         default: "Include Identity Center Data Collection Module"
+      IncludeIamCredentialReportModule:
+        default: "Include IAM Credential Report Data Collection Module"
       IncludeMarketplaceModule:
         default: "Include Marketplace Agreements Module"
 
@@ -202,6 +205,11 @@ Parameters:
     Description: Collects AWS Identity Center data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeIamCredentialReportModule:
+    Type: String
+    Description: Collects IAM credential reports from linked accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
   IncludeMarketplaceModule:
     Type: String
     Description: Collects Marketplace Agreement information
@@ -248,6 +256,7 @@ Resources:
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
         IncludeMarketplaceModule: !Ref IncludeMarketplaceModule
+        IncludeIamCredentialReportModule: !Ref IncludeIamCredentialReportModule
         
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
@@ -292,6 +301,8 @@ Resources:
           ParameterValue: !Ref IncludeResilienceHubModule
         - ParameterKey: IncludeMarketplaceModule
           ParameterValue: !Ref IncludeMarketplaceModule
+        - ParameterKey: IncludeIamCredentialReportModule
+          ParameterValue: !Ref IncludeIamCredentialReportModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]
