@@ -118,6 +118,35 @@ Resources:
                   - "s3:PutObject"
                 Resource:
                   - !Sub "${DestinationBucketARN}/kiro-user-activity/*"
+              # ListBucket on the destination prefix so the collector can see
+              # which (account, region, date) data has already been imported and
+              # only pull what is missing (checkpoint / backfill reconcile).
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Ref DestinationBucketARN
+                Condition:
+                  StringLike:
+                    "s3:prefix": "kiro-user-activity/*"
+        - PolicyName: "GlueRegisterPartitions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Register each (account_id, region, year, month, day) partition the
+              # collector writes, and read the table to inherit its storage
+              # descriptor. No crawler and no partition projection are used.
+              - Effect: "Allow"
+                Action:
+                  - "glue:GetTable"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                  - "glue:BatchCreatePartition"
+                  - "glue:CreatePartition"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${DatabaseName}/kiro_user_activity"
         - !If
           - NeedDataBucketsKms
           - PolicyName: "KMS"
@@ -171,14 +200,16 @@ Resources:
           import io
           import csv
           import boto3
-          from datetime import datetime, timedelta, timezone
 
           s3 = boto3.client('s3')
+          glue = boto3.client('glue')
 
           DEST_BUCKET = os.environ['DEST_BUCKET']
           SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
           SOURCE_PREFIX = os.environ['SOURCE_PREFIX']
           DEST_PREFIX = 'kiro-user-activity'
+          GLUE_DATABASE = os.environ['GLUE_DATABASE']
+          GLUE_TABLE = os.environ['GLUE_TABLE']
 
           # Validation marker pattern: UUID-formatted filenames
           def is_validation_marker(key):
@@ -189,64 +220,15 @@ Resources:
                       all(len(s) in (8, 4, 4, 4, 12) for s in segments) and
                       all(c in '0123456789abcdef-' for c in filename))
 
-          def extract_account_id_from_path(key):
-              """Extract account ID from Kiro path: {prefix}AWSLogs/{accountId}/KiroLogs/..."""
-              parts = key.split('/')
-              try:
-                  aws_logs_idx = parts.index('AWSLogs')
-                  return parts[aws_logs_idx + 1]
-              except (ValueError, IndexError):
-                  return 'unknown'
-
-          def extract_region_from_path(key):
-              """Extract region from Kiro path: .../user_report/{region}/{year}/..."""
-              parts = key.split('/')
-              try:
-                  report_idx = parts.index('user_report')
-                  return parts[report_idx + 1]
-              except (ValueError, IndexError):
-                  return 'unknown'
-
-          def discover_account_ids(bucket, prefix):
-              """List account IDs under {prefix}AWSLogs/ using delimiter for shallow listing."""
-              account_ids = []
-              try:
-                  resp = s3.list_objects_v2(
-                      Bucket=bucket,
-                      Prefix=f'{prefix}AWSLogs/',
-                      Delimiter='/'
-                  )
-                  for cp in resp.get('CommonPrefixes', []):
-                      # e.g. "kiro/AWSLogs/123456789012/"
-                      parts = cp['Prefix'].rstrip('/').split('/')
-                      account_ids.append(parts[-1])
-              except Exception as e:
-                  print(f'Error discovering accounts in {bucket}: {e}')
-              return account_ids
-
-          def discover_regions(bucket, prefix, account_id):
-              """List regions under .../user_report/ using delimiter."""
-              regions = []
-              try:
-                  resp = s3.list_objects_v2(
-                      Bucket=bucket,
-                      Prefix=f'{prefix}AWSLogs/{account_id}/KiroLogs/user_report/',
-                      Delimiter='/'
-                  )
-                  for cp in resp.get('CommonPrefixes', []):
-                      parts = cp['Prefix'].rstrip('/').split('/')
-                      regions.append(parts[-1])
-              except Exception:
-                  pass
-              return regions
-
-          # Base columns that are always present (order matters for CSV output)
+          # Output CSV columns (order matters). account_id and region are NOT here:
+          # they are Glue partition keys derived from the S3 path, so keeping them
+          # out of the file body avoids duplicating the partition value in the data.
           BASE_COLUMNS = [
               'date', 'userid', 'client_type', 'chat_conversations',
               'credits_used', 'overage_cap', 'overage_credits_used',
               'overage_enabled', 'profileid', 'subscription_tier',
               'total_messages', 'new_user', 'user_email',
-              'account_id', 'region', 'model_name', 'model_messages'
+              'model_name', 'model_messages'
           ]
 
           # Per-user/day aggregate fields. The Kiro report has ONE row per user per
@@ -265,11 +247,14 @@ Resources:
               'new_user': 'false',
           }
 
-          def transform_csv(original_text, account_id, region):
-              """Parse CSV, pivot model columns into rows, append account_id/region.
+          def transform_csv(original_text):
+              """Parse a raw Kiro report CSV and pivot per-model columns into rows.
 
-              Per-user/day aggregates land on one representative (first) model row;
-              subsequent model rows carry only the per-model message count.
+              account_id and region are not emitted as columns — they are carried by
+              the S3 partition path. Per-user/day aggregates land on one
+              representative (first) model row; subsequent model rows carry only the
+              per-model message count so a downstream SUM() is not multiplied by the
+              number of models.
               """
               reader = csv.DictReader(io.StringIO(original_text))
               headers = reader.fieldnames or []
@@ -297,8 +282,6 @@ Resources:
                       'total_messages': row.get('Total_Messages', ''),
                       'new_user': row.get('New_User', ''),
                       'user_email': row.get('User_Email', ''),
-                      'account_id': account_id,
-                      'region': region,
                   }
 
                   # Only models the user actually used that day (non-zero counts).
@@ -326,15 +309,80 @@ Resources:
 
               return output.getvalue(), row_count
 
+          def parse_source_key(key):
+              """From a raw Kiro key, return (account_id, region, year, month, day,
+              filename) using the path layout:
+                {prefix}AWSLogs/{account}/KiroLogs/user_report/{region}/{yyyy}/{mm}/{dd}/[HH/]{file}.csv
+              Returns None if the key does not match (e.g. legacy by_user_analytic)."""
+              parts = key.split('/')
+              try:
+                  a = parts.index('AWSLogs')
+                  account_id = parts[a + 1]
+                  r = parts.index('user_report')
+                  region = parts[r + 1]
+                  year, month, day = parts[r + 2], parts[r + 3], parts[r + 4]
+              except (ValueError, IndexError):
+                  return None
+              if not (len(year) == 4 and len(month) == 2 and len(day) == 2):
+                  return None
+              return account_id, region, year, month, day, parts[-1]
+
+          def dest_key_for(account_id, region, year, month, day, filename):
+              """Hive-partitioned destination key. account_id/region/date are encoded
+              as partition folders (not in the file body)."""
+              return (f'{DEST_PREFIX}/account_id={account_id}/region={region}/'
+                      f'year={year}/month={month}/day={day}/{filename}')
+
+          def list_imported_dest_keys():
+              """Set of destination keys already present, used as the import
+              checkpoint so we only pull source files that are missing."""
+              imported = set()
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=DEST_BUCKET, Prefix=f'{DEST_PREFIX}/'):
+                  for obj in page.get('Contents', []):
+                      imported.add(obj['Key'])
+              return imported
+
+          def register_partition(account_id, region, year, month, day, sd_template):
+              """Register one Hive partition in Glue (idempotent). The storage
+              descriptor is cloned from the table and pointed at the partition path."""
+              location = (f's3://{DEST_BUCKET}/{DEST_PREFIX}/account_id={account_id}/'
+                          f'region={region}/year={year}/month={month}/day={day}/')
+              sd = dict(sd_template)
+              sd['Location'] = location
+              try:
+                  glue.create_partition(
+                      DatabaseName=GLUE_DATABASE,
+                      TableName=GLUE_TABLE,
+                      PartitionInput={
+                          'Values': [account_id, region, year, month, day],
+                          'StorageDescriptor': sd,
+                      },
+                  )
+              except glue.exceptions.AlreadyExistsException:
+                  pass
+
           def lambda_handler(event, context):
-              now = datetime.now(timezone.utc)
-              dates_to_collect = [
-                  now - timedelta(days=1),
-                  now,
-              ]
+              # Full source-vs-destination reconcile: every run compares what each
+              # source bucket holds against what has already been imported and pulls
+              # only the difference. This provides checkpointing (transient failures
+              # self-heal on the next run) and backfill (older gaps are filled) with
+              # no separate state store — the destination itself is the checkpoint.
+
+              # Storage descriptor template from the table (for partition registration).
+              try:
+                  sd_template = glue.get_table(
+                      DatabaseName=GLUE_DATABASE, Name=GLUE_TABLE
+                  )['Table']['StorageDescriptor']
+              except Exception as e:
+                  sd_template = None
+                  print(f'Warning: could not read Glue table for partition registration: {e}')
+
+              imported = list_imported_dest_keys()
 
               total_copied = 0
               total_rows = 0
+              partitions_seen = set()
               errors = []
 
               for source_bucket in SOURCE_BUCKETS:
@@ -342,59 +390,58 @@ Resources:
                   if not source_bucket:
                       continue
 
-                  account_ids = discover_account_ids(source_bucket, SOURCE_PREFIX)
-                  if not account_ids:
-                      errors.append(f'{source_bucket}: no account IDs found under {SOURCE_PREFIX}AWSLogs/')
-                      continue
+                  # One paginated LIST over the whole Kiro prefix per bucket, then
+                  # reconcile in memory — cheap even for buckets with many accounts.
+                  try:
+                      paginator = s3.get_paginator('list_objects_v2')
+                      for page in paginator.paginate(Bucket=source_bucket, Prefix=f'{SOURCE_PREFIX}AWSLogs/'):
+                          for obj in page.get('Contents', []):
+                              key = obj['Key']
+                              if not key.endswith('.csv') or is_validation_marker(key):
+                                  continue
+                              # Only the per-client user_report files (skip legacy
+                              # by_user_analytic and anything off-pattern).
+                              if '/KiroLogs/user_report/' not in key:
+                                  continue
 
-                  for account_id in account_ids:
-                      regions = discover_regions(source_bucket, SOURCE_PREFIX, account_id)
+                              parsed = parse_source_key(key)
+                              if not parsed:
+                                  continue
+                              account_id, region, year, month, day, filename = parsed
 
-                      for region in regions:
-                          for target_date in dates_to_collect:
-                              year = target_date.strftime('%Y')
-                              month = target_date.strftime('%m')
-                              day = target_date.strftime('%d')
-
-                              date_prefix = f'{SOURCE_PREFIX}AWSLogs/{account_id}/KiroLogs/user_report/{region}/{year}/{month}/{day}/'
+                              dest_key = dest_key_for(account_id, region, year, month, day, filename)
+                              if dest_key in imported:
+                                  continue  # already imported — checkpoint hit
 
                               try:
-                                  paginator = s3.get_paginator('list_objects_v2')
-                                  for page in paginator.paginate(Bucket=source_bucket, Prefix=date_prefix):
-                                      for obj in page.get('Contents', []):
-                                          key = obj['Key']
-
-                                          if not key.endswith('.csv'):
-                                              continue
-                                          if is_validation_marker(key):
-                                              continue
-
-                                          filename = key.split('/')[-1]
-                                          dest_key = f'{DEST_PREFIX}/year={year}/month={month}/day={day}/{account_id}_{region}_{filename}'
-
-                                          try:
-                                              response = s3.get_object(Bucket=source_bucket, Key=key)
-                                              original = response['Body'].read().decode('utf-8')
-                                              transformed, rows = transform_csv(original, account_id, region)
-                                              if rows > 0:
-                                                  s3.put_object(
-                                                      Bucket=DEST_BUCKET,
-                                                      Key=dest_key,
-                                                      Body=transformed.encode('utf-8'),
-                                                      ContentType='text/csv'
-                                                  )
-                                                  total_copied += 1
-                                                  total_rows += rows
-                                          except Exception as e:
-                                              errors.append(f'{source_bucket}/{key}: {str(e)}')
-
+                                  response = s3.get_object(Bucket=source_bucket, Key=key)
+                                  original = response['Body'].read().decode('utf-8')
+                                  transformed, rows = transform_csv(original)
+                                  if rows > 0:
+                                      s3.put_object(
+                                          Bucket=DEST_BUCKET,
+                                          Key=dest_key,
+                                          Body=transformed.encode('utf-8'),
+                                          ContentType='text/csv'
+                                      )
+                                      imported.add(dest_key)
+                                      total_copied += 1
+                                      total_rows += rows
+                                      # Register the partition once per (acct,region,y,m,d).
+                                      pkey = (account_id, region, year, month, day)
+                                      if sd_template is not None and pkey not in partitions_seen:
+                                          register_partition(account_id, region, year, month, day, sd_template)
+                                          partitions_seen.add(pkey)
                               except Exception as e:
-                                  errors.append(f'Error listing {source_bucket}/{date_prefix}: {str(e)}')
+                                  errors.append(f'{source_bucket}/{key}: {str(e)}')
+                  except Exception as e:
+                      errors.append(f'Error listing {source_bucket}: {str(e)}')
 
               result = {
                   'statusCode': 200,
                   'total_files_copied': total_copied,
                   'total_rows_written': total_rows,
+                  'partitions_registered': len(partitions_seen),
                   'errors': errors[:20]
               }
               print(json.dumps(result))
@@ -408,6 +455,8 @@ Resources:
           DEST_BUCKET: !Ref DestinationBucket
           SOURCE_BUCKETS: !Join [ ',', !Ref KiroSourceBuckets ]
           SOURCE_PREFIX: !Ref KiroActivityPrefix
+          GLUE_DATABASE: !Ref DatabaseName
+          GLUE_TABLE: kiro_user_activity
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -437,9 +486,25 @@ Resources:
       Principal: scheduler.amazonaws.com
       SourceArn: !GetAtt LambdaSchedule.Arn
 
-  # Explicit Glue Table with partition projection — no crawler needed.
-  # The Lambda writes CSVs to Hive-style paths:
-  #   s3://{bucket}/kiro-user-activity/year=YYYY/month=MM/day=DD/{account_id}_{region}_{filename}.csv
+  # Explicit Glue Table partitioned by account_id, region, year, month, day.
+  #
+  # account_id and region are Hive PARTITION KEYS (not data columns) — their
+  # values come from the S3 key path. Kiro delivers under
+  # AWSLogs/{account}/.../user_report/{region}/..., so every file records its
+  # source account and region. Partitioning on them prevents cross-account
+  # filename collisions and preserves the region for future analysis. The Lambda
+  # writes Hive-style paths:
+  #   s3://{bucket}/kiro-user-activity/account_id={id}/region={region}/year=YYYY/month=MM/day=DD/{filename}.csv
+  #
+  # Partition PROJECTION is intentionally NOT used here: account_id is a sparse,
+  # high-cardinality value that is not known at deploy time (customers may manage
+  # 50+ source accounts). Integer projection can't model sparse 12-digit IDs, and
+  # 'injected' projection would force every Athena query to filter on a specific
+  # account_id, which breaks the all-accounts dashboard view. Instead the collector
+  # Lambda registers each partition it writes via the Glue API
+  # (batch_create_partition). This keeps new accounts/regions queryable
+  # automatically with no crawler and no parameter upkeep, and the set of
+  # registered partitions doubles as the import checkpoint.
   KiroUserActivityTable:
     Type: AWS::Glue::Table
     Properties:
@@ -451,18 +516,11 @@ Resources:
         Parameters:
           classification: csv
           skip.header.line.count: "1"
-          projection.enabled: "true"
-          projection.year.type: date
-          projection.year.format: "yyyy"
-          projection.year.range: "2024,NOW"
-          projection.month.type: integer
-          projection.month.range: "1,12"
-          projection.month.digits: "2"
-          projection.day.type: integer
-          projection.day.range: "1,31"
-          projection.day.digits: "2"
-          storage.location.template: !Sub "s3://${DestinationBucket}/kiro-user-activity/year=${!year}/month=${!month}/day=${!day}/"
         PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: region
+            Type: string
           - Name: year
             Type: string
           - Name: month
@@ -505,10 +563,6 @@ Resources:
             - Name: new_user
               Type: string
             - Name: user_email
-              Type: string
-            - Name: account_id
-              Type: string
-            - Name: region
               Type: string
             - Name: model_name
               Type: string
