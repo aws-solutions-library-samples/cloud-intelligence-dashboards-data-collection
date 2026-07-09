@@ -316,7 +316,7 @@ Resources:
                   else:
                       logger.info(f"Support case event for {case_id} successfully sent to Eventbridge default bus and has Event ID: {response['Entries'][0]['EventId']}")
 
-              status["last_read"] = datetime.now().strftime('%Y-%m-%d')
+              status["last_read"] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
               logger.debug(f"==> last_read: '{status["last_read"]}'")
               s3.put_object(
                   Bucket=bucket,
