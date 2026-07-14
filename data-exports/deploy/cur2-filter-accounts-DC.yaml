@@ -23,6 +23,11 @@ Parameters:
     Default: ''
     Description: 'Payer account ID for partitioning'
   
+  AthenaResultsBucket:
+    Type: String
+    Default: ''
+    Description: 'S3 Bucket for Athena query results (enter bucket name used for data collection)'
+
   FilterAccountIds:
     Type: String
     Default: ''
@@ -37,26 +42,10 @@ Parameters:
 
   
 
+Conditions:
+  AthenaResultsBucketNotProvided: !Equals [!Ref AthenaResultsBucket, '']
+
 Resources:
-  
-  # --- SOURCE PATH RESOURCES ---
-  # S3 Bucket for Athena query results
-  AthenaResultsBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub '${AWS::StackName}-athena-results-${AWS::AccountId}'
-      VersioningConfiguration:
-        Status: Enabled
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldResults
-            Status: Enabled
-            ExpirationInDays: 30
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
 
   # IAM Role for Lambda execution
   LambdaExecutionRole:
@@ -89,9 +78,15 @@ Resources:
                   - !Sub 'arn:aws:s3:::${TargetS3Bucket}'
                   - !Sub 'arn:aws:s3:::${TargetS3Bucket}/*'
                   - !Sub 'arn:aws:s3:::cid-${AWS::AccountId}-data-exports'
-                  - !Sub 'arn:aws:s3:::cid-${AWS::AccountId}-data-exports/*'                  
-                  - !GetAtt AthenaResultsBucket.Arn
-                  - !Sub '${AthenaResultsBucket.Arn}/*'
+                  - !Sub 'arn:aws:s3:::cid-${AWS::AccountId}-data-exports/*' 
+                  - !If
+                    - AthenaResultsBucketNotProvided
+                    - !Sub 'arn:aws:s3:::${AWS::Partition}-athena-query-results-cid-${AWS::AccountId}-${AWS::Region}'
+                    - !Sub 'arn:aws:s3:::${AthenaResultsBucket}'
+                  - !If
+                    - AthenaResultsBucketNotProvided
+                    - !Sub 'arn:aws:s3:::${AWS::Partition}-athena-query-results-cid-${AWS::AccountId}-${AWS::Region}/*'
+                    - !Sub 'arn:aws:s3:::${AthenaResultsBucket}/*'
               - Effect: Allow
                 Action:
                   - athena:StartQueryExecution
@@ -126,7 +121,10 @@ Resources:
           TARGET_S3_BUCKET: !Ref TargetS3Bucket
           PAYER_ACCOUNT_ID: !Ref PayerAccountId
           FILTER_ACCOUNT_IDS: !Ref FilterAccountIds
-          ATHENA_RESULTS_BUCKET: !Ref AthenaResultsBucket
+          ATHENA_RESULTS_BUCKET: !If
+            - AthenaResultsBucketNotProvided
+            - !Sub '${AWS::Partition}-athena-query-results-cid-${AWS::AccountId}-${AWS::Region}'
+            - !Ref AthenaResultsBucket
           MAX_WAIT_TIME: '600'
       Code:
         ZipFile: |          
@@ -172,135 +170,8 @@ Resources:
                   # Construct the UNLOAD query
                   query = f"""
                   UNLOAD (
-                      SELECT
-                          "bill_bill_type" , 
-                          "bill_billing_entity" , 
-                          "bill_billing_period_end_date" , 
-                          "bill_billing_period_start_date" , 
-                          "bill_invoice_id", 
-                          "bill_payer_account_id", 
-                          "bill_payer_account_name", 
-                          "cost_category", 
-                          "discount", 
-                          "discount_bundled_discount", 
-                          "discount_total_discount", 
-                          "identity_line_item_id",
-                          "identity_time_interval", 
-                          "line_item_availability_zone", 
-                          "line_item_legal_entity", 
-                          "line_item_line_item_description", 
-                          "line_item_line_item_type", 
-                          "line_item_operation", 
-                          "line_item_product_code", 
-                          "line_item_resource_id", 
-                          "line_item_unblended_cost", 
-                          "line_item_usage_account_id" , 
-                          "line_item_usage_account_name", 
-                          "line_item_usage_amount", 
-                          "line_item_usage_end_date", 
-                          "line_item_usage_start_date", 
-                          "line_item_usage_type", 
-                          "pricing_lease_contract_length", 
-                          "pricing_offering_class", 
-                          "pricing_public_on_demand_cost", 
-                          "pricing_purchase_option", 
-                          "pricing_term", 
-                          "pricing_unit", 
-                          "product", 
-                          "product_from_location", 
-                          "product_instance_type", 
-                          "product_product_family", 
-                          "product_servicecode", 
-                          "product_to_location" , 
-                          "reservation_amortized_upfront_fee_for_billing_period" , 
-                          "reservation_effective_cost" , 
-                          "reservation_end_time" , 
-                          "reservation_reservation_a_r_n" , 
-                          "reservation_start_time", 
-                          "reservation_unused_amortized_upfront_fee_for_billing_period" , 
-                          "reservation_unused_recurring_fee" , 
-                          "resource_tags", 
-                          "savings_plan_amortized_upfront_commitment_for_billing_period" , 
-                          "savings_plan_end_time" , 
-                          "savings_plan_offering_type" , 
-                          "savings_plan_payment_option" , 
-                          "savings_plan_purchase_term" , 
-                          "savings_plan_savings_plan_a_r_n" , 
-                          "savings_plan_savings_plan_effective_cost" , 
-                          "savings_plan_start_time" , 
-                          "savings_plan_total_commitment_to_date" , 
-                          "savings_plan_used_commitment" , 
-                          "split_line_item_parent_resource_id" , 
-                          "split_line_item_reserved_usage" , 
-                          "split_line_item_actual_usage" , 
-                          "split_line_item_split_usage" , 
-                          "split_line_item_split_usage_ratio" , 
-                          "split_line_item_split_cost" , 
-                          "split_line_item_unused_cost" , 
-                          "split_line_item_net_split_cost" , 
-                          "split_line_item_net_unused_cost" , 
-                          "split_line_item_public_on_demand_split_cost" , 
-                          "split_line_item_public_on_demand_unused_cost" , 
-                          "tags" , 
-                          "bill_invoicing_entity" , 
-                          "line_item_blended_cost" , 
-                          "line_item_blended_rate" , 
-                          "line_item_currency_code" , 
-                          "line_item_net_unblended_cost" , 
-                          "line_item_net_unblended_rate" , 
-                          "line_item_normalization_factor" , 
-                          "line_item_normalized_usage_amount" , 
-                          "line_item_tax_type" , 
-                          "line_item_unblended_rate" , 
-                          "pricing_currency" , 
-                          "pricing_public_on_demand_rate" , 
-                          "pricing_rate_code" , 
-                          "pricing_rate_id" , 
-                          "product_comment" , 
-                          "product_fee_code" , 
-                          "product_fee_description" , 
-                          "product_from_location_type" , 
-                          "product_from_region_code" , 
-                          "product_instance_family" , 
-                          "product_instancesku" , 
-                          "product_location" , 
-                          "product_location_type" , 
-                          "product_operation" , 
-                          "product_pricing_unit" , 
-                          "product_region_code" , 
-                          "product_sku" , 
-                          "product_to_location_type" , 
-                          "product_to_region_code" , 
-                          "product_usagetype" , 
-                          "reservation_amortized_upfront_cost_for_usage" , 
-                          "reservation_availability_zone" , 
-                          "reservation_modification_status" , 
-                          "reservation_net_amortized_upfront_cost_for_usage" , 
-                          "reservation_net_amortized_upfront_fee_for_billing_period" , 
-                          "reservation_net_effective_cost" , 
-                          "reservation_net_recurring_fee_for_usage" , 
-                          "reservation_net_unused_amortized_upfront_fee_for_billing_period" , 
-                          "reservation_net_unused_recurring_fee" , 
-                          "reservation_net_upfront_value" , 
-                          "reservation_normalized_units_per_reservation" , 
-                          "reservation_number_of_reservations" , 
-                          "reservation_recurring_fee_for_usage" , 
-                          "reservation_subscription_id" , 
-                          "reservation_total_reserved_normalized_units" , 
-                          "reservation_total_reserved_units" , 
-                          "reservation_units_per_reservation" , 
-                          "reservation_unused_normalized_unit_quantity" , 
-                          "reservation_unused_quantity" , 
-                          "reservation_upfront_value" , 
-                          "savings_plan_instance_type_family" , 
-                          "savings_plan_net_amortized_upfront_commitment_for_billing_period" , 
-                          "savings_plan_net_recurring_commitment_for_billing_period" , 
-                          "savings_plan_net_savings_plan_effective_cost" , 
-                          "savings_plan_recurring_commitment_for_billing_period" , 
-                          "savings_plan_region" , 
-                          "savings_plan_savings_plan_rate",                                
-                          "billing_period"                
-
+                      SELECT *
+                          
                       FROM {source_db}.{source_table}
                       WHERE line_item_usage_account_id IN ('{account_filter}')
                   )
@@ -412,13 +283,8 @@ Outputs:
     Description: 'ARN of the Lambda function'
     Value: !GetAtt AthenaQueryLambda.Arn
     Export:
-      Name: !Sub '${AWS::StackName}-lambda-arn'
-  
-  AthenaResultsBucket:
-    Description: 'S3 bucket for Athena query results'
-    Value: !Ref AthenaResultsBucket
-    Export:
-      Name: !Sub '${AWS::StackName}-results-bucket'
+      Name: !Sub '${AWS::StackName}-lambda-arn'  
+ 
   
   ScheduleRuleArn:
     Description: 'ARN of the EventBridge schedule rule'

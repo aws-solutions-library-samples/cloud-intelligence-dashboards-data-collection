@@ -15,6 +15,10 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'
+      AccessControl: BucketOwnerFullControl
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced      
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -61,7 +65,18 @@ Resources:
               - s3:PutBucketVersioning            
             Resource:
               - !GetAtt TargetDataBucket.Arn
+              - !Sub '${TargetDataBucket.Arn}/*'          
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TargetDataBucket.Arn
               - !Sub '${TargetDataBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
               
           
   
