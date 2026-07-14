@@ -26,7 +26,7 @@ Parameters:
   AthenaResultsBucket:
     Type: String
     Default: ''
-    Description: 'S3 Bucket for Athena query results (enter bucket name used for data collection)'
+    Description: 'S3 Bucket for Athena query results (enter bucket name used for data collection.)'
 
   FilterAccountIds:
     Type: String
@@ -51,6 +51,7 @@ Resources:
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: cid-data-filter-lambda-role
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:

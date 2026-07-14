@@ -51,8 +51,7 @@ Resources:
             Condition:
               ArnLike:
                 aws:PrincipalArn:
-                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*Lambda*'
-                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/*lambda*'
+                  - !Sub 'arn:aws:iam::${DataCollectionAccountId}:role/cid-data-filter-lambda-role'
           
           - Sid: AllowRead
             Effect: Allow
