@@ -165,6 +165,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}RHD-rds-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -259,6 +260,11 @@ Resources:
               - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:*"
           - Effect: "Allow"
             Action:
+              - "rds:DescribeDBClusterSnapshots"
+            Resource:
+              - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-snapshot:*"          
+          - Effect: "Allow"
+            Action:
               - "es:DescribeDomain"
               - "es:DescribeElasticsearchDomains"
             Resource: !Sub "arn:${AWS::Partition}:es:*:${AWS::AccountId}:domain/*"
@@ -291,6 +297,7 @@ Resources:
               - "workspaces:DescribeWorkspaces"
               - "workspaces:DescribeWorkspaceDirectories"
               - "workspaces:DescribeWorkspacesConnectionStatus"
+              - "rds:DescribePendingMaintenanceActions"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole

@@ -1511,6 +1511,12 @@ Resources:
                       function_name='describe_db_snapshots',
                       obj_name='DBSnapshots[*]'
                   ),
+                  'rds-cluster-snapshots': partial(
+                      paginated_scan,
+                      service='rds',
+                      function_name='describe_db_cluster_snapshots',
+                      obj_name='DBClusterSnapshots[*]'
+                  ),
                   'ebs': partial(
                       paginated_scan,
                       service='ec2',
