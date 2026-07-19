@@ -1,0 +1,1914 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::LanguageExtensions'
+Description: 'RDS Health Dashboard - Data Collection v1.0 (CID Plugin)'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Collection Settings'
+        Parameters:
+          - RegionsInScope
+          - Schedule
+      - Label:
+          default: 'Advanced (only change if non-default CID deployment)'
+        Parameters:
+          - ResourcePrefix
+          - CFDataName
+      - Label:
+          default: 'CID Parent Stack Parameters (auto-populated when deployed as nested stack)'
+        Parameters:
+          - GlueRoleARN
+          - DestinationBucket
+          - DestinationBucketARN
+          - DatabaseName
+          - LambdaAnalyticsARN
+          - AccountCollectorLambdaARN
+          - MultiAccountRoleName
+          - StepFunctionTemplate
+          - CodeBucket
+          - StepFunctionExecutionRoleARN
+          - DataBucketsKmsKeysArns
+          - SchedulerExecutionRoleARN
+          - LambdaManageGlueTableARN
+    ParameterLabels:
+      RegionsInScope:
+        default: 'AWS Regions to collect RDS data from'
+      Schedule:
+        default: 'Collection schedule'
+      ResourcePrefix:
+        default: 'CID Data Collection resource prefix'
+      CFDataName:
+        default: 'Data name prefix'
+
+Parameters:
+  # CID Parent Parameters (passed by parent stack to all nested modules)
+  GlueRoleARN:
+    Type: String
+    Description: 'ARN of the Glue role from CID Data Collection'
+  DestinationBucket:
+    Type: String
+    Description: 'CID Data Collection S3 bucket name'
+  DestinationBucketARN:
+    Type: String
+    Description: 'ARN of the CID Data Collection S3 bucket'
+  DatabaseName:
+    Type: String
+    Description: 'Glue database name'
+  LambdaAnalyticsARN:
+    Type: String
+    Description: 'ARN of the CID Lambda Analytics function'
+    Default: ''
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: 'ARN of the CID Account Collector Lambda'
+    Default: ''
+  MultiAccountRoleName:
+    Type: String
+    Description: 'Name of the multi-account IAM role (already prefixed by parent)'
+  StepFunctionTemplate:
+    Type: String
+    Description: 'Step Function template path from CID'
+    Default: ''
+  CodeBucket:
+    Type: String
+    Description: 'S3 bucket for Lambda code'
+    Default: ''
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: 'ARN of the Step Function execution role'
+    Default: ''
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: 'KMS key ARNs for data buckets'
+    Default: ''
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: 'ARN of the EventBridge Scheduler execution role'
+    Default: ''
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: 'ARN of the Lambda that manages Glue tables'
+    Default: ''
+
+  # Module-specific parameters
+  RegionsInScope:
+    Type: String
+    Default: ''
+    Description: 'Comma-separated list of AWS regions to collect RDS data from. If empty, uses current region.'
+
+  Schedule:
+    Type: String
+    Default: 'rate(14 days)'
+    Description: 'EventBridge schedule for data collection'
+
+  ResourcePrefix:
+    Type: String
+    Default: 'CID-DC-'
+    Description: 'CID Data Collection resource prefix (passed by parent stack)'
+
+  CFDataName:
+    Type: String
+    Default: 'rds'
+    Description: 'Data name prefix used in resource naming and S3 paths'
+
+Resources:
+  # IAM Role for Lambda Functions
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}RHD-${CFDataName}-LambdaRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: !Sub 'lambda.${AWS::URLSuffix}'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Path: /
+      Policies:
+        - PolicyName: 'S3Access'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource:
+                  - !Sub
+                    - 'arn:${AWS::Partition}:s3:::${BucketName}/*'
+                    - BucketName: !Ref DestinationBucket
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - 'arn:${AWS::Partition}:s3:::${BucketName}'
+                    - BucketName: !Ref DestinationBucket
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - 'rds-*'
+                      - 'inventory/inventory-rds-*'
+        - PolicyName: 'RDSDescribe'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'rds:DescribeDBEngineVersions'
+                  - 'rds:DescribeDBInstances'
+                  - 'rds:DescribeDBClusters'
+                  - 'rds:DescribePendingMaintenanceActions'
+                  - 'rds:DescribeDBMajorEngineVersions'
+                  - 'ec2:DescribeRegions'
+                Resource: '*'
+        - PolicyName: 'AssumeMultiAccountRole'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'sts:AssumeRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+          - id: W11
+            reason: "RDS Describe and EC2 DescribeRegions do not support resource-level permissions"
+
+  # Lambda Functions
+  RDSAnalysisLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}RHD-${CFDataName}-analysis-Lambda'
+      Description: !Sub 'Lambda function to analyze RDS instances for ${CFDataName}'
+      Runtime: 'python3.13'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          """Lambda function to analyze RDS instances using version data from S3."""
+          import json
+          import boto3
+          from collections import defaultdict
+          from datetime import datetime, timezone, timedelta
+          from botocore.exceptions import ClientError
+          from functools import lru_cache
+          import logging
+          import os
+          import re
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          s3_client = boto3.client('s3')
+          BUCKET = os.environ["BUCKET_NAME"]
+
+          _versions_cache = {}
+          def load_rds_versions_from_s3(bucket, year, month, day):
+              cache_key = (bucket, year, month, day)
+              if cache_key in _versions_cache:
+                  return _versions_cache[cache_key]
+              try:
+                  now = datetime.now()
+                  all_files = []
+                  for dt in [now, now.replace(day=1) - timedelta(days=1)]:
+                      prefix = f'rds-versions-data/year={dt.strftime("%Y")}/month={dt.strftime("%m")}/'
+                      try:
+                          response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+                          if 'Contents' in response:
+                              all_files.extend(response['Contents'])
+                      except ClientError as e:
+                          logger.warning(f"Error listing versions files: {e}")
+                  if not all_files:
+                      logger.warning("No RDS versions data found in current or previous month. Run the Versions Step Function first.")
+                      return None
+                  latest_file = max(all_files, key=lambda x: x['LastModified'])
+                  logger.info(f"Using versions file: {latest_file['Key']}")
+                  content = s3_client.get_object(Bucket=bucket, Key=latest_file['Key'])['Body'].read().decode('utf-8')
+                  versions_data = [json.loads(line) for line in content.splitlines() if line.strip()]
+                  all_versions = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+                  latest_major_versions = {}
+                  supported_engines = set()
+                  for version in versions_data:
+                      engine = version['db_engine_name']
+                      major_version = version['db_major_version']
+                      minor_version = version['db_minor_version']
+                      supported_engines.add(engine)
+                      if engine not in latest_major_versions or major_version > latest_major_versions[engine]:
+                          latest_major_versions[engine] = major_version
+                      db_type = 'limitless' if version['feature_limitless'].lower() == 'true' else 'standard'
+                      if major_version not in all_versions[engine][db_type]:
+                          all_versions[engine][db_type][major_version] = {
+                              'latest_minor_version': version['latest_minor_version'],
+                              'latest_minor_version_minus_1': version.get('latest_minor_version_n-1', ''),
+                              'latest_minor_version_minus_2': version.get('latest_minor_version_n-2', ''),
+                              'latest_major_version': version['latest_major_version'],
+                              'latest_major_version_minus_1': version.get('latest_major_version_n-1', ''),
+                              'latest_major_version_minus_2': version.get('latest_major_version_n-2', ''),
+                              'description': version['db_description'],
+                              'minor_versions': {}
+                          }
+                      all_versions[engine][db_type][major_version]['minor_versions'][minor_version] = version['version_status']
+                  result = {'supported_engines_latest_major': latest_major_versions, 'supported_engines': list(supported_engines), 'latest_versions': dict(all_versions)}
+                  _versions_cache[cache_key] = result
+                  return result
+              except Exception as e:
+                  logger.error(f"Error loading RDS versions: {str(e)}")
+                  return None
+
+          def load_json_from_s3(bucket, key):
+              try:
+                  content = s3_client.get_object(Bucket=bucket, Key=key)['Body'].read().decode('utf-8')
+                  instances = [json.loads(line) for line in content.splitlines() if line.strip()]
+                  if not instances:
+                      logger.info(f"No RDS instances found in file: s3://{bucket}/{key}")
+                  return instances
+              except ClientError as e:
+                  if e.response['Error']['Code'] == "NoSuchKey":
+                      logger.warning(f"No data file found: s3://{bucket}/{key}")
+                  else:
+                      logger.error(f"Error reading S3 object: s3://{bucket}/{key}. Error: {str(e)}")
+                  return None
+
+          def find_latest_inventory_file(bucket, base_prefix, payer_id, account_id):
+              """Fallback: find the most recent inventory file within the last 30 days."""
+              now = datetime.now()
+              account_files = []
+              seen_months = set()
+              for days_back in range(31):
+                  dt = now - timedelta(days=days_back)
+                  month_key = dt.strftime('%Y/%m')
+                  if month_key in seen_months:
+                      continue
+                  seen_months.add(month_key)
+                  prefix = f'{base_prefix}payer_id={payer_id}/year={dt.strftime("%Y")}/month={dt.strftime("%m")}/'
+                  try:
+                      response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+                      if 'Contents' in response:
+                          account_files.extend(
+                              obj for obj in response['Contents']
+                              if f'{account_id}-' in obj['Key'] and obj['Key'].endswith('.json')
+                          )
+                  except ClientError as e:
+                      logger.warning(f"Error listing inventory files: {e}")
+              if not account_files:
+                  logger.info(f"No inventory data for account {account_id} in last 30 days")
+                  return None
+              latest = max(account_files, key=lambda x: x['LastModified'])
+              logger.info(f"Using fallback inventory file: {latest['Key']}")
+              return latest['Key']
+
+          @lru_cache(maxsize=100)
+          def get_major_version(engine, engine_version):
+              client = boto3.client('rds')
+              try:
+                  response = client.describe_db_engine_versions(Engine=engine, EngineVersion=engine_version)
+                  if response['DBEngineVersions']:
+                      return response['DBEngineVersions'][0].get('MajorEngineVersion')
+                  major_version = engine_version.split('.')[0]
+                  response = client.describe_db_engine_versions(Engine=engine, EngineVersion=major_version)
+                  if response['DBEngineVersions']:
+                      return response['DBEngineVersions'][0].get('MajorEngineVersion')
+              except Exception as e:
+                  logger.error(f"Error getting major version for {engine} {engine_version}: {str(e)}")
+                  return None
+
+          def analyze_rds_instance(instance, db_versions):
+              engine = instance['Engine']
+              engine_version = instance['EngineVersion']
+              current_major_version = get_major_version(engine, engine_version)
+              current_minor_version = engine_version
+              engine_data = db_versions['latest_versions'].get(engine, {})
+              if not engine_data:
+                  return instance
+              db_type = 'limitless' if instance.get('SupportsLimitlessDatabase', False) else 'standard'
+              major_version_data = engine_data.get(db_type, {}).get(current_major_version, {})
+              if not major_version_data:
+                  return instance
+              latest_major = major_version_data.get('latest_major_version', '')
+              latest_major_minus_1 = major_version_data.get('latest_major_version_minus_1', '')
+              latest_major_minus_2 = major_version_data.get('latest_major_version_minus_2', '')
+              latest_minor = major_version_data.get('latest_minor_version', '')
+              latest_minor_minus_1 = major_version_data.get('latest_minor_version_minus_1', '')
+              latest_minor_minus_2 = major_version_data.get('latest_minor_version_minus_2', '')
+              version_status = major_version_data.get('minor_versions', {}).get(engine_version, 'unknown')
+              instance['current_major_version'] = current_major_version
+              instance['latest_major_version'] = latest_major
+              instance['latest_major_version_N-1'] = latest_major_minus_1
+              instance['latest_major_version_N-2'] = latest_major_minus_2
+              instance['current_minor_version'] = current_minor_version
+              instance['latest_minor_version'] = latest_minor
+              instance['latest_minor_version_N-1'] = latest_minor_minus_1
+              instance['latest_minor_version_N-2'] = latest_minor_minus_2
+              instance['engine_version_status'] = version_status.capitalize()
+              return instance
+
+          def lambda_handler(event, context):
+              try:
+                  if not event or 'account' not in event or 'params' not in event or event.get('params') != "rds-db-analysis":
+                      raise ValueError("Invalid event. Lambda must be triggered from Step Functions with correct parameters.")
+                  account_info = json.loads(event['account'])
+                  account_id = account_info['account_id']
+                  payer_id = account_info['payer_id']
+                  current_date = datetime.now()
+                  base_prefix = 'inventory/inventory-rds-db-instances-data/'
+                  rds_analysis_prefix = 'rds-analysis-data/'
+                  db_versions = load_rds_versions_from_s3(BUCKET, current_date.strftime('%Y'), current_date.strftime('%m'), current_date.strftime('%d'))
+                  if not db_versions:
+                      return {'statusCode': 200, 'body': json.dumps(f"No RDS versions data available. Run the Versions Step Function first. Analysis skipped for account {account_id}.")}
+                  # Try today's inventory file, then yesterday's, then fallback to latest in last 30 days
+                  instances = None
+                  inventory_date = current_date
+                  for days_back in range(2):
+                      dt = current_date - timedelta(days=days_back)
+                      y, m, d = dt.strftime('%Y'), dt.strftime('%m'), dt.strftime('%d')
+                      key = f'{base_prefix}payer_id={payer_id}/year={y}/month={m}/day={d}/{account_id}-{y}-{m}-{d}.json'
+                      instances = load_json_from_s3(BUCKET, key)
+                      if instances:
+                          inventory_date = dt
+                          logger.info(f"Using inventory file (day-{days_back}): {key}")
+                          break
+                  if not instances:
+                      inventory_key = find_latest_inventory_file(BUCKET, base_prefix, payer_id, account_id)
+                      if inventory_key:
+                          instances = load_json_from_s3(BUCKET, inventory_key)
+                          # Extract date from key: .../year=YYYY/month=MM/day=DD/...
+                          date_match = re.search(r'year=(\d{4})/month=(\d{2})/day=(\d{2})', inventory_key)
+                          if date_match:
+                              inventory_date = datetime(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
+                              logger.info(f"Using fallback inventory file (date={inventory_date.strftime('%Y-%m-%d')}): {inventory_key}")
+                  if not instances:
+                      return {'statusCode': 200, 'body': json.dumps(f"No RDS inventory data found for account {account_id}. Analysis skipped.")}
+                  # Use inventory file date for output path to avoid duplicates on fallback
+                  year = inventory_date.strftime('%Y')
+                  month = inventory_date.strftime('%m')
+                  day = inventory_date.strftime('%d')
+                  temp_file = '/tmp/rds_analysis.jsonl'
+                  with open(temp_file, 'w') as f:
+                      for instance in instances:
+                          analyzed_instance = analyze_rds_instance(instance, db_versions)
+                          analyzed_instance.setdefault('DBClusterIdentifier', None)
+                          analyzed_instance.setdefault('LatestRestorableTime', None)
+                          analyzed_instance.setdefault('ReadReplicaSourceDBInstanceIdentifier', None)
+                          analyzed_instance.setdefault('DBName', '')
+                          analyzed_instance.setdefault('MaxAllocatedStorage', 0)
+                          if not analyzed_instance.get('TagList'):
+                              analyzed_instance['TagList'] = [{'Key': '', 'Value': ''}]
+                          f.write(json.dumps(analyzed_instance, default=str) + '\n')
+                  output_file_name = f'rds_analysis_{account_id}_{inventory_date.strftime("%Y%m%d")}.jsonl'
+                  output_key = f'{rds_analysis_prefix}payer_id={payer_id}/year={year}/month={month}/day={day}/{output_file_name}'
+                  s3_client.upload_file(Filename=temp_file, Bucket=BUCKET, Key=output_key)
+                  if os.path.exists(temp_file):
+                      os.remove(temp_file)
+                  return {'statusCode': 200, 'body': json.dumps({'message': 'Analysis complete', 'output_file': f's3://{BUCKET}/{output_key}', 'instances_analyzed': len(instances)})}
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  raise
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for reserved concurrent executions"
+
+  RDSEOSLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}RHD-${CFDataName}-eos-Lambda'
+      Description: !Sub 'Lambda function to collect RDS end-of-support data for ${CFDataName}'
+      Runtime: 'python3.13'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+          import logging
+          import os
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          SUPPORTED_ENGINES = ['mysql', 'postgres', 'aurora-mysql', 'aurora-postgresql', 'mariadb']
+          def get_engine_versions(rds_client):
+              try:
+                  versions = []
+                  response = rds_client.describe_db_major_engine_versions()
+                  for version in response['DBMajorEngineVersions']:
+                      if version['Engine'] not in SUPPORTED_ENGINES:
+                          continue
+                      version_data = {
+                          'engine': version['Engine'],
+                          'major_version': version['MajorEngineVersion'],
+                          'collection_date': datetime.now().strftime('%Y-%m-%d'),
+                          'standard_support_start': '',
+                          'standard_support_end': '',
+                          'extended_support_start': '',
+                          'extended_support_end': ''
+                      }
+                      if 'SupportedEngineLifecycles' in version:
+                          for lifecycle in version['SupportedEngineLifecycles']:
+                              if lifecycle['LifecycleSupportName'] == 'open-source-rds-standard-support':
+                                  version_data['standard_support_start'] = lifecycle['LifecycleSupportStartDate'].strftime('%Y-%m-%d')
+                                  version_data['standard_support_end'] = lifecycle['LifecycleSupportEndDate'].strftime('%Y-%m-%d')
+                              elif lifecycle['LifecycleSupportName'] == 'open-source-rds-extended-support':
+                                  version_data['extended_support_start'] = lifecycle['LifecycleSupportStartDate'].strftime('%Y-%m-%d')
+                                  version_data['extended_support_end'] = lifecycle['LifecycleSupportEndDate'].strftime('%Y-%m-%d')
+                      versions.append(version_data)
+                  return versions
+              except Exception as e:
+                  logger.error(f"Error fetching versions: {str(e)}")
+                  raise
+          def lambda_handler(event, context):
+              try:
+                  rds_client = boto3.client('rds')
+                  all_versions = get_engine_versions(rds_client)
+                  if not all_versions:
+                      raise ValueError("No version data could be extracted")
+                  engine_summary = {}
+                  for version in all_versions:
+                      engine = version['engine']
+                      engine_summary[engine] = engine_summary.get(engine, 0) + 1
+                  summary = [f"{engine}: {count} versions found" for engine, count in engine_summary.items()]
+                  current_date = datetime.now()
+                  s3_key = f"rds-endofsupport-data/year={current_date.strftime('%Y')}/month={current_date.strftime('%m')}/day={current_date.strftime('%d')}/rds_eos_dates_{current_date.strftime('%Y_%m_%d')}.json"
+                  formatted_data = '\n'.join(json.dumps(record) for record in all_versions)
+                  boto3.client('s3').put_object(
+                      Bucket=os.environ['BUCKET_NAME'],
+                      Key=s3_key,
+                      Body=formatted_data,
+                      ContentType='application/json'
+                  )
+                  return {'statusCode': 200, 'body': json.dumps({'processed_entries': len(all_versions), 'summary': summary})}
+              except Exception as e:
+                  logger.error(f"Lambda execution failed: {str(e)}")
+                  raise
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for reserved concurrent executions"
+
+  RDSMaintenanceLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}RHD-${CFDataName}-maintenance-Lambda'
+      Description: !Sub 'Lambda function to collect RDS maintenance data for ${CFDataName}'
+      Runtime: 'python3.13'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          from datetime import datetime
+          import tempfile
+          import resource
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          import boto3
+          from botocore.client import Config
+
+          BUCKET = os.environ["BUCKET_NAME"]
+          ROLENAME = os.environ['ROLENAME']
+          REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          def log_memory_usage(location):
+              usage = resource.getrusage(resource.RUSAGE_SELF)
+              logger.info(f"Memory Usage at {location} - Max RSS: {usage.ru_maxrss / 1024:.2f}MB")
+
+          def assume_role(account_id, region):
+              logger.info(f"Assuming role for account {account_id} in region {region}")
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                      RoleSessionName="rds_maintenance_collection"
+                  )['Credentials']
+                  rds_client = boto3.client(
+                      'rds',
+                      region_name=region,
+                      aws_access_key_id=credentials['AccessKeyId'],
+                      aws_secret_access_key=credentials['SecretAccessKey'],
+                      aws_session_token=credentials['SessionToken']
+                  )
+                  return rds_client
+              except Exception as exc:
+                  logger.error(f"Error assuming role for account {account_id} in region {region}: {exc}")
+                  raise
+
+          def get_maintenance_actions(rds_client, region):
+              logger.info(f"Getting maintenance actions for region {region}")
+              try:
+                  response = rds_client.describe_pending_maintenance_actions()
+                  actions_count = len(response.get('PendingMaintenanceActions', []))
+                  logger.info(f"Found {actions_count} maintenance actions in region {region}")
+                  return response['PendingMaintenanceActions']
+              except Exception as exc:
+                  logger.error(f"Error getting maintenance actions in region {region}: {exc}")
+                  return []
+
+          def process_maintenance_action(item, region, usage_account, collection_date):
+              resource_id = item['ResourceIdentifier']
+              for action in item['PendingMaintenanceActionDetails']:
+                  yield {
+                      'ResourceIdentifier': resource_id,
+                      'Action': action.get('Action'),
+                      'Description': action.get('Description'),
+                      'Region': region,
+                      'accountid': usage_account,
+                      'collection_date': collection_date,
+                      'CurrentApplyDate': action.get('CurrentApplyDate'),
+                      'AutoAppliedAfterDate': action.get('AutoAppliedAfterDate'),
+                      'ForcedApplyDate': action.get('ForcedApplyDate'),
+                      'OptInStatus': action.get('OptInStatus')
+                  }
+
+          def lambda_handler(event, context):
+              logger.info(f"Starting lambda execution with event: {event}")
+              log_memory_usage("start")
+
+              if 'account' not in event or 'params' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+
+              try:
+                  account_info = json.loads(event['account'])
+                  usage_account = account_info['account_id']
+                  payer_account = account_info['payer_id']
+              except (json.JSONDecodeError, KeyError) as e:
+                  raise ValueError(f"Invalid account information format: {str(e)}")
+
+              params = event.get('params', '').strip()
+              if params != 'rds-db-maintenance':
+                  raise ValueError(f"Invalid params value. Expected 'rds-db-maintenance', got '{params}'")
+
+              current_date = datetime.now()
+              date_path = current_date.strftime("/year=%Y/month=%m/day=%d")
+              collection_date = current_date.strftime("%Y-%m-%d %H:%M:%S")
+
+              action_count = 0
+              processed_regions = 0
+
+              logger.info(f"Processing {len(REGIONS)} regions for account {usage_account}")
+
+              def process_single_region(region, region_index):
+                  try:
+                      logger.info(f"Processing region {region} ({region_index}/{len(REGIONS)})")
+                      rds_client = assume_role(usage_account, region)
+                      pending_actions = get_maintenance_actions(rds_client, region)
+                      region_actions = []
+                      for item in pending_actions:
+                          for action in process_maintenance_action(item, region, usage_account, collection_date):
+                              region_actions.append(action)
+                      logger.info(f"Processed {len(region_actions)} actions in region {region}")
+                      del rds_client
+                      del pending_actions
+                      return region_actions
+                  except Exception as region_exc:
+                      logger.error(f"Error processing region {region}: {region_exc}")
+                      return []
+
+              with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
+                  try:
+                      logger.info(f"Created temporary file: {temp_file.name}")
+                      with ThreadPoolExecutor(max_workers=5) as executor:
+                          futures = {
+                              executor.submit(process_single_region, region, idx + 1): region
+                              for idx, region in enumerate(REGIONS)
+                          }
+                          for future in as_completed(futures):
+                              region = futures[future]
+                              processed_regions += 1
+                              try:
+                                  region_actions = future.result()
+                                  for action in region_actions:
+                                      temp_file.write(json.dumps(action, default=str) + '\n')
+                                      action_count += 1
+                              except Exception as exc:
+                                  logger.error(f"Error getting result for region {region}: {exc}")
+                              if processed_regions % 5 == 0:
+                                  log_memory_usage(f"after {processed_regions} regions")
+
+                      temp_file.flush()
+                      temp_file.close()
+                      logger.info(f"Completed processing all regions. Total actions: {action_count}")
+
+                      if action_count == 0:
+                          logger.info(f"No maintenance actions found for account {usage_account}")
+                          os.unlink(temp_file.name)
+                          return {'statusCode': 200, 'body': 'No maintenance actions found'}
+
+                      key = f"rds-maintenance-data/payer_id={payer_account}{date_path}/{usage_account}_{current_date.strftime('%Y%m%d')}.json"
+                      logger.info(f"Uploading data to S3: {BUCKET}/{key}")
+
+                      s3client = boto3.client("s3", config=Config(s3={"addressing_style": "path"}))
+                      s3client.upload_file(
+                          temp_file.name, BUCKET, key,
+                          ExtraArgs={'ContentType': 'application/json'}
+                      )
+
+                      os.unlink(temp_file.name)
+                      log_memory_usage("end")
+                      logger.info("Successfully completed processing and upload")
+
+                      return {
+                          'statusCode': 200,
+                          'body': {
+                              'message': f'Successfully wrote data to s3://{BUCKET}/{key}',
+                              'totalActions': action_count,
+                              'regionsProcessed': processed_regions
+                          }
+                      }
+                  except Exception as exc:
+                      logger.error(f"Error in main processing: {exc}", exc_info=True)
+                      if os.path.exists(temp_file.name):
+                          os.unlink(temp_file.name)
+                      raise
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          ROLENAME: !Ref MultiAccountRoleName
+          REGIONS: !Ref RegionsInScope
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for reserved concurrent executions"
+
+  RDSVersionsLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}RHD-${CFDataName}-versions-Lambda'
+      Description: !Sub 'Lambda function to collect RDS version data for ${CFDataName}'
+      Runtime: 'python3.13'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          from datetime import datetime
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from typing import List, Dict, Any
+
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          # Configure logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+          for handler in logger.handlers:
+              handler.setFormatter(formatter)
+
+          # Constants
+          BUCKET = os.environ["BUCKET_NAME"]
+          PREFIX = os.environ['PREFIX']
+          MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '5'))
+          TEMP_FILE = "/tmp/rds_versions.json"
+
+          DEFAULT_REGIONS = ['ap-south-1','ca-central-1','eu-central-1','us-west-1','us-west-2','eu-north-1','eu-west-3','eu-west-2','eu-west-1','ap-northeast-3','ap-northeast-2',
+              'ap-northeast-1','sa-east-1','ap-southeast-1','ap-southeast-2','us-east-1','us-east-2']
+          REGIONS = os.environ.get("REGIONS", "").split(',') if os.environ.get("REGIONS") else DEFAULT_REGIONS
+
+          # AWS client configuration
+          AWS_CONFIG = Config(
+              retries={'max_attempts': 2},
+              read_timeout=20,
+              connect_timeout=20,
+              parameter_validation=False
+          )
+
+          def collect_versions_for_region(region: str) -> List[Dict[str, Any]]:
+              """
+              Collect RDS versions for a specific region, assuming API returns sorted versions
+              """
+              try:
+                  logger.info(f"Collecting versions from {region}")
+                  versions = []
+                  collection_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                  
+                  rds_client = boto3.client('rds', region_name=region, config=AWS_CONFIG)
+                  paginator = rds_client.get_paginator('describe_db_engine_versions')
+                  
+                  # First pass: Group all versions and identify latest
+                  engine_versions = {}
+                  engine_latest = {}
+                  engine_previous_versions = {}  # Store per-engine previous versions
+                  engine_minor_latest = {}
+                  all_versions = []
+
+                  # Collect all versions using pagination
+                  for page in paginator.paginate():
+                      all_versions.extend(page['DBEngineVersions'])
+
+                  # Group versions by engine and major version
+                  for version_info in all_versions:
+                      engine = version_info['Engine']
+                      major_version = version_info.get('MajorEngineVersion', version_info['EngineVersion'].split('.')[0])
+                      
+                      if engine not in engine_versions:
+                          engine_versions[engine] = {}
+                      if major_version not in engine_versions[engine]:
+                          engine_versions[engine][major_version] = []
+                      
+                      engine_versions[engine][major_version].append(version_info)
+
+                  # Identify latest versions and previous versions for each engine
+                  for engine in engine_versions:
+                      # Sort major versions for this specific engine
+                      sorted_major_versions = sorted(engine_versions[engine].keys())
+                      
+                      # Store latest and previous major versions for this specific engine
+                      engine_latest[engine] = sorted_major_versions[-1]
+                      engine_previous_versions[engine] = {
+                          'major_minus_1': sorted_major_versions[-2] if len(sorted_major_versions) > 1 else '',
+                          'major_minus_2': sorted_major_versions[-3] if len(sorted_major_versions) > 2 else ''
+                      }
+                      
+                      engine_minor_latest[engine] = {}
+                      for major_version in engine_versions[engine]:
+                          versions_list = engine_versions[engine][major_version]
+                          
+                          # Special handling for Oracle SPB versions
+                          if engine.startswith('oracle'):
+                              # Separate SPB and non-SPB versions
+                              spb_versions = [v for v in versions_list if 'spb' in v['EngineVersion'].lower()]
+                              non_spb_versions = [v for v in versions_list if 'spb' not in v['EngineVersion'].lower()]
+                              
+                              # Set latest and previous versions for SPB and non-SPB separately
+                              if spb_versions:
+                                  all_spb = [v['EngineVersion'] for v in spb_versions]
+                                  engine_minor_latest[engine][major_version + '_spb'] = {
+                                      'latest': all_spb[-1],
+                                      'minus_1': all_spb[-2] if len(all_spb) > 1 else '',
+                                      'minus_2': all_spb[-3] if len(all_spb) > 2 else ''
+                                  }
+                              if non_spb_versions:
+                                  all_non_spb = [v['EngineVersion'] for v in non_spb_versions]
+                                  engine_minor_latest[engine][major_version] = {
+                                      'latest': all_non_spb[-1],
+                                      'minus_1': all_non_spb[-2] if len(all_non_spb) > 1 else '',
+                                      'minus_2': all_non_spb[-3] if len(all_non_spb) > 2 else ''
+                                  }
+                          else:
+                              # Handle limitless and non-limitless versions separately
+                              limitless_versions = [v for v in versions_list if v.get('SupportsLimitlessDatabase', False)]
+                              non_limitless_versions = [v for v in versions_list if not v.get('SupportsLimitlessDatabase', False)]
+                              
+                              # Process limitless versions if they exist
+                              if limitless_versions:
+                                  all_limitless = [v['EngineVersion'] for v in limitless_versions]
+                                  engine_minor_latest[engine][f"{major_version}_limitless"] = {
+                                      'latest': all_limitless[-1],
+                                      'minus_1': all_limitless[-2] if len(all_limitless) > 1 else '',
+                                      'minus_2': all_limitless[-3] if len(all_limitless) > 2 else ''
+                                  }
+                              
+                              # Process non-limitless versions
+                              if non_limitless_versions:
+                                  all_non_limitless = [v['EngineVersion'] for v in non_limitless_versions]
+                                  engine_minor_latest[engine][major_version] = {
+                                      'latest': all_non_limitless[-1],
+                                      'minus_1': all_non_limitless[-2] if len(all_non_limitless) > 1 else '',
+                                      'minus_2': all_non_limitless[-3] if len(all_non_limitless) > 2 else ''
+                                  }
+
+                  # Create version records for all versions
+                  for version_info in all_versions:
+                      engine = version_info['Engine']
+                      minor_version = version_info['EngineVersion']
+                      major_version = version_info.get('MajorEngineVersion', minor_version.split('.')[0])
+                      is_limitless = version_info.get('SupportsLimitlessDatabase', False)
+                      
+                      # Special handling for Oracle latest minor version check
+                      if engine.startswith('oracle'):
+                          is_spb = 'spb' in minor_version.lower()
+                          latest_version_key = major_version + '_spb' if is_spb else major_version
+                          latest_versions = engine_minor_latest[engine].get(latest_version_key, {})
+                          is_latest_minor = str(minor_version == latest_versions.get('latest', ''))
+                      else:
+                          # Use appropriate version key based on limitless support
+                          latest_version_key = f"{major_version}_limitless" if is_limitless else major_version
+                          latest_versions = engine_minor_latest[engine].get(latest_version_key, {})
+                          is_latest_minor = str(minor_version == latest_versions.get('latest', ''))
+                      
+                      # Use engine-specific previous versions
+                      engine_previous = engine_previous_versions[engine]
+                      
+                      version_record = {
+                          'db_engine_name': engine,
+                          'db_major_version': major_version,
+                          'db_minor_version': minor_version,
+                          'db_description': version_info.get('DBEngineDescription', ''),
+                          'version_status': version_info.get('Status', 'available'),
+                          'region': region,
+                          'feature_limitless': str(version_info.get('SupportsLimitlessDatabase', False)),
+                          'feature_read_replica': str(version_info.get('SupportsReadReplica', False)),
+                          'feature_global_db': str(version_info.get('SupportsGlobalDatabases', False)),
+                          'db_engine_mode': version_info.get('EngineMode', 'provisioned'),
+                          'param_group_family': version_info.get('DBParameterGroupFamily', ''),
+                          'collection_date': collection_date,
+                          'is_latest_major_version': str(major_version == engine_latest[engine]),
+                          'is_latest_minor_version': is_latest_minor,
+                          'latest_major_version': engine_latest[engine],
+                          'latest_major_version_n-1': engine_previous['major_minus_1'],
+                          'latest_major_version_n-2': engine_previous['major_minus_2'],
+                          'latest_minor_version': latest_versions.get('latest', ''),
+                          'latest_minor_version_n-1': latest_versions.get('minus_1', ''),
+                          'latest_minor_version_n-2': latest_versions.get('minus_2', '')
+                      }
+                      
+                      versions.append(version_record)
+
+                  # Log summary with engine-specific version information
+                  logger.info(f"Region {region} summary:")
+                  for engine in engine_versions:
+                      logger.info(f"Engine {engine}:")
+                      logger.info(f"  Latest major: {engine_latest[engine]}")
+                      logger.info(f"  Previous major -1: {engine_previous_versions[engine]['major_minus_1']}")
+                      logger.info(f"  Previous major -2: {engine_previous_versions[engine]['major_minus_2']}")
+                      for major_version in engine_versions[engine]:
+                          version_count = len(engine_versions[engine][major_version])
+                          latest = engine_minor_latest[engine][major_version].get('latest', '')
+                          logger.info(f"  Major {major_version}: {version_count} versions, latest: {latest}")
+                  
+                  return versions
+                  
+              except Exception as e:
+                  logger.error(f"Error in region {region}: {str(e)}")
+                  logger.error("Exception details:", exc_info=True)
+                  return []
+
+          def write_to_s3(versions: List[Dict[str, Any]], key: str) -> bool:
+              """Write versions data to S3"""
+              try:
+                  s3_client = boto3.client('s3', config=AWS_CONFIG)
+                  with open(TEMP_FILE, 'w') as f:
+                      for version in versions:
+                          f.write(json.dumps(version) + '\n')
+                  
+                  s3_client.upload_file(TEMP_FILE, BUCKET, key)
+                  return True
+              except Exception as e:
+                  logger.error(f"Error writing to S3: {str(e)}")
+                  return False
+              finally:
+                  if os.path.exists(TEMP_FILE):
+                      os.remove(TEMP_FILE)
+
+          def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+              """Main Lambda handler"""
+              try:
+                  current_date = datetime.now()
+                  all_versions = []
+                  processed_regions = set()
+                  failed_regions = set()
+                  
+                  with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                      future_to_region = {
+                          executor.submit(collect_versions_for_region, region): region 
+                          for region in REGIONS
+                      }
+                      
+                      for future in as_completed(future_to_region):
+                          region = future_to_region[future]
+                          try:
+                              versions = future.result()
+                              if versions:
+                                  all_versions.extend(versions)
+                                  processed_regions.add(region)
+                              else:
+                                  failed_regions.add(region)
+                          except Exception as e:
+                              logger.error(f"Error processing region {region}: {str(e)}")
+                              failed_regions.add(region)
+                  
+                  if not all_versions:
+                      return {
+                          'statusCode': 200,
+                          'body': {
+                              'message': 'No versions collected',
+                              'regions_processed': len(processed_regions),
+                              'regions_failed': len(failed_regions)
+                          }
+                      }
+                  
+                  # Write to S3
+                  key = f"{PREFIX}/year={current_date.strftime('%Y')}/month={current_date.strftime('%m')}/rds_versions_{current_date.strftime('%Y%m%d')}.json"
+                  if write_to_s3(all_versions, key):
+                      return {
+                          'statusCode': 200,
+                          'body': {
+                              'message': 'Success',
+                              'file_location': f's3://{BUCKET}/{key}',
+                              'version_count': len(all_versions),
+                              'processed_regions': sorted(list(processed_regions)),
+                              'failed_regions': sorted(list(failed_regions))
+                          }
+                      }
+                  
+                  raise Exception("Failed to write to S3")
+                  
+              except Exception as e:
+                  logger.error(f"Error in lambda_handler: {str(e)}")
+                  raise
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: rds-versions-data
+          MAX_WORKERS: '10'
+          REGIONS: !Ref RegionsInScope
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for reserved concurrent executions"
+
+  # EOS Step Function (STANDALONE)
+  StepFunctioneos:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RHD-${CFDataName}-eos-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS EOS data collection - Standalone workflow",
+          "StartAt": "InvokeLambda",
+          "States": {
+            "InvokeLambda": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${RDSEOSLambda.Arn}"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "CrawlerExecution"
+            },
+            "CrawlerExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}RHD-${CFDataName}-eos-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulereos:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-eos-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'ENABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctioneos.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "eos",
+            "params": "eos"
+          }
+
+  Crawlereos:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-eos-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/rds-endofsupport-data/'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  # Versions Step Function (STANDALONE)
+  StepFunctionversions:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RHD-${CFDataName}-versions-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Versions data collection - Standalone workflow",
+          "StartAt": "InvokeLambda",
+          "States": {
+            "InvokeLambda": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${RDSVersionsLambda.Arn}"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "CrawlerExecution"
+            },
+            "CrawlerExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}RHD-${CFDataName}-versions-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulerversions:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-versions-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'ENABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionversions.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "versions",
+            "params": "versions"
+          }
+
+  Crawlerversions:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-versions-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/rds-versions-data/'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  # Analysis Step Function (LINKED)
+  StepFunctionanalysis:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RHD-${CFDataName}-analysis-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Analysis data collection - Linked workflow with multi-account support",
+          "StartAt": "AccountCollectorInvoke",
+          "States": {
+            "AccountCollectorInvoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {"type": "linked"},
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}account-collector-Lambda"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "AccountMap",
+              "ResultPath": "$.accountLambdaOutput"
+            },
+            "AccountMap": {
+              "Type": "Map",
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                },
+                "StartAt": "InvokeModuleLambda",
+                "States": {
+                  "InvokeModuleLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "Payload": {
+                        "account.$": "$.account",
+                        "params": "rds-db-analysis"
+                      },
+                      "FunctionName": "${RDSAnalysisLambda.Arn}"
+                    },
+                    "Retry": [{
+                      "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }],
+                    "End": true
+                  }
+                }
+              },
+              "MaxConcurrency": 60,
+              "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {
+                  "Bucket.$": "$.accountLambdaOutput.Payload.bucket",
+                  "Key.$": "$.accountLambdaOutput.Payload.accountList"
+                }
+              },
+              "Next": "CrawlerStepFunctionStartExecution"
+            },
+            "CrawlerStepFunctionStartExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}RHD-${CFDataName}-analysis-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Scheduleranalysis:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-analysis-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'ENABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionanalysis.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "analysis",
+            "params": "analysis"
+          }
+
+  Crawleranalysis:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-analysis-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/rds-analysis-data/'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  # Maintenance Step Function (LINKED)
+  StepFunctionmaintenance:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RHD-${CFDataName}-maintenance-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Maintenance data collection - Linked workflow with multi-account support",
+          "StartAt": "AccountCollectorInvoke",
+          "States": {
+            "AccountCollectorInvoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {"type": "linked"},
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}account-collector-Lambda"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "AccountMap",
+              "ResultPath": "$.accountLambdaOutput"
+            },
+            "AccountMap": {
+              "Type": "Map",
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                },
+                "StartAt": "InvokeModuleLambda",
+                "States": {
+                  "InvokeModuleLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "Payload": {
+                        "account.$": "$.account",
+                        "params": "rds-db-maintenance"
+                      },
+                      "FunctionName": "${RDSMaintenanceLambda.Arn}"
+                    },
+                    "Retry": [{
+                      "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }],
+                    "End": true
+                  }
+                }
+              },
+              "MaxConcurrency": 60,
+              "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {
+                  "Bucket.$": "$.accountLambdaOutput.Payload.bucket",
+                  "Key.$": "$.accountLambdaOutput.Payload.accountList"
+                }
+              },
+              "Next": "CrawlerStepFunctionStartExecution"
+            },
+            "CrawlerStepFunctionStartExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}RHD-${CFDataName}-maintenance-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulermaintenance:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-maintenance-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'ENABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionmaintenance.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "maintenance",
+            "params": "maintenance"
+          }
+
+  Crawlermaintenance:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-maintenance-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/rds-maintenance-data/'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  # Clusters Step Function (INVENTORY)
+  StepFunctionclustersnapshot:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}RHD-${CFDataName}-clustersnapshot-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Clusters inventory collection - Uses CID Inventory Lambda",
+          "StartAt": "AccountCollectorInvoke",
+          "States": {
+            "AccountCollectorInvoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {"type": "linked"},
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}account-collector-Lambda"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "AccountMap",
+              "ResultPath": "$.accountLambdaOutput"
+            },
+            "AccountMap": {
+              "Type": "Map",
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                },
+                "StartAt": "InvokeInventoryLambda",
+                "States": {
+                  "InvokeInventoryLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "Payload": {
+                        "account.$": "$.account",
+                        "params": "rds-cluster-snapshots"
+                      },
+                      "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}inventory-Lambda"
+                    },
+                    "Retry": [{
+                      "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }],
+                    "End": true
+                  }
+                }
+              },
+              "MaxConcurrency": 60,
+              "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {
+                  "Bucket.$": "$.accountLambdaOutput.Payload.bucket",
+                  "Key.$": "$.accountLambdaOutput.Payload.accountList"
+                }
+              },
+              "Next": "CrawlerStepFunctionStartExecution"
+            },
+            "CrawlerStepFunctionStartExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}RHD-${CFDataName}-clustersnapshot-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulerclustersnapshot:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-clustersnapshot-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'DISABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionclustersnapshot.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "clustersnapshot",
+            "params": "clustersnapshot"
+          }
+
+  Crawlerclustersnapshot:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}RHD-${CFDataName}-clustersnapshot-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/inventory/inventory-rds-cluster-snapshots-data'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  EOSGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_endofsupport_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: engine
+              Type: string
+            - Name: major_version
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: standard_support_start
+              Type: string
+            - Name: standard_support_end
+              Type: string
+            - Name: extended_support_start
+              Type: string
+            - Name: extended_support_end
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/rds-endofsupport-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}RHD-${CFDataName}-eos-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'collection_date,engine,extended_support_end,extended_support_start,major_version,standard_support_end,standard_support_start'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  VersionsGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_versions_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: db_engine_name
+              Type: string
+            - Name: db_major_version
+              Type: string
+            - Name: db_minor_version
+              Type: string
+            - Name: db_description
+              Type: string
+            - Name: version_status
+              Type: string
+            - Name: region
+              Type: string
+            - Name: feature_limitless
+              Type: string
+            - Name: feature_read_replica
+              Type: string
+            - Name: feature_global_db
+              Type: string
+            - Name: db_engine_mode
+              Type: string
+            - Name: param_group_family
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: is_latest_major_version
+              Type: string
+            - Name: is_latest_minor_version
+              Type: string
+            - Name: latest_major_version
+              Type: string
+            - Name: "latest_major_version_n-1"
+              Type: string
+            - Name: "latest_major_version_n-2"
+              Type: string
+            - Name: latest_minor_version
+              Type: string
+            - Name: "latest_minor_version_n-1"
+              Type: string
+            - Name: "latest_minor_version_n-2"
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/rds-versions-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}RHD-${CFDataName}-versions-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'collection_date,db_description,db_engine_mode,db_engine_name,db_major_version,db_minor_version,feature_global_db,feature_limitless,feature_read_replica,is_latest_major_version,is_latest_minor_version,latest_major_version,latest_major_version_n-1,latest_major_version_n-2,latest_minor_version,latest_minor_version_n-1,latest_minor_version_n-2,param_group_family,region,version_status'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  MaintenanceGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_maintenance_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: resourceidentifier
+              Type: string
+            - Name: action
+              Type: string
+            - Name: description
+              Type: string
+            - Name: region
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: currentapplydate
+              Type: string
+            - Name: autoappliedafterdate
+              Type: string
+            - Name: forcedapplydate
+              Type: string
+            - Name: optinstatus
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/rds-maintenance-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}RHD-${CFDataName}-maintenance-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'Action,AutoAppliedAfterDate,CurrentApplyDate,Description,ForcedApplyDate,OptInStatus,Region,ResourceIdentifier,accountid,collection_date'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ClusterSnapshotGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: inventory_rds_cluster_snapshots_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: dbclustersnapshotidentifier
+              Type: string
+            - Name: dbclusteridentifier
+              Type: string
+            - Name: availabilityzones
+              Type: array<string>              
+            - Name: snapshotcreatetime
+              Type: string
+            - Name: engine
+              Type: string
+            - Name: enginemode
+              Type: string
+            - Name: allocatedstorage
+              Type: int
+            - Name: status
+              Type: string
+            - Name: port
+              Type: int
+            - Name: vpcid
+              Type: string
+            - Name: clustercreatetime
+              Type: string
+            - Name: masterusername
+              Type: string
+            - Name: engineversion
+              Type: string
+            - Name: licensemodel
+              Type: string
+            - Name: snapshottype
+              Type: string
+            - Name: percentprogress
+              Type: int
+            - Name: storageencrypted
+              Type: boolean
+            - Name: kmskeyid
+              Type: string
+            - Name: dbclustersnapshotarn
+              Type: string
+            - Name: iamdatabaseauthenticationenabled
+              Type: boolean
+            - Name: taglist
+              Type: array<struct<key:string,value:string>>
+            - Name: dbclusterresourceid
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: region
+              Type: string
+            - Name: sourcedbclustersnapshotarn
+              Type: string
+            - Name: storagetype
+              Type: string
+            - Name: storagethroughput
+              Type: int
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/inventory/inventory-rds-cluster-snapshots-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}RHD-${CFDataName}-clustersnapshot-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'AllocatedStorage,AvailabilityZones,ClusterCreateTime,DBClusterIdentifier,DBClusterSnapshotArn,DBClusterSnapshotIdentifier,DbClusterResourceId,Engine,EngineMode,EngineVersion,IAMDatabaseAuthenticationEnabled,KmsKeyId,LicenseModel,MasterUsername,PercentProgress,Port,SnapshotCreateTime,SnapshotType,SourceDBClusterSnapshotArn,Status,StorageEncrypted,StorageThroughput,StorageType,TagList,VpcId,accountid,collection_date,region'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  AnalysisGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_analysis_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: dbinstanceidentifier
+              Type: string
+            - Name: dbinstanceclass
+              Type: string
+            - Name: engine
+              Type: string
+            - Name: dbinstancestatus
+              Type: string
+            - Name: masterusername
+              Type: string
+            - Name: endpoint
+              Type: struct<Address:string,Port:int,HostedZoneId:string>
+            - Name: allocatedstorage
+              Type: int
+            - Name: instancecreatetime
+              Type: string
+            - Name: preferredbackupwindow
+              Type: string
+            - Name: backupretentionperiod
+              Type: int
+            - Name: dbsecuritygroups
+              Type: array<string>
+            - Name: vpcsecuritygroups
+              Type: array<struct<VpcSecurityGroupId:string,Status:string>>
+            - Name: dbparametergroups
+              Type: array<struct<DBParameterGroupName:string,ParameterApplyStatus:string>>
+            - Name: availabilityzone
+              Type: string
+            - Name: dbsubnetgroup
+              Type: struct<DBSubnetGroupName:string,DBSubnetGroupDescription:string,VpcId:string,SubnetGroupStatus:string,Subnets:array<struct<SubnetIdentifier:string,SubnetAvailabilityZone:struct<Name:string>,SubnetOutpost:string,SubnetStatus:string>>>
+            - Name: preferredmaintenancewindow
+              Type: string
+            - Name: latestrestorabletime
+              Type: string
+            - Name: multiaz
+              Type: boolean
+            - Name: engineversion
+              Type: string
+            - Name: autominorversionupgrade
+              Type: boolean
+            - Name: readreplicadbinstanceidentifiers
+              Type: array<string>
+            - Name: readreplicasourcedbinstanceidentifier
+              Type: string
+            - Name: licensemodel
+              Type: string
+            - Name: optiongroupmemberships
+              Type: array<struct<OptionGroupName:string,Status:string>>
+            - Name: publiclyaccessible
+              Type: boolean
+            - Name: storagetype
+              Type: string
+            - Name: dbinstanceport
+              Type: int
+            - Name: storageencrypted
+              Type: boolean
+            - Name: dbiresourceid
+              Type: string
+            - Name: cacertificateidentifier
+              Type: string
+            - Name: domainmemberships
+              Type: array<string>
+            - Name: copytagstosnapshot
+              Type: boolean
+            - Name: monitoringinterval
+              Type: int
+            - Name: dbinstancearn
+              Type: string
+            - Name: iamdatabaseauthenticationenabled
+              Type: boolean
+            - Name: databaseinsightsmode
+              Type: string
+            - Name: performanceinsightsenabled
+              Type: boolean
+            - Name: deletionprotection
+              Type: boolean
+            - Name: associatedroles
+              Type: array<string>
+            - Name: maxallocatedstorage
+              Type: int
+            - Name: taglist
+              Type: array<struct<key:string,value:string>>
+            - Name: activitystreamstatus
+              Type: string
+            - Name: backuptarget
+              Type: string
+            - Name: networktype
+              Type: string
+            - Name: storagethroughput
+              Type: int
+            - Name: certificatedetails
+              Type: struct<CAIdentifier:string,ValidTill:string>
+            - Name: dedicatedlogvolume
+              Type: boolean
+            - Name: dbclusteridentifier
+              Type: string
+            - Name: dbname
+              Type: string
+            - Name: enginelifecyclesupport
+              Type: string
+            - Name: current_major_version
+              Type: string
+            - Name: latest_major_version
+              Type: string
+            - Name: "latest_major_version_n-1"
+              Type: string
+            - Name: "latest_major_version_n-2"
+              Type: string
+            - Name: current_minor_version
+              Type: string
+            - Name: latest_minor_version
+              Type: string
+            - Name: "latest_minor_version_n-1"
+              Type: string
+            - Name: "latest_minor_version_n-2"
+              Type: string
+            - Name: engine_version_status
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: region
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/rds-analysis-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}RHD-${CFDataName}-analysis-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'ActivityStreamStatus,AllocatedStorage,AssociatedRoles,AutoMinorVersionUpgrade,AvailabilityZone,BackupRetentionPeriod,BackupTarget,CACertificateIdentifier,CertificateDetails,CopyTagsToSnapshot,DatabaseInsightsMode,DBClusterIdentifier,DBInstanceArn,DBInstanceClass,DBInstanceIdentifier,DBInstanceStatus,DBName,DBParameterGroups,DBSecurityGroups,DBSubnetGroup,DbInstancePort,DbiResourceId,DedicatedLogVolume,DeletionProtection,DomainMemberships,Endpoint,Engine,EngineLifecycleSupport,EngineVersion,IAMDatabaseAuthenticationEnabled,InstanceCreateTime,LatestRestorableTime,LicenseModel,MasterUsername,MaxAllocatedStorage,MonitoringInterval,MultiAZ,NetworkType,OptionGroupMemberships,PerformanceInsightsEnabled,PreferredBackupWindow,PreferredMaintenanceWindow,PubliclyAccessible,ReadReplicaDBInstanceIdentifiers,ReadReplicaSourceDBInstanceIdentifier,StorageEncrypted,StorageThroughput,StorageType,TagList,VpcSecurityGroups,accountid,collection_date,current_major_version,current_minor_version,engine_version_status,enginelifecyclesupport,latest_major_version,latest_major_version_n-1,latest_major_version_n-2,latest_minor_version,latest_minor_version_n-1,latest_minor_version_n-2,region'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+Outputs:
+  AnalysisStateMachineArn:
+    Description: 'ARN of the RDS Analysis Step Function'
+    Value: !GetAtt StepFunctionanalysis.Arn
+  EOSStateMachineArn:
+    Description: 'ARN of the RDS End-of-Support Step Function'
+    Value: !GetAtt StepFunctioneos.Arn
+  VersionsStateMachineArn:
+    Description: 'ARN of the RDS Versions Step Function'
+    Value: !GetAtt StepFunctionversions.Arn
+  MaintenanceStateMachineArn:
+    Description: 'ARN of the RDS Maintenance Step Function'
+    Value: !GetAtt StepFunctionmaintenance.Arn
+  ClusterSnapshotStateMachineArn:
+    Description: 'ARN of the RDS Cluster Snapshot Step Function'
+    Value: !GetAtt StepFunctionclustersnapshot.Arn

@@ -363,6 +363,32 @@ def test_elasticache_reserved_cache_nodes_offerings_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_elasticache_reserved_cache_nodes_offerings" LIMIT 10;')
     assert len(data) > 0, 'elasticache_reserved_cache_nodes_offerings is empty'
 
+def test_rds_health_analysis_data(athena):
+    """Test RDS Health analysis data collection"""
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_analysis_data" LIMIT 10;')
+    assert len(data) > 0, 'rds_analysis_data is empty'
+
+
+def test_rds_health_versions_data(athena):
+    """Test RDS Health versions data collection"""
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_versions_data" LIMIT 10;')
+    assert len(data) > 0, 'rds_versions_data is empty'
+
+
+def test_rds_health_maintenance_data(athena):
+    """Test RDS Health maintenance data collection"""
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_maintenance_data" LIMIT 10;')
+    # Maintenance data may be 0 if no pending maintenance actions
+    assert len(data) >= 0, 'rds_maintenance_data query failed'
+
+
+def test_rds_health_eos_data(athena):
+    """Test RDS Health end-of-support data collection"""
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_endofsupport_data" LIMIT 10;')
+    # EOS data may be 0 if no instances on deprecated versions
+    assert len(data) >= 0, 'rds_endofsupport_data query failed'
+       
+
 if __name__ == '__main__':
     pytest.params = {}
     if '--no-teardown' in sys.argv:

@@ -251,6 +251,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeMarketplaceModule',        'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeRDSHealthModule',          'ParameterValue': "yes"},
         ]
     )
 
@@ -430,6 +431,11 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}identity-center-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}RHD-rds-versions-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}RHD-rds-maintenance-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}RHD-rds-eos-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}RHD-rds-clustersnapshot-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}RHD-rds-analysis-StateMachine"
     ]
     lambda_arns = []
     lambda_norun_arns = []
