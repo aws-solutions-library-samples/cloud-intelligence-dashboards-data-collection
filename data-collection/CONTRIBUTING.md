@@ -1,5 +1,8 @@
 # CONTRIBUTION GUIDE
 
+Before adding a new module or extending an existing one, read [MODULE_GUIDELINES.md](MODULE_GUIDELINES.md)
+to decide where the data belongs and how to name the module.
+
 # Development process
 
 ## Testing environment
