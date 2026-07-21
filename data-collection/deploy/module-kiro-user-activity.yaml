@@ -1,0 +1,577 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kiro User Activity - Pull-based Data Collection v3.14.5
+Transform: 'AWS::LanguageExtensions'
+
+Metadata:
+  cfn_nag:
+    rules_to_suppress:
+      - id: W2001
+        reason: "Parameters DestinationBucketARN and LambdaAnalyticsARN are required by the deployment framework"
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to hold the Kiro user activity table
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that holds collected data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that holds collected data
+  CFDataName:
+    Type: String
+    Description: The name of what this CloudFormation stack is doing.
+    Default: kiro-user-activity
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created.
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+    Default: ""
+  Schedule:
+    Type: String
+    Description: "EventBridge schedule for data collection. Default runs daily at 3AM UTC (after Kiro generates reports at 2AM UTC)."
+    Default: "cron(0 3 * * ? *)"
+  KiroSourceBuckets:
+    Type: CommaDelimitedList
+    Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
+  KiroActivityPrefix:
+    Type: String
+    Description: "S3 prefix where Kiro writes user activity reports in each source bucket (include trailing slash)."
+    Default: "kiro/"
+    AllowedPattern: ^.+\/$
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for source data buckets. Comma separated list, no spaces. Keep empty if source buckets are not encrypted with KMS."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  HasAnalyticsLambda: !Not [ !Equals [ !Ref LambdaAnalyticsARN, "" ] ]
+
+Outputs:
+  LambdaRoleArn:
+    Description: "ARN of the Lambda execution role — customers reference this in their bucket policy"
+    Value: !GetAtt LambdaRole.Arn
+  LambdaRoleName:
+    Description: "Name of the Lambda execution role"
+    Value: !Ref LambdaRole
+  CollectorLambdaArn:
+    Description: "ARN of the collector Lambda function"
+    Value: !GetAtt KiroCollectorLambda.Arn
+  TableName:
+    Description: "Athena table name for the Kiro user activity data"
+    Value: !Sub "${DatabaseName}.kiro_user_activity"
+  BucketPolicyExample:
+    Description: "Example bucket policy statements for customers to apply to their Kiro log buckets. GetObject is scoped to the Kiro prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy."
+    Value: !Sub |
+      [
+        {
+          "Sid": "AllowCIDKiroDataCollectionRead",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:GetObject",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME/${KiroActivityPrefix}*"
+        },
+        {
+          "Sid": "AllowCIDKiroDataCollectionList",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:ListBucket",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME",
+          "Condition": {"StringLike": {"s3:prefix": "${KiroActivityPrefix}*"}}
+        }
+      ]
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: "S3WriteDestination"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/kiro-user-activity/*"
+              # ListBucket on the destination prefix so the collector can see
+              # which (account, region, date) data has already been imported and
+              # only pull what is missing (checkpoint / backfill reconcile).
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Ref DestinationBucketARN
+                Condition:
+                  StringLike:
+                    "s3:prefix": "kiro-user-activity/*"
+        - PolicyName: "GlueRegisterPartitions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Register each (account_id, region, year, month, day) partition the
+              # collector writes, and read the table to inherit its storage
+              # descriptor. No crawler and no partition projection are used.
+              - Effect: "Allow"
+                Action:
+                  - "glue:GetTable"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                  - "glue:BatchCreatePartition"
+                  - "glue:CreatePartition"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${DatabaseName}/kiro_user_activity"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:Decrypt"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name so customers can reference it in their bucket policies"
+
+  'Fn::ForEach::KiroSourceReadPolicies':
+    - Bucket
+    - !Ref KiroSourceBuckets
+    - 'KiroSourceReadPolicy&{Bucket}':
+        Type: AWS::IAM::RolePolicy
+        Properties:
+          RoleName: !Ref LambdaRole
+          PolicyName: !Sub "S3Read-${Bucket}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/${KiroActivityPrefix}*"
+
+  KiroCollectorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: "Pulls Kiro user activity CSVs from source buckets into the central data collection bucket"
+      Runtime: python3.13
+      Architectures: [arm64]
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import io
+          import csv
+          import boto3
+
+          s3 = boto3.client('s3')
+          glue = boto3.client('glue')
+
+          DEST_BUCKET = os.environ['DEST_BUCKET']
+          SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
+          SOURCE_PREFIX = os.environ['SOURCE_PREFIX']
+          DEST_PREFIX = 'kiro-user-activity'
+          GLUE_DATABASE = os.environ['GLUE_DATABASE']
+          GLUE_TABLE = os.environ['GLUE_TABLE']
+
+          # Validation marker pattern: UUID-formatted filenames
+          def is_validation_marker(key):
+              parts = key.split('/')
+              filename = parts[-1] if parts else key
+              segments = filename.split('-')
+              return (len(segments) == 5 and
+                      all(len(s) in (8, 4, 4, 4, 12) for s in segments) and
+                      all(c in '0123456789abcdef-' for c in filename))
+
+          # Output CSV columns (order matters). account_id and region are NOT here:
+          # they are Glue partition keys derived from the S3 path, so keeping them
+          # out of the file body avoids duplicating the partition value in the data.
+          BASE_COLUMNS = [
+              'date', 'userid', 'client_type', 'chat_conversations',
+              'credits_used', 'overage_cap', 'overage_credits_used',
+              'overage_enabled', 'profileid', 'subscription_tier',
+              'total_messages', 'new_user', 'user_email',
+              'model_name', 'model_messages'
+          ]
+
+          # Per-user/day aggregate fields. The Kiro report has ONE row per user per
+          # day; these columns describe the whole day, not any single model (credits
+          # are billed per user, messages are the user's daily total, etc.). When we
+          # pivot the per-model columns into rows we must NOT repeat these on every
+          # row or a downstream SUM() would multiply them by the number of models.
+          # They are written on the first model row only and zeroed on the rest, so
+          # SUM() reconstructs the true per-user/day value while model_messages stays
+          # per row for model-level breakdowns.
+          USER_DAY_AGGREGATE_ZEROS = {
+              'chat_conversations': '0',
+              'credits_used': '0',
+              'overage_credits_used': '0',
+              'total_messages': '0',
+              'new_user': 'false',
+          }
+
+          def transform_csv(original_text):
+              """Parse a raw Kiro report CSV and pivot per-model columns into rows.
+
+              account_id and region are not emitted as columns — they are carried by
+              the S3 partition path. Per-user/day aggregates land on one
+              representative (first) model row; subsequent model rows carry only the
+              per-model message count so a downstream SUM() is not multiplied by the
+              number of models.
+              """
+              reader = csv.DictReader(io.StringIO(original_text))
+              headers = reader.fieldnames or []
+
+              # Identify model columns (pattern: *_messages but not total_messages)
+              model_cols = [h for h in headers if h.endswith('_messages') and h != 'Total_Messages' and h.lower() != 'total_messages']
+
+              output = io.StringIO()
+              writer = csv.DictWriter(output, fieldnames=BASE_COLUMNS, extrasaction='ignore')
+              writer.writeheader()
+
+              row_count = 0
+              for row in reader:
+                  base = {
+                      'date': row.get('Date', ''),
+                      'userid': row.get('UserId', ''),
+                      'client_type': row.get('Client_Type', ''),
+                      'chat_conversations': row.get('Chat_Conversations', ''),
+                      'credits_used': row.get('Credits_Used', ''),
+                      'overage_cap': row.get('Overage_Cap', ''),
+                      'overage_credits_used': row.get('Overage_Credits_Used', ''),
+                      'overage_enabled': row.get('Overage_Enabled', ''),
+                      'profileid': row.get('ProfileId', ''),
+                      'subscription_tier': row.get('Subscription_Tier', ''),
+                      'total_messages': row.get('Total_Messages', ''),
+                      'new_user': row.get('New_User', ''),
+                      'user_email': row.get('User_Email', ''),
+                  }
+
+                  # Only models the user actually used that day (non-zero counts).
+                  used_models = [c for c in model_cols if (row.get(c, '0') or '0') != '0']
+
+                  if used_models:
+                      for idx, col in enumerate(used_models):
+                          # Convert column name to friendly model name
+                          # e.g. "claude_opus_4.8_messages" -> "claude_opus_4.8"
+                          model_name = col.replace('_messages', '').replace('_', ' ').title()
+                          out = dict(base)
+                          out['model_name'] = model_name
+                          out['model_messages'] = row.get(col, '0')
+                          # Carry per-user/day aggregates on the first model row only.
+                          if idx > 0:
+                              out.update(USER_DAY_AGGREGATE_ZEROS)
+                          writer.writerow(out)
+                          row_count += 1
+                  else:
+                      # No per-model breakdown available: single row keeps the aggregates.
+                      base['model_name'] = 'unknown'
+                      base['model_messages'] = row.get('Total_Messages', '0')
+                      writer.writerow(base)
+                      row_count += 1
+
+              return output.getvalue(), row_count
+
+          def parse_source_key(key):
+              """From a raw Kiro key, return (account_id, region, year, month, day,
+              filename) using the path layout:
+                {prefix}AWSLogs/{account}/KiroLogs/user_report/{region}/{yyyy}/{mm}/{dd}/[HH/]{file}.csv
+              Returns None if the key does not match (e.g. legacy by_user_analytic)."""
+              parts = key.split('/')
+              try:
+                  a = parts.index('AWSLogs')
+                  account_id = parts[a + 1]
+                  r = parts.index('user_report')
+                  region = parts[r + 1]
+                  year, month, day = parts[r + 2], parts[r + 3], parts[r + 4]
+              except (ValueError, IndexError):
+                  return None
+              if not (len(year) == 4 and len(month) == 2 and len(day) == 2):
+                  return None
+              return account_id, region, year, month, day, parts[-1]
+
+          def dest_key_for(account_id, region, year, month, day, filename):
+              """Hive-partitioned destination key. account_id/region/date are encoded
+              as partition folders (not in the file body)."""
+              return (f'{DEST_PREFIX}/account_id={account_id}/region={region}/'
+                      f'year={year}/month={month}/day={day}/{filename}')
+
+          def list_imported_dest_keys():
+              """Set of destination keys already present, used as the import
+              checkpoint so we only pull source files that are missing."""
+              imported = set()
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=DEST_BUCKET, Prefix=f'{DEST_PREFIX}/'):
+                  for obj in page.get('Contents', []):
+                      imported.add(obj['Key'])
+              return imported
+
+          def register_partition(account_id, region, year, month, day, sd_template):
+              """Register one Hive partition in Glue (idempotent). The storage
+              descriptor is cloned from the table and pointed at the partition path."""
+              location = (f's3://{DEST_BUCKET}/{DEST_PREFIX}/account_id={account_id}/'
+                          f'region={region}/year={year}/month={month}/day={day}/')
+              sd = dict(sd_template)
+              sd['Location'] = location
+              try:
+                  glue.create_partition(
+                      DatabaseName=GLUE_DATABASE,
+                      TableName=GLUE_TABLE,
+                      PartitionInput={
+                          'Values': [account_id, region, year, month, day],
+                          'StorageDescriptor': sd,
+                      },
+                  )
+              except glue.exceptions.AlreadyExistsException:
+                  pass
+
+          def lambda_handler(event, context):
+              # Full source-vs-destination reconcile: every run compares what each
+              # source bucket holds against what has already been imported and pulls
+              # only the difference. This provides checkpointing (transient failures
+              # self-heal on the next run) and backfill (older gaps are filled) with
+              # no separate state store — the destination itself is the checkpoint.
+
+              # Storage descriptor template from the table (for partition registration).
+              try:
+                  sd_template = glue.get_table(
+                      DatabaseName=GLUE_DATABASE, Name=GLUE_TABLE
+                  )['Table']['StorageDescriptor']
+              except Exception as e:
+                  sd_template = None
+                  print(f'Warning: could not read Glue table for partition registration: {e}')
+
+              imported = list_imported_dest_keys()
+
+              total_copied = 0
+              total_rows = 0
+              partitions_seen = set()
+              errors = []
+
+              for source_bucket in SOURCE_BUCKETS:
+                  source_bucket = source_bucket.strip()
+                  if not source_bucket:
+                      continue
+
+                  # One paginated LIST over the whole Kiro prefix per bucket, then
+                  # reconcile in memory — cheap even for buckets with many accounts.
+                  try:
+                      paginator = s3.get_paginator('list_objects_v2')
+                      for page in paginator.paginate(Bucket=source_bucket, Prefix=f'{SOURCE_PREFIX}AWSLogs/'):
+                          for obj in page.get('Contents', []):
+                              key = obj['Key']
+                              if not key.endswith('.csv') or is_validation_marker(key):
+                                  continue
+                              # Only the per-client user_report files (skip legacy
+                              # by_user_analytic and anything off-pattern).
+                              if '/KiroLogs/user_report/' not in key:
+                                  continue
+
+                              parsed = parse_source_key(key)
+                              if not parsed:
+                                  continue
+                              account_id, region, year, month, day, filename = parsed
+
+                              dest_key = dest_key_for(account_id, region, year, month, day, filename)
+                              if dest_key in imported:
+                                  continue  # already imported — checkpoint hit
+
+                              try:
+                                  response = s3.get_object(Bucket=source_bucket, Key=key)
+                                  original = response['Body'].read().decode('utf-8')
+                                  transformed, rows = transform_csv(original)
+                                  if rows > 0:
+                                      s3.put_object(
+                                          Bucket=DEST_BUCKET,
+                                          Key=dest_key,
+                                          Body=transformed.encode('utf-8'),
+                                          ContentType='text/csv'
+                                      )
+                                      imported.add(dest_key)
+                                      total_copied += 1
+                                      total_rows += rows
+                                      # Register the partition once per (acct,region,y,m,d).
+                                      pkey = (account_id, region, year, month, day)
+                                      if sd_template is not None and pkey not in partitions_seen:
+                                          register_partition(account_id, region, year, month, day, sd_template)
+                                          partitions_seen.add(pkey)
+                              except Exception as e:
+                                  errors.append(f'{source_bucket}/{key}: {str(e)}')
+                  except Exception as e:
+                      errors.append(f'Error listing {source_bucket}: {str(e)}')
+
+              result = {
+                  'statusCode': 200,
+                  'total_files_copied': total_copied,
+                  'total_rows_written': total_rows,
+                  'partitions_registered': len(partitions_seen),
+                  'errors': errors[:20]
+              }
+              print(json.dumps(result))
+              return result
+      Handler: 'index.lambda_handler'
+      MemorySize: 256
+      Timeout: 600
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DEST_BUCKET: !Ref DestinationBucket
+          SOURCE_BUCKETS: !Join [ ',', !Ref KiroSourceBuckets ]
+          SOURCE_PREFIX: !Ref KiroActivityPrefix
+          GLUE_DATABASE: !Ref DatabaseName
+          GLUE_TABLE: kiro_user_activity
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC — accessing S3 over public endpoints"
+          - id: W92
+            reason: "No need for reserved concurrency — runs once daily"
+
+  LambdaSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      Description: "Daily trigger for Kiro user activity data collection"
+      ScheduleExpression: !Ref Schedule
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 30
+      Target:
+        Arn: !GetAtt KiroCollectorLambda.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  LambdaSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KiroCollectorLambda
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt LambdaSchedule.Arn
+
+  # Explicit Glue Table partitioned by account_id, region, year, month, day.
+  #
+  # account_id and region are Hive PARTITION KEYS (not data columns) — their
+  # values come from the S3 key path. Kiro delivers under
+  # AWSLogs/{account}/.../user_report/{region}/..., so every file records its
+  # source account and region. Partitioning on them prevents cross-account
+  # filename collisions and preserves the region for future analysis. The Lambda
+  # writes Hive-style paths:
+  #   s3://{bucket}/kiro-user-activity/account_id={id}/region={region}/year=YYYY/month=MM/day=DD/{filename}.csv
+  #
+  # Partition PROJECTION is intentionally NOT used here: account_id is a sparse,
+  # high-cardinality value that is not known at deploy time (customers may manage
+  # 50+ source accounts). Integer projection can't model sparse 12-digit IDs, and
+  # 'injected' projection would force every Athena query to filter on a specific
+  # account_id, which breaks the all-accounts dashboard view. Instead the collector
+  # Lambda registers each partition it writes via the Glue API
+  # (batch_create_partition). This keeps new accounts/regions queryable
+  # automatically with no crawler and no parameter upkeep, and the set of
+  # registered partitions doubles as the import checkpoint.
+  KiroUserActivityTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: kiro_user_activity
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: csv
+          skip.header.line.count: "1"
+        PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: region
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/kiro-user-activity/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.OpenCSVSerde
+            Parameters:
+              separatorChar: ","
+              quoteChar: "\""
+              escapeChar: "\\"
+          Columns:
+            - Name: date
+              Type: string
+            - Name: userid
+              Type: string
+            - Name: client_type
+              Type: string
+            - Name: chat_conversations
+              Type: string
+            - Name: credits_used
+              Type: string
+            - Name: overage_cap
+              Type: string
+            - Name: overage_credits_used
+              Type: string
+            - Name: overage_enabled
+              Type: string
+            - Name: profileid
+              Type: string
+            - Name: subscription_tier
+              Type: string
+            - Name: total_messages
+              Type: string
+            - Name: new_user
+              Type: string
+            - Name: user_email
+              Type: string
+            - Name: model_name
+              Type: string
+            - Name: model_messages
+              Type: string
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Condition: HasAnalyticsLambda
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName

@@ -27,6 +27,10 @@ account_id = boto3.client('sts').get_caller_identity()['Account']
 PREFIX = "CID-DC-"
 BUCKET_PREFIX='cid-data-'
 REGIONS = "us-east-1,eu-west-1"
+# Kiro source bucket holding the test user-activity CSVs. Defaults to the
+# per-account naming convention; override with KIRO_SOURCE_BUCKETS to point at
+# a specific bucket without committing an account id to source control.
+KIRO_SOURCE_BUCKETS = os.environ.get('KIRO_SOURCE_BUCKETS', f'cid-dc-kiro-activity-{account_id}')
 TMP_BUCKET_PREFIX =  f'cid-{account_id}-test'
 TMP_BUCKET = f'{TMP_BUCKET_PREFIX}-{region}'
 
@@ -249,6 +253,8 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeEUCUtilizationModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeMarketplaceModule',        'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeKiroUserActivityModule',   'ParameterValue': "yes"},
+            {'ParameterKey': 'KiroSourceBuckets',               'ParameterValue': KIRO_SOURCE_BUCKETS},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
         ]
@@ -482,10 +488,41 @@ def cleanup_stacks(cloudformation, account_id, s3, s3client, athena, glue):
     except Exception:
         pass
 
+def trigger_kiro_collection(account_id):
+    """Seed a Kiro user-activity report at today's partition and run the collector.
+
+    The Kiro collector is a scheduled Lambda (not part of the state-machine
+    collection triggered by trigger_update) and it only reads yesterday/today, so
+    we seed a synthetic report for today into the source bucket and invoke the
+    Lambda synchronously to populate the kiro_user_activity table for the test.
+    """
+    source_bucket = KIRO_SOURCE_BUCKETS.split(',')[0].strip()
+    now = time.gmtime()
+    key = (
+        f"kiro/AWSLogs/{account_id}/KiroLogs/user_report/{region}/"
+        f"{now.tm_year}/{now.tm_mon:02d}/{now.tm_mday:02d}/00/"
+        f"KIRO_IDE_{account_id}_user_report_test.csv"
+    )
+    csv_body = (
+        "Date,UserId,Client_Type,Chat_Conversations,Credits_Used,Overage_Cap,"
+        "Overage_Credits_Used,Overage_Enabled,ProfileId,Subscription_Tier,Total_Messages\n"
+        f"{now.tm_year}-{now.tm_mon:02d}-{now.tm_mday:02d},"
+        "test-user-0001,KIRO_IDE,3,39.45,0,0,false,test-profile,PROPLUS,139\n"
+    )
+    boto3.client('s3').put_object(Bucket=source_bucket, Key=key, Body=csv_body, ContentType='text/csv')
+    response = boto3.client('lambda').invoke(
+        FunctionName=f'{PREFIX}kiro-user-activity-Lambda',
+        InvocationType='RequestResponse',
+    )
+    payload = json.loads(response['Payload'].read())
+    logger.info(f'Kiro collector response: {payload}')
+
+
 def prepare_stacks(cloudformation, account_id, org_unit_id, s3, s3client, bucket):
     initial_deploy_stacks(cloudformation=cloudformation, account_id=account_id, org_unit_id=org_unit_id, bucket=bucket)
     clean_bucket(s3=s3, s3client=s3client,  account_id=account_id, full=True)
     trigger_update(account_id=account_id)
+    trigger_kiro_collection(account_id=account_id)
 
 def build_layer():
     """delete all content and the bucket"""

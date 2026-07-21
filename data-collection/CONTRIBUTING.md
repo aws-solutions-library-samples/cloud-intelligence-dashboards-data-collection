@@ -47,7 +47,7 @@ cd cid-framework
 pip3 install -U boto3 pytest cfn-flip pylint bandit cfn-lint checkov
 ```
 
-Create a test bucket in test account. You can use any bucket.
+Create a test bucket in test account. You can use any bucket. `run-test-from-scratch.sh` also creates this bucket automatically if it does not exist, so this step is optional.
 
 ```bash
 export account_id=$(aws sts get-caller-identity --query "Account" --output text )
@@ -81,6 +81,14 @@ To tear down all stacks and clean up without running tests:
 
 ```bash
 ./test/run-test-from-scratch.sh --teardown
+```
+
+### Kiro User Activity module
+
+The Kiro User Activity module is pull-based: its collector Lambda reads CSV reports from a source bucket instead of a Step Function. The test seeds a synthetic report for the current day and invokes the Lambda during setup. The source bucket defaults to `cid-dc-kiro-activity-<account_id>`; override it with the `KIRO_SOURCE_BUCKETS` environment variable (comma-separated) if your reports live elsewhere:
+
+```bash
+export KIRO_SOURCE_BUCKETS=my-kiro-bucket-111111111111,my-kiro-bucket-222222222222
 ```
 
 To diagnose failures (check stack status, Step Function executions, Lambda errors, Glue crawlers):

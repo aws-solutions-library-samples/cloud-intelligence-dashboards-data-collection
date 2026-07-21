@@ -43,11 +43,16 @@ Metadata:
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
+          - IncludeKiroUserActivityModule
           - IncludeReferenceModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
           - EUCAccountIDs
+      - Label:
+          default: 'Kiro User Activity Module Configuration'
+        Parameters:
+          - KiroSourceBuckets
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -117,6 +122,10 @@ Metadata:
         default: 'Include Identity Center Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
+      IncludeKiroUserActivityModule:
+        default: 'Include Kiro User Activity Data Collection Module'
+      KiroSourceBuckets:
+        default: 'Kiro Source Bucket Names (comma-separated)'
 
 Mappings:
   RegionMap:
@@ -300,12 +309,20 @@ Parameters:
    Description: Collects AWS Marketplace data
    AllowedValues: ['yes', 'no']
    Default: 'no'
+  IncludeKiroUserActivityModule:
+    Type: String
+    Description: "Collects Kiro user activity report CSVs from customer-managed source buckets (pull-based). Customers apply a bucket policy granting read access to the collection Lambda role."
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
+  KiroSourceBuckets:
+    Type: String
+    Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Required if IncludeKiroUserActivityModule is yes. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
+    Default: ""
   IncludeIdentityCenterModule:
     Type: String
     Description: Collects AWS Identity Center data
     AllowedValues: ['yes', 'no']
     Default: 'no'
-
   IncludeReferenceModule:
     Type: String
     Description: Collects Reference data for other modules
@@ -333,6 +350,7 @@ Conditions:
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
+  DeployKiroUserActivityModule: !Equals [ !Ref IncludeKiroUserActivityModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
@@ -1577,6 +1595,21 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+
+  KiroUserActivityModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployKiroUserActivityModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-kiro-user-activity.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        KiroSourceBuckets: !Ref KiroSourceBuckets
 
   IdentityCenterModule:
     Type: AWS::CloudFormation::Stack

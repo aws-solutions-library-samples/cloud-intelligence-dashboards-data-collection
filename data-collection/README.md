@@ -44,6 +44,7 @@ List of modules and objects collected:
 | `quicksight`                 |  [Amazon QuickSight](https://aws.amazon.com/quicksight/)    | Data Collection Account | Collects QuickSight User and Group information in the Data Collection Account only |
 | `resilience-hub`                 |   [AWS Resilince Hub](https://aws.amazon.com/resilience-hub/) | Linked Accounts |  |
 | `marketplace`                 |   [AWS Marketplace](https://aws.amazon.com/marketplace/) | Linked Accounts | Collects AWS Marketplace data and terms |
+| `kiro-user-activity`          |   [Kiro](https://kiro.dev/) | Source Accounts (via cross-account S3 read) | Collects per-user Kiro usage reports (messages, credits, overage). Configure the Kiro console to write reports to an S3 bucket in each source account, set those bucket names in the `KiroSourceBuckets` parameter, and add the collector Lambda role to each source bucket's policy (see the `BucketPolicyExample` stack output). The collector Lambda reads the reports directly from the source buckets and writes transformed data to the Data Collection bucket — no S3 replication required. |
 | `reference`                 |   Various services      | Data Collection Account | Collects reference data for other modules and dashboard to function |
 
 ### Deployment Overview
