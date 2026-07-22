@@ -103,7 +103,7 @@ Make sure you are installing data collection in the same region where you are go
 | Europe (Frankfurt) | eu-central-1 |  :heavy_check_mark: |
 | Europe (Zurich) | eu-central-2 |  |
 | Europe (Stockholm) | eu-north-1 |  :heavy_check_mark: |
-| Europe (Milan) | eu-south-1 |  |
+| Europe (Milan) | eu-south-1 |  :heavy_check_mark: |
 | Europe (Spain) | eu-south-2 |  |
 | Europe (Ireland) | eu-west-1 |  :heavy_check_mark: |
 | Europe (London) | eu-west-2 |  :heavy_check_mark: |
