@@ -128,6 +128,7 @@ Mappings:
     ap-southeast-2: {CodeBucket: aws-managed-cost-intelligence-dashboards-ap-southeast-2 }
     ca-central-1:   {CodeBucket: aws-managed-cost-intelligence-dashboards-ca-central-1 }
     eu-central-1:   {CodeBucket: aws-managed-cost-intelligence-dashboards-eu-central-1 }
+    eu-central-2:   {CodeBucket: aws-managed-cost-intelligence-dashboards-eu-central-2 }
     eu-north-1:     {CodeBucket: aws-managed-cost-intelligence-dashboards-eu-north-1 }
     eu-south-1:     {CodeBucket: aws-managed-cost-intelligence-dashboards-eu-south-1 }
     eu-west-1:      {CodeBucket: aws-managed-cost-intelligence-dashboards-eu-west-1 }

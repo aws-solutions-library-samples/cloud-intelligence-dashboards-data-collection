@@ -101,7 +101,7 @@ Make sure you are installing data collection in the same region where you are go
 | Canada (Central) | ca-central-1 |  :heavy_check_mark: |
 | China (Beijing) | cn-north-1 |  |
 | Europe (Frankfurt) | eu-central-1 |  :heavy_check_mark: |
-| Europe (Zurich) | eu-central-2 |  |
+| Europe (Zurich) | eu-central-2 |  :heavy_check_mark: |
 | Europe (Stockholm) | eu-north-1 |  :heavy_check_mark: |
 | Europe (Milan) | eu-south-1 |  :heavy_check_mark: |
 | Europe (Spain) | eu-south-2 |  |
