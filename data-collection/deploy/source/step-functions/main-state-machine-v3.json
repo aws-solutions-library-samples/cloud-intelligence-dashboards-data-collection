@@ -83,7 +83,8 @@
         "Parameters": {
           "StateMachineArn": "arn:aws:states:${DeployRegion}:${Account}:stateMachine:${Prefix}CrawlerExecution-StateMachine",
           "Input": {
-            "crawlers": ${Crawlers}
+            "crawlers": ${Crawlers},
+            "behavior": "WAIT"
           }
         },
         "End": true
