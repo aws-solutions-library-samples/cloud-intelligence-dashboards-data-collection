@@ -425,14 +425,10 @@ Resources:
               - "servicequotas:GetServiceQuota"
               - "servicequotas:GetAWSDefaultServiceQuota"
               - "servicequotas:ListServices"
-              - "rds:DescribeAccountAttributes"
-              - "elasticloadbalancing:DescribeAccountLimits"
-              - "dynamodb:DescribeLimits"
-              - "kinesis:DescribeLimits"
-              - "cloudformation:DescribeAccountLimits"
-              - "autoscaling:DescribeAccountLimits"
-              - "route53:GetAccountLimit"
-              - "datapipeline:GetAccountLimits"
+              - "servicequotas:ListServiceQuotas"
+              - "servicequotas:ListAWSDefaultServiceQuotas"
+              - "servicequotas:StartQuotaUtilizationReport"
+              - "servicequotas:GetQuotaUtilizationReport"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole
