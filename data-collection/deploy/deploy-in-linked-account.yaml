@@ -23,6 +23,7 @@ Metadata:
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
         - IncludeMarketplaceModule
+        - IncludeIamCredentialReportModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -52,6 +53,8 @@ Metadata:
         default: 'Include Resilience Hub Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Agreements Module'
+      IncludeIamCredentialReportModule:
+        default: 'Include IAM Credential Report Data Collection Module'
 
 Parameters:
   DataCollectionAccountID:
@@ -120,6 +123,11 @@ Parameters:
     Description: Collects Marketplace Agreement data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeIamCredentialReportModule:
+    Type: String
+    Description: Collects IAM credential reports from linked accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -133,6 +141,7 @@ Conditions:
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
   IncludeMarketplaceModulePolicy:         !Equals [!Ref IncludeMarketplaceModule, "yes"]
+  IncludeIamCredentialReportModulePolicy: !Equals [!Ref IncludeIamCredentialReportModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -165,6 +174,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}iam-credential-report-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -476,6 +486,28 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+  # IAM Credential Report policy
+  IamCredentialReportPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeIamCredentialReportModulePolicy
+    Properties:
+      PolicyName: IamCredentialReportPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "iam:GenerateCredentialReport"
+              - "iam:GetCredentialReport"
+            Resource: "*" # IAM credential report actions do not support resource-level permissions
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "IAM credential report actions require wildcard resources"
+
   # Marketplace Agreements policy
   AgreementsPolicy:
     Type: 'AWS::IAM::Policy'
