@@ -1,0 +1,297 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Prerequisite stack for Bedrock data collection — creates CloudWatch log group, KMS key, S3 bucket, IAM roles, and automatically configures Bedrock model invocation logging'
+
+Parameters:
+  DataCollectionAccountID:
+    Type: String
+    Description: 'AWS Account ID of the CID data-collection account (12-digit numeric)'
+    AllowedPattern: '[0-9]{12}'
+    ConstraintDescription: 'Must be exactly 12 decimal digits'
+
+  ResourcePrefix:
+    Type: String
+    Description: 'Prefix for all resource names to allow multiple deployments in the same account'
+    Default: 'CID-DC-'
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # KMS Key for CloudWatch Log Group encryption
+  # ---------------------------------------------------------------------------
+  BedrockLogsKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: 'KMS key for encrypting Bedrock CloudWatch log group'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations'
+
+  BedrockLogsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ResourcePrefix}bedrock-logs-key'
+      TargetKeyId: !Ref BedrockLogsKmsKey
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Log Group for Bedrock model invocation logs
+  # ---------------------------------------------------------------------------
+  BedrockLogsGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/bedrock/modelinvocations
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt BedrockLogsKmsKey.Arn
+
+  # ---------------------------------------------------------------------------
+  # S3 Bucket for Bedrock model invocation logs
+  # ---------------------------------------------------------------------------
+  BedrockLogsS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  BedrockLogsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BedrockLogsS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BedrockLogsS3Bucket.Arn
+              - !Sub '${BedrockLogsS3Bucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: AllowBedrockLogging
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${BedrockLogsS3Bucket.Arn}/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # IAM Managed Policy and Role for Bedrock logging
+  # ---------------------------------------------------------------------------
+  BedrockLoggingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ResourcePrefix}bedrock-logging-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations:*'
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${BedrockLogsS3Bucket.Arn}/${AWS::AccountId}/*'
+
+  BedrockLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}bedrock-logging-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref BedrockLoggingPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  # ---------------------------------------------------------------------------
+  # Configurator Lambda role and function (custom resource)
+  # ---------------------------------------------------------------------------
+  BedrockLoggingConfiguratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}bedrock-configurator-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: BedrockLoggingConfigPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:PutModelInvocationLoggingConfiguration
+                  - bedrock:DeleteModelInvocationLoggingConfiguration
+                Resource: '*' # These actions do not support resource-level permissions
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourcePrefix}bedrock-logging-role'
+                Condition:
+                  StringEquals:
+                    'iam:PassedToService': bedrock.amazonaws.com
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  BedrockLoggingConfigurator:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}bedrock-logging-configurator'
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt BedrockLoggingConfiguratorRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import boto3
+          import cfnresponse
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+
+          bedrock = boto3.client('bedrock')
+
+          def lambda_handler(event, context):  #pylint: disable=W0613
+              logger.info(json.dumps(event))
+              reason = ""
+              try:
+                  props = event['ResourceProperties']
+                  log_group_name = props['LogGroupName']
+                  role_arn = props['RoleArn']
+                  s3_bucket_name = props['S3BucketName']
+
+                  if event['RequestType'] in ('Create', 'Update'):
+                      bedrock.put_model_invocation_logging_configuration(
+                          loggingConfig={
+                              'cloudWatchConfig': {
+                                  'logGroupName': log_group_name,
+                                  'roleArn': role_arn,
+                                  'largeDataDeliveryS3Config': {
+                                      'bucketName': s3_bucket_name,
+                                      'keyPrefix': 'large-data',
+                                  },
+                              },
+                              's3Config': {
+                                  'bucketName': s3_bucket_name,
+                                  'keyPrefix': 'model-invocation-logs',
+                              },
+                              'textDataDeliveryEnabled': True,
+                              'imageDataDeliveryEnabled': True,
+                              'embeddingDataDeliveryEnabled': True,
+                          }
+                      )
+                      logger.info("Bedrock model invocation logging configured successfully")
+                  elif event['RequestType'] == 'Delete':
+                      bedrock.delete_model_invocation_logging_configuration()
+                      logger.info("Bedrock model invocation logging configuration deleted")
+                  else:
+                      raise Exception(f"Unknown RequestType: {event['RequestType']}")
+
+              except Exception as exc:  #pylint: disable=broad-exception-caught
+                  reason = str(exc)
+                  logger.error(reason)
+              finally:
+                  status = cfnresponse.FAILED if reason else cfnresponse.SUCCESS
+                  cfnresponse.send(event, context, status, {}, reason=reason if reason else None)
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  # ---------------------------------------------------------------------------
+  # Custom resource — applies Bedrock logging configuration at deploy time
+  # ---------------------------------------------------------------------------
+  BedrockLoggingConfiguration:
+    Type: Custom::BedrockLoggingConfiguration
+    DependsOn:
+      - BedrockLogsGroup
+      - BedrockLoggingRole
+      - BedrockLogsS3Bucket
+      - BedrockLogsS3BucketPolicy
+    Properties:
+      ServiceToken: !GetAtt BedrockLoggingConfigurator.Arn
+      LogGroupName: !Ref BedrockLogsGroup
+      RoleArn: !GetAtt BedrockLoggingRole.Arn
+      S3BucketName: !Ref BedrockLogsS3Bucket
+
+Outputs:
+  BedrockLogsGroupName:
+    Description: 'CloudWatch Log Group name for Bedrock model invocations'
+    Value: !Ref BedrockLogsGroup
+
+  BedrockLogsS3BucketName:
+    Description: 'S3 bucket name for Bedrock model invocation logs'
+    Value: !Ref BedrockLogsS3Bucket
+
+  BedrockLoggingRoleArn:
+    Description: 'ARN of the IAM role used by Bedrock to write logs'
+    Value: !GetAtt BedrockLoggingRole.Arn

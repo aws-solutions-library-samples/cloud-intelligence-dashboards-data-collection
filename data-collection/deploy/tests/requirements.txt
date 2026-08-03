@@ -1,0 +1,4 @@
+hypothesis
+pytest
+boto3
+botocore

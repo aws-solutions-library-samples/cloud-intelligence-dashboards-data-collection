@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves Amazon Bedrock model invocation log data across linked accounts
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold rightsizing information
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: bedrock
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: AssumeRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: S3WritePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: KMSPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          from datetime import datetime, timedelta, timezone
+
+          import boto3
+          import botocore.exceptions
+
+          BUCKET_NAME = os.environ["BUCKET_NAME"]
+          PREFIX = os.environ["PREFIX"]
+          ROLE_NAME = os.environ['ROLE_NAME']
+          TMP_FILE = "/tmp/data.json"
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          def get_last_collected(s3_client, account_id):
+              """Read marker file; return datetime or None if absent/unreadable."""
+              key = f"{PREFIX}/{PREFIX}-data/last_collected/{account_id}.json"
+              try:
+                  resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=key)
+                  data = json.loads(resp['Body'].read())
+                  return datetime.fromisoformat(data['last_collected_timestamp'])
+              except s3_client.exceptions.NoSuchKey:
+                  return None
+              except Exception:  #pylint: disable=broad-exception-caught
+                  return None
+
+          def get_log_events(logs_client, log_group, start_time_ms, end_time_ms):
+              """Paginate filter_log_events exhausting all nextToken pages; yield each event dict."""
+              kwargs = {
+                  'logGroupName': log_group,
+                  'startTime': start_time_ms,
+                  'endTime': end_time_ms,
+              }
+              while True:
+                  resp = logs_client.filter_log_events(**kwargs)
+                  for event in resp.get('events', []):
+                      yield event
+                  next_token = resp.get('nextToken')
+                  if not next_token:
+                      break
+                  kwargs['nextToken'] = next_token
+
+          def build_s3_key(prefix, account_id, payer_id, dt):
+              """Return Hive-partitioned S3 key for given UTC datetime."""
+              return f"{prefix}/{prefix}-data/payer_id={payer_id}/year={dt.strftime('%Y')}/month={dt.strftime('%m')}/day={dt.strftime('%d')}/{account_id}.json"
+
+          def build_role_arn(account_id, role_name, region):
+              """Return partition-aware IAM role ARN."""
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              return f"arn:{partition}:iam::{account_id}:role/{role_name}"
+
+          def store_to_s3(s3_client, events, account_id, payer_id, collection_time):
+              """Write events as JSONL to /tmp/data.json and upload to S3. Returns count."""
+              count = 0
+              with open(TMP_FILE, 'w', encoding='utf-8') as f:
+                  for event in events:
+                      event['account_id'] = account_id
+                      event['payer_id'] = payer_id
+                      event['collection_time'] = collection_time
+                      f.write(json.dumps(event) + '\n')
+                      count += 1
+              if count == 0:
+                  return 0
+              key = build_s3_key(PREFIX, account_id, payer_id, datetime.now(tz=timezone.utc))
+              s3_client.upload_file(TMP_FILE, BUCKET_NAME, key)
+              logger.info(f"Uploaded {count} records to s3://{BUCKET_NAME}/{key}")
+              return count
+
+          def update_marker(s3_client, account_id, end_time):
+              """Write last_collected marker file to S3."""
+              key = f"{PREFIX}/{PREFIX}-data/last_collected/{account_id}.json"
+              body = json.dumps({'last_collected_timestamp': end_time.isoformat()})
+              s3_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=body)
+
+          def lambda_handler(event, context):  #pylint: disable=W0613
+              logger.info(f"Event data: {json.dumps(event)}")
+              if 'account' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and trigger from there."
+                  )
+              account = json.loads(event["account"])
+              account_id = account["account_id"]
+              payer_id = account["payer_id"]
+              region = boto3.session.Session().region_name
+              collection_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+              try:
+                  role_arn = build_role_arn(account_id, ROLE_NAME, region)
+                  creds = boto3.client('sts').assume_role(
+                      RoleArn=role_arn,
+                      RoleSessionName='BedrockDataCollection'
+                  )['Credentials']
+              except botocore.exceptions.ClientError as exc:
+                  if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException'):
+                      logger.warning(f"AccessDenied assuming role in account {account_id}: {exc}")
+                      return
+                  raise
+
+              s3_client = boto3.client('s3')
+              logs_client = boto3.client(
+                  'logs',
+                  aws_access_key_id=creds['AccessKeyId'],
+                  aws_secret_access_key=creds['SecretAccessKey'],
+                  aws_session_token=creds['SessionToken'],
+              )
+
+              now = datetime.now(tz=timezone.utc)
+              last_collected = get_last_collected(s3_client, account_id)
+              start_time = last_collected if last_collected else now - timedelta(hours=24)
+              end_time = now
+
+              start_ms = int(start_time.timestamp() * 1000)
+              end_ms = int(end_time.timestamp() * 1000)
+
+              try:
+                  events = list(get_log_events(logs_client, '/aws/bedrock/modelinvocations', start_ms, end_ms))
+              except botocore.exceptions.ClientError as exc:
+                  if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException'):
+                      logger.warning(f"AccessDenied reading CW Logs in account {account_id}: {exc}")
+                      return
+                  raise
+
+              if not events:
+                  logger.info(f"No log events found for account {account_id} in window {start_time} to {end_time}")
+                  return
+
+              try:
+                  count = store_to_s3(s3_client, iter(events), account_id, payer_id, collection_time)
+                  if count > 0:
+                      update_marker(s3_client, account_id, end_time)
+                      logger.info(f"Collection complete for account {account_id}: {count} records")
+              except Exception as exc:  #pylint: disable=broad-exception-caught
+                  logger.error(f"Error storing data for account {account_id}: {exc}")
+      Handler: 'index.lambda_handler'
+      MemorySize: 2688
+      Timeout: 300
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          ROLE_NAME: !Ref MultiAccountRoleName
+          LOG_LEVEL: INFO
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: LambdaFunction
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 1,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: 'LINKED'
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName

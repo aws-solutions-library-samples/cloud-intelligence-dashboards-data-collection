@@ -23,6 +23,7 @@ Metadata:
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
         - IncludeMarketplaceModule
+        - IncludeBedrockModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -120,6 +121,11 @@ Parameters:
     Description: Collects Marketplace Agreement data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeBedrockModule:
+    Type: String
+    Description: Collects Amazon Bedrock model invocation logs from linked accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -133,6 +139,7 @@ Conditions:
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
   IncludeMarketplaceModulePolicy:         !Equals [!Ref IncludeMarketplaceModule, "yes"]
+  IncludeBedrockModulePolicy:            !Equals [!Ref IncludeBedrockModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -165,6 +172,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}bedrock-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -518,3 +526,29 @@ Resources:
         config:
           ignore_checks:
             - W3037  # Beta marketplace APIs (GetProduct, SearchEntities, marketplace-agreement service) not yet in cfn-lint validation
+  # Bedrock policy
+  BedrockPolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeBedrockModulePolicy
+    Properties:
+      PolicyName: BedrockPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations"
+          - Effect: "Allow"
+            Action:
+              - "logs:FilterLogEvents"
+              - "logs:GetLogEvents"
+            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations:log-stream:*"
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Policy is used for scanning of a wide range of resources"

@@ -43,7 +43,8 @@ Metadata:
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
-          - IncludeReferenceModule          
+          - IncludeReferenceModule
+          - IncludeBedrockModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -117,6 +118,8 @@ Metadata:
         default: 'Include Identity Center Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
+      IncludeBedrockModule:
+        default: 'Include Amazon Bedrock Data Collection Module'
 
 Mappings:
   RegionMap:
@@ -313,6 +316,12 @@ Parameters:
     Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
+
+  IncludeBedrockModule:
+    Type: String
+    Description: Collects Amazon Bedrock model invocation logs from linked accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -341,29 +350,32 @@ Conditions:
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
     - !Condition DeployEUCUtilizationModule
+  DeployBedrockModule: !Equals [ !Ref IncludeBedrockModule, "yes" ]
   DeployAccountCollector: !Or
     - !Or
-      - !Condition DeployTAModule
-      - !Condition DeployRightsizingModule
-      - !Condition DeployCostAnomalyModule
-      - !Condition DeploySupportCasesModule
-      - !Condition DeployInventoryCollectorModule
-      - !Condition DeployEcsChargebackModule
-      - !Condition DeployRDSUtilizationModule
-      - !Condition DeployOrgDataModule
-      - !Condition DeployBudgetsModule
-      - !Condition DeployResilienceHubModule
-    - !Or
-      - !Condition DeployMarketplaceModule
-      - !Condition DeployBackupModule
-      - !Condition DeployTransitGatewayModule
-      - !Condition DeployHealthEventsModule
-      - !Condition DeployLicenseManagerModule
-      - !Condition DeployQuickSightModule
-      - !Condition DeployServiceQuotasModule
-      - !Condition DeployEUCUtilizationModule
-      - !Condition DeployComputeOptimizerModule
-      - !Condition DeployIdentityCenterModule
+      - !Or
+        - !Condition DeployTAModule
+        - !Condition DeployRightsizingModule
+        - !Condition DeployCostAnomalyModule
+        - !Condition DeploySupportCasesModule
+        - !Condition DeployInventoryCollectorModule
+        - !Condition DeployEcsChargebackModule
+        - !Condition DeployRDSUtilizationModule
+        - !Condition DeployOrgDataModule
+        - !Condition DeployBudgetsModule
+        - !Condition DeployResilienceHubModule
+      - !Or
+        - !Condition DeployMarketplaceModule
+        - !Condition DeployBackupModule
+        - !Condition DeployTransitGatewayModule
+        - !Condition DeployHealthEventsModule
+        - !Condition DeployLicenseManagerModule
+        - !Condition DeployQuickSightModule
+        - !Condition DeployServiceQuotasModule
+        - !Condition DeployEUCUtilizationModule
+        - !Condition DeployComputeOptimizerModule
+        - !Condition DeployIdentityCenterModule
+    - !Condition DeployBedrockModule
   RegionsInScopeIsEmpty: !Equals
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
@@ -1625,6 +1637,27 @@ Resources:
             - RegionsInScopeIsEmpty
             - !Sub "${AWS::Region}"
             - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
+
+  BedrockModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployBedrockModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/module-bedrock.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
+        Schedule: !Ref ScheduleFrequent
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
 
   AccountCollector:
     Type: AWS::CloudFormation::Stack
