@@ -1,0 +1,753 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::LanguageExtensions'
+Description: 'Retrieves RDS operational and configuration data across the AWS organization'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Collection Settings'
+        Parameters:
+          - RegionsInScope
+          - Schedule
+      - Label:
+          default: 'Advanced (only change if non-default CID deployment)'
+        Parameters:
+          - ResourcePrefix
+          - CFDataName
+      - Label:
+          default: 'CID Parent Stack Parameters (auto-populated when deployed as nested stack)'
+        Parameters:
+          - GlueRoleARN
+          - DestinationBucket
+          - DestinationBucketARN
+          - DatabaseName
+          - LambdaAnalyticsARN
+          - AccountCollectorLambdaARN
+          - MultiAccountRoleName
+          - StepFunctionTemplate
+          - CodeBucket
+          - StepFunctionExecutionRoleARN
+          - DataBucketsKmsKeysArns
+          - SchedulerExecutionRoleARN
+          - LambdaManageGlueTableARN
+    ParameterLabels:
+      RegionsInScope:
+        default: 'AWS Regions to collect RDS data from'
+      Schedule:
+        default: 'Collection schedule'
+      ResourcePrefix:
+        default: 'CID Data Collection resource prefix'
+      CFDataName:
+        default: 'Data name prefix'
+
+Parameters:
+  # CID Parent Parameters (passed by parent stack to all nested modules)
+  GlueRoleARN:
+    Type: String
+    Description: 'ARN of the Glue role from CID Data Collection'
+  DestinationBucket:
+    Type: String
+    Description: 'CID Data Collection S3 bucket name'
+  DestinationBucketARN:
+    Type: String
+    Description: 'ARN of the CID Data Collection S3 bucket'
+  DatabaseName:
+    Type: String
+    Description: 'Glue database name'
+  LambdaAnalyticsARN:
+    Type: String
+    Description: 'ARN of the CID Lambda Analytics function'
+    Default: ''
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: 'ARN of the CID Account Collector Lambda'
+    Default: ''
+  MultiAccountRoleName:
+    Type: String
+    Description: 'Name of the multi-account IAM role (already prefixed by parent)'
+  StepFunctionTemplate:
+    Type: String
+    Description: 'Step Function template path from CID'
+    Default: ''
+  CodeBucket:
+    Type: String
+    Description: 'S3 bucket for Lambda code'
+    Default: ''
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: 'ARN of the Step Function execution role'
+    Default: ''
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: 'KMS key ARNs for data buckets'
+    Default: ''
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: 'ARN of the EventBridge Scheduler execution role'
+    Default: ''
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: 'ARN of the Lambda that manages Glue tables'
+    Default: ''
+
+  # Module-specific parameters
+  RegionsInScope:
+    Type: String
+    Default: ''
+    Description: 'Comma-separated list of AWS regions to collect RDS data from. If empty, uses current region.'
+
+  Schedule:
+    Type: String
+    Default: 'rate(14 days)'
+    Description: 'EventBridge schedule for data collection'
+
+  ResourcePrefix:
+    Type: String
+    Default: 'CID-DC-'
+    Description: 'CID Data Collection resource prefix (passed by parent stack)'
+
+  CFDataName:
+    Type: String
+    Default: 'rds'
+    Description: 'Data name prefix used in resource naming and S3 paths'
+
+Resources:
+  # IAM Role for Lambda Functions
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}${CFDataName}-LambdaRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: !Sub 'lambda.${AWS::URLSuffix}'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Path: /
+      Policies:
+        - PolicyName: 'S3Access'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                Resource:
+                  - !Sub
+                    - 'arn:${AWS::Partition}:s3:::${BucketName}/*'
+                    - BucketName: !Ref DestinationBucket
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - 'arn:${AWS::Partition}:s3:::${BucketName}'
+                    - BucketName: !Ref DestinationBucket
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - 'rds-*'
+        - PolicyName: 'RDSMaintenanceDescribe'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'rds:DescribePendingMaintenanceActions'
+                  - 'ec2:DescribeRegions'
+                Resource: '*'
+        - PolicyName: 'AssumeMultiAccountRole'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 'sts:AssumeRole'
+                Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}'
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+          - id: W11
+            reason: "RDS Describe and EC2 DescribeRegions do not support resource-level permissions"
+
+  # Lambda Functions
+  RDSMaintenanceLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-maintenance-Lambda'
+      Description: !Sub 'Lambda function to collect RDS maintenance data for ${CFDataName}'
+      Runtime: 'python3.13'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import logging
+          from datetime import datetime
+          import tempfile
+          import resource
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+
+          import boto3
+          from botocore.client import Config
+
+          BUCKET = os.environ["BUCKET_NAME"]
+          ROLENAME = os.environ['ROLENAME']
+          REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
+
+          def log_memory_usage(location):
+              usage = resource.getrusage(resource.RUSAGE_SELF)
+              logger.info(f"Memory Usage at {location} - Max RSS: {usage.ru_maxrss / 1024:.2f}MB")
+
+          def assume_role(account_id, region):
+              logger.info(f"Assuming role for account {account_id} in region {region}")
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              try:
+                  sts_client = boto3.client('sts', region_name=region)
+                  credentials = sts_client.assume_role(
+                      RoleArn=f"arn:{partition}:iam::{account_id}:role/{ROLENAME}",
+                      RoleSessionName="rds_maintenance_collection"
+                  )['Credentials']
+                  rds_client = boto3.client(
+                      'rds',
+                      region_name=region,
+                      aws_access_key_id=credentials['AccessKeyId'],
+                      aws_secret_access_key=credentials['SecretAccessKey'],
+                      aws_session_token=credentials['SessionToken']
+                  )
+                  return rds_client
+              except Exception as exc:
+                  logger.error(f"Error assuming role for account {account_id} in region {region}: {exc}")
+                  raise
+
+          def get_maintenance_actions(rds_client, region):
+              logger.info(f"Getting maintenance actions for region {region}")
+              try:
+                  response = rds_client.describe_pending_maintenance_actions()
+                  actions_count = len(response.get('PendingMaintenanceActions', []))
+                  logger.info(f"Found {actions_count} maintenance actions in region {region}")
+                  return response['PendingMaintenanceActions']
+              except Exception as exc:
+                  logger.error(f"Error getting maintenance actions in region {region}: {exc}")
+                  return []
+
+          def process_maintenance_action(item, region, usage_account, collection_date):
+              resource_id = item['ResourceIdentifier']
+              for action in item['PendingMaintenanceActionDetails']:
+                  yield {
+                      'ResourceIdentifier': resource_id,
+                      'Action': action.get('Action'),
+                      'Description': action.get('Description'),
+                      'Region': region,
+                      'accountid': usage_account,
+                      'collection_date': collection_date,
+                      'CurrentApplyDate': action.get('CurrentApplyDate'),
+                      'AutoAppliedAfterDate': action.get('AutoAppliedAfterDate'),
+                      'ForcedApplyDate': action.get('ForcedApplyDate'),
+                      'OptInStatus': action.get('OptInStatus')
+                  }
+
+          def lambda_handler(event, context):
+              logger.info(f"Starting lambda execution with event: {event}")
+              log_memory_usage("start")
+
+              if 'account' not in event or 'params' not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+
+              try:
+                  account_info = json.loads(event['account'])
+                  usage_account = account_info['account_id']
+                  payer_account = account_info['payer_id']
+              except (json.JSONDecodeError, KeyError) as e:
+                  raise ValueError(f"Invalid account information format: {str(e)}")
+
+              params = event.get('params', '').strip()
+              if params != 'rds-db-maintenance':
+                  raise ValueError(f"Invalid params value. Expected 'rds-db-maintenance', got '{params}'")
+
+              current_date = datetime.now()
+              date_path = current_date.strftime("/year=%Y/month=%m/day=%d")
+              collection_date = current_date.strftime("%Y-%m-%d %H:%M:%S")
+
+              action_count = 0
+              processed_regions = 0
+
+              logger.info(f"Processing {len(REGIONS)} regions for account {usage_account}")
+
+              def process_single_region(region, region_index):
+                  try:
+                      logger.info(f"Processing region {region} ({region_index}/{len(REGIONS)})")
+                      rds_client = assume_role(usage_account, region)
+                      pending_actions = get_maintenance_actions(rds_client, region)
+                      region_actions = []
+                      for item in pending_actions:
+                          for action in process_maintenance_action(item, region, usage_account, collection_date):
+                              region_actions.append(action)
+                      logger.info(f"Processed {len(region_actions)} actions in region {region}")
+                      del rds_client
+                      del pending_actions
+                      return region_actions
+                  except Exception as region_exc:
+                      logger.error(f"Error processing region {region}: {region_exc}")
+                      return []
+
+              with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
+                  try:
+                      logger.info(f"Created temporary file: {temp_file.name}")
+                      with ThreadPoolExecutor(max_workers=5) as executor:
+                          futures = {
+                              executor.submit(process_single_region, region, idx + 1): region
+                              for idx, region in enumerate(REGIONS)
+                          }
+                          for future in as_completed(futures):
+                              region = futures[future]
+                              processed_regions += 1
+                              try:
+                                  region_actions = future.result()
+                                  for action in region_actions:
+                                      temp_file.write(json.dumps(action, default=str) + '\n')
+                                      action_count += 1
+                              except Exception as exc:
+                                  logger.error(f"Error getting result for region {region}: {exc}")
+                              if processed_regions % 5 == 0:
+                                  log_memory_usage(f"after {processed_regions} regions")
+
+                      temp_file.flush()
+                      temp_file.close()
+                      logger.info(f"Completed processing all regions. Total actions: {action_count}")
+
+                      if action_count == 0:
+                          logger.info(f"No maintenance actions found for account {usage_account}")
+                          os.unlink(temp_file.name)
+                          return {'statusCode': 200, 'body': 'No maintenance actions found'}
+
+                      key = f"rds-maintenance-data/payer_id={payer_account}{date_path}/{usage_account}_{current_date.strftime('%Y%m%d')}.json"
+                      logger.info(f"Uploading data to S3: {BUCKET}/{key}")
+
+                      s3client = boto3.client("s3", config=Config(s3={"addressing_style": "path"}))
+                      s3client.upload_file(
+                          temp_file.name, BUCKET, key,
+                          ExtraArgs={'ContentType': 'application/json'}
+                      )
+
+                      os.unlink(temp_file.name)
+                      log_memory_usage("end")
+                      logger.info("Successfully completed processing and upload")
+
+                      return {
+                          'statusCode': 200,
+                          'body': {
+                              'message': f'Successfully wrote data to s3://{BUCKET}/{key}',
+                              'totalActions': action_count,
+                              'regionsProcessed': processed_regions
+                          }
+                      }
+                  except Exception as exc:
+                      logger.error(f"Error in main processing: {exc}", exc_info=True)
+                      if os.path.exists(temp_file.name):
+                          os.unlink(temp_file.name)
+                      raise
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          ROLENAME: !Ref MultiAccountRoleName
+          REGIONS: !Ref RegionsInScope
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for reserved concurrent executions"
+
+  StepFunctionmaintenance:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-maintenance-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Maintenance data collection - Linked workflow with multi-account support",
+          "StartAt": "AccountCollectorInvoke",
+          "States": {
+            "AccountCollectorInvoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {"type": "linked"},
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}account-collector-Lambda"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "AccountMap",
+              "ResultPath": "$.accountLambdaOutput"
+            },
+            "AccountMap": {
+              "Type": "Map",
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                },
+                "StartAt": "InvokeModuleLambda",
+                "States": {
+                  "InvokeModuleLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "Payload": {
+                        "account.$": "$.account",
+                        "params": "rds-db-maintenance"
+                      },
+                      "FunctionName": "${RDSMaintenanceLambda.Arn}"
+                    },
+                    "Retry": [{
+                      "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }],
+                    "End": true
+                  }
+                }
+              },
+              "MaxConcurrency": 60,
+              "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {
+                  "Bucket.$": "$.accountLambdaOutput.Payload.bucket",
+                  "Key.$": "$.accountLambdaOutput.Payload.accountList"
+                }
+              },
+              "Next": "CrawlerStepFunctionStartExecution"
+            },
+            "CrawlerStepFunctionStartExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}${CFDataName}-maintenance-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulermaintenance:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-maintenance-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'ENABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionmaintenance.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "maintenance",
+            "params": "maintenance"
+          }
+
+  Crawlermaintenance:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-maintenance-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/rds-maintenance-data/'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  # Clusters Step Function (INVENTORY)
+  StepFunctionclustersnapshot:
+    Type: 'AWS::StepFunctions::StateMachine'
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionString: !Sub |
+        {
+          "Comment": "RDS Clusters inventory collection - Uses CID Inventory Lambda",
+          "StartAt": "AccountCollectorInvoke",
+          "States": {
+            "AccountCollectorInvoke": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "Payload": {"type": "linked"},
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}account-collector-Lambda"
+              },
+              "Retry": [{
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2
+              }],
+              "Next": "AccountMap",
+              "ResultPath": "$.accountLambdaOutput"
+            },
+            "AccountMap": {
+              "Type": "Map",
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "DISTRIBUTED",
+                  "ExecutionType": "STANDARD"
+                },
+                "StartAt": "InvokeInventoryLambda",
+                "States": {
+                  "InvokeInventoryLambda": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "OutputPath": "$.Payload",
+                    "Parameters": {
+                      "Payload": {
+                        "account.$": "$.account",
+                        "params": "rds-cluster-snapshots"
+                      },
+                      "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}inventory-Lambda"
+                    },
+                    "Retry": [{
+                      "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }],
+                    "End": true
+                  }
+                }
+              },
+              "MaxConcurrency": 60,
+              "ItemReader": {
+                "Resource": "arn:aws:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {
+                  "Bucket.$": "$.accountLambdaOutput.Payload.bucket",
+                  "Key.$": "$.accountLambdaOutput.Payload.accountList"
+                }
+              },
+              "Next": "CrawlerStepFunctionStartExecution"
+            },
+            "CrawlerStepFunctionStartExecution": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync:2",
+              "Parameters": {
+                "StateMachineArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}CrawlerExecution-StateMachine",
+                "Input": {
+                  "crawlers": ["${ResourcePrefix}${CFDataName}-clustersnapshot-Crawler"], "behavior": "WAIT"
+                }
+              },
+              "End": true
+            }
+          },
+          "TimeoutSeconds": 10800
+        }
+
+  Schedulerclustersnapshot:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-Scheduler'
+      ScheduleExpression: !Ref Schedule
+      State: 'DISABLED'
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt StepFunctionclustersnapshot.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub |
+          {
+            "module": "${CFDataName}",
+            "name": "clustersnapshot",
+            "params": "clustersnapshot"
+          }
+
+  Crawlerclustersnapshot:
+    Type: 'AWS::Glue::Crawler'
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub
+              - 's3://${BucketName}/inventory/inventory-rds-cluster-snapshots-data'
+              - BucketName: !Ref DestinationBucket
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+
+  MaintenanceGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: rds_maintenance_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: resourceidentifier
+              Type: string
+            - Name: action
+              Type: string
+            - Name: description
+              Type: string
+            - Name: region
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: currentapplydate
+              Type: string
+            - Name: autoappliedafterdate
+              Type: string
+            - Name: forcedapplydate
+              Type: string
+            - Name: optinstatus
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/rds-maintenance-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-maintenance-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'Action,AutoAppliedAfterDate,CurrentApplyDate,Description,ForcedApplyDate,OptInStatus,Region,ResourceIdentifier,accountid,collection_date'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ClusterSnapshotGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: inventory_rds_cluster_snapshots_data
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: payer_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: dbclustersnapshotidentifier
+              Type: string
+            - Name: dbclusteridentifier
+              Type: string
+            - Name: availabilityzones
+              Type: array<string>              
+            - Name: snapshotcreatetime
+              Type: string
+            - Name: engine
+              Type: string
+            - Name: enginemode
+              Type: string
+            - Name: allocatedstorage
+              Type: int
+            - Name: status
+              Type: string
+            - Name: port
+              Type: int
+            - Name: vpcid
+              Type: string
+            - Name: clustercreatetime
+              Type: string
+            - Name: masterusername
+              Type: string
+            - Name: engineversion
+              Type: string
+            - Name: licensemodel
+              Type: string
+            - Name: snapshottype
+              Type: string
+            - Name: percentprogress
+              Type: int
+            - Name: storageencrypted
+              Type: boolean
+            - Name: kmskeyid
+              Type: string
+            - Name: dbclustersnapshotarn
+              Type: string
+            - Name: iamdatabaseauthenticationenabled
+              Type: boolean
+            - Name: taglist
+              Type: array<struct<key:string,value:string>>
+            - Name: dbclusterresourceid
+              Type: string
+            - Name: accountid
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: region
+              Type: string
+            - Name: sourcedbclustersnapshotarn
+              Type: string
+            - Name: storagetype
+              Type: string
+            - Name: storagethroughput
+              Type: int
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub
+            - 's3://${BucketName}/inventory/inventory-rds-cluster-snapshots-data/'
+            - BucketName: !Ref DestinationBucket
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Parameters:
+            UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-Crawler'
+          SerdeInfo:
+            Parameters:
+              paths: 'AllocatedStorage,AvailabilityZones,ClusterCreateTime,DBClusterIdentifier,DBClusterSnapshotArn,DBClusterSnapshotIdentifier,DbClusterResourceId,Engine,EngineMode,EngineVersion,IAMDatabaseAuthenticationEnabled,KmsKeyId,LicenseModel,MasterUsername,PercentProgress,Port,SnapshotCreateTime,SnapshotType,SourceDBClusterSnapshotArn,Status,StorageEncrypted,StorageThroughput,StorageType,TagList,VpcId,accountid,collection_date,region'
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+Outputs:
+  MaintenanceStateMachineArn:
+    Description: 'ARN of the RDS Maintenance Step Function'
+    Value: !GetAtt StepFunctionmaintenance.Arn
+  ClusterSnapshotStateMachineArn:
+    Description: 'ARN of the RDS Cluster Snapshot Step Function'
+    Value: !GetAtt StepFunctionclustersnapshot.Arn

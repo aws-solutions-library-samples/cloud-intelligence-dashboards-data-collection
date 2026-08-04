@@ -44,7 +44,7 @@ Metadata:
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
           - IncludeReferenceModule
-          - IncludeRDSHealthModule
+          - IncludeRDSModule
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -118,8 +118,8 @@ Metadata:
         default: 'Include Identity Center Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
-      IncludeRDSHealthModule:
-        default: 'Include RDS Health Data Collection Module'
+      IncludeRDSModule:
+        default: 'Include RDS Data Collection Module'
 
 Mappings:
   RegionMap:
@@ -314,9 +314,9 @@ Parameters:
     Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
-  IncludeRDSHealthModule:
+  IncludeRDSModule:
     Type: String
-    Description: Collects RDS Health data including version analysis, maintenance actions, and end-of-support tracking
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
 Conditions:
@@ -376,7 +376,7 @@ Conditions:
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
-  DeployRDSHealthModule: !Equals [ !Ref IncludeRDSHealthModule, "yes"]
+  DeployRDSModule: !Equals [ !Ref IncludeRDSModule, "yes"]
   
 Resources:
   S3Bucket:
@@ -1633,11 +1633,11 @@ Resources:
             - !Sub "${AWS::Region}"
             - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
 
-  RDSHealthModule:
+  RDSModule:
     Type: AWS::CloudFormation::Stack
-    Condition: DeployRDSHealthModule
+    Condition: DeployRDSModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-rds-health.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.5/module-rds.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns

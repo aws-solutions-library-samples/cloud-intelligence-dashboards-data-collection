@@ -90,6 +90,11 @@ Parameters:
     Description: Collects RDS CloudWatch metrics from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRDSModule:
+    Type: String
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
   IncludeEUCUtilizationModule:
     Type: String
     Description: Collects WorkSpaces CloudWatch metrics from your accounts
@@ -127,6 +132,7 @@ Conditions:
   IncludeInventoryCollectorModulePolicy: !Equals [!Ref IncludeInventoryCollectorModule, "yes"]
   IncludeECSChargebackModulePolicy:      !Equals [!Ref IncludeECSChargebackModule, "yes"]
   IncludeRDSUtilizationModulePolicy:     !Equals [!Ref IncludeRDSUtilizationModule, "yes"]
+  IncludeRDSModulePolicy:                !Equals [!Ref IncludeRDSModule, "yes"]
   IncludeEUCUtilizationModulePolicy:     !Equals [!Ref IncludeEUCUtilizationModule, "yes"]
   IncludeBudgetsModulePolicy:            !Equals [!Ref IncludeBudgetsModule, "yes"]
   IncludeTransitGatewayModulePolicy:     !Equals [!Ref IncludeTransitGatewayModule, "yes"]
@@ -165,7 +171,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
-                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}RHD-rds-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}rds-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -297,7 +303,6 @@ Resources:
               - "workspaces:DescribeWorkspaces"
               - "workspaces:DescribeWorkspaceDirectories"
               - "workspaces:DescribeWorkspacesConnectionStatus"
-              - "rds:DescribePendingMaintenanceActions"
             Resource: "*" # Wildcard required as actions do not support resource-level permissions
       Roles:
         - Ref: LambdaRole
@@ -365,6 +370,26 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+  # RDS Module policy - pending maintenance actions
+  RDSModulePolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeRDSModulePolicy
+    Properties:
+      PolicyName: RDSModulePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "rds:DescribePendingMaintenanceActions"
+            Resource: "*" # Wildcard required as action does not support resource-level permissions
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "DescribePendingMaintenanceActions does not support resource-level permissions"
   # EUC Utilization policy
   EUCUtilizationPolicy:
     Type: 'AWS::IAM::Policy'
