@@ -534,7 +534,7 @@ Resources:
       ServiceToken: !GetAtt GlueScriptUploaderFunction.Arn
       Bucket: !Ref DestinationBucket
       Key: !Sub "${CFDataName}/glue-scripts/bedrock_logs_etl.py"
-      Version: '3'
+      Version: '1'
 
   GlueEtlRole:
     Type: AWS::IAM::Role
@@ -560,12 +560,6 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                  - s3:ListBucket
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}"
-                  - !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}/*"
-              - Effect: Allow
-                Action:
                   - s3:PutObject
                   - s3:DeleteObject
                   - s3:ListBucket
@@ -602,9 +596,10 @@ Resources:
         ScriptLocation: !Sub "s3://${DestinationBucket}/${CFDataName}/glue-scripts/bedrock_logs_etl.py"
       DefaultArguments:
         '--job-language': 'python'
-        '--SOURCE_BUCKET': !Sub "bedrock-logs-${AWS::AccountId}-${AWS::Region}"
+        '--SOURCE_BUCKET': !Ref DestinationBucket
+        '--SOURCE_PREFIX': !Sub "${CFDataName}/raw"
         '--PROCESSED_PREFIX': !Sub "${CFDataName}/processed"
-        '--DESTINATION_BUCKET': !Ref DestinationBucket
+        '--DATABASE_NAME': !Ref DatabaseName
         '--job-bookmark-option': 'job-bookmark-disable'
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-glue-datacatalog': 'true'
