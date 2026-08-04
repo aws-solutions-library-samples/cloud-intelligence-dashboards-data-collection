@@ -92,8 +92,14 @@ Resources:
               - Effect: "Allow"
                 Action:
                   - "s3:PutObject"
+                  - "s3:GetObject"
                 Resource:
                   - !Sub "${DestinationBucketARN}/*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "${DestinationBucketARN}"
         - !If
           - NeedDataBucketsKms
           - PolicyName: KMSPolicy
@@ -115,15 +121,17 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
-      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Description: !Sub "Lambda function to retrieve ${CFDataName} — reads S3 log files and writes JSONL"
       Runtime: python3.13
       Architectures: [x86_64]
       Code:
         ZipFile: |
           import os
           import json
+          import gzip
           import logging
           from datetime import datetime, timedelta, timezone
+          from io import BytesIO
 
           import boto3
           import botocore.exceptions
@@ -138,50 +146,66 @@ Resources:
 
           def get_last_collected(s3_client, account_id):
               """Read marker file; return datetime or None if absent/unreadable."""
-              key = f"{PREFIX}/{PREFIX}-data/last_collected/{account_id}.json"
+              key = f"{PREFIX}/raw/last_collected/{account_id}.json"
               try:
                   resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=key)
                   data = json.loads(resp['Body'].read())
                   return datetime.fromisoformat(data['last_collected_timestamp'])
-              except s3_client.exceptions.NoSuchKey:
-                  return None
+              except botocore.exceptions.ClientError as exc:
+                  if exc.response['Error']['Code'] in ('NoSuchKey', 'NoSuchBucket'):
+                      return None
+                  raise
               except Exception:  #pylint: disable=broad-exception-caught
                   return None
 
-          def get_log_events(logs_client, log_group, start_time_ms, end_time_ms):
-              """Paginate filter_log_events exhausting all nextToken pages; yield each event dict."""
-              kwargs = {
-                  'logGroupName': log_group,
-                  'startTime': start_time_ms,
-                  'endTime': end_time_ms,
-              }
-              while True:
-                  resp = logs_client.filter_log_events(**kwargs)
-                  for event in resp.get('events', []):
-                      yield event
-                  next_token = resp.get('nextToken')
-                  if not next_token:
-                      break
-                  kwargs['nextToken'] = next_token
+          def list_s3_log_files(s3_client, source_bucket, account_id, after_dt):
+              """List .json.gz log objects in the linked account's Bedrock logs bucket written after after_dt."""
+              prefix = f"model-invocation-logs/AWSLogs/{account_id}/BedrockModelInvocationLogs/"
+              paginator = s3_client.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=source_bucket, Prefix=prefix):
+                  for obj in page.get('Contents', []):
+                      key = obj['Key']
+                      if not key.endswith('.json.gz'):
+                          continue
+                      last_modified = obj['LastModified']
+                      if last_modified.tzinfo is None:
+                          last_modified = last_modified.replace(tzinfo=timezone.utc)
+                      if last_modified > after_dt:
+                          yield key
+
+          def parse_gz_log_file(s3_client, source_bucket, key, account_id, payer_id, collection_time):
+              """Download and decompress a .json.gz log file; yield one dict per line."""
+              resp = s3_client.get_object(Bucket=source_bucket, Key=key)
+              compressed = resp['Body'].read()
+              with gzip.GzipFile(fileobj=BytesIO(compressed)) as gz:
+                  for raw_line in gz:
+                      line = raw_line.decode('utf-8').strip()
+                      if not line:
+                          continue
+                      try:
+                          record = json.loads(line)
+                          record['account_id'] = account_id
+                          record['payer_id'] = payer_id
+                          record['collection_time'] = collection_time
+                          yield record
+                      except json.JSONDecodeError:
+                          logger.warning(f"Skipping unparseable line in {key}")
 
           def build_s3_key(prefix, account_id, payer_id, dt):
-              """Return Hive-partitioned S3 key for given UTC datetime."""
-              return f"{prefix}/{prefix}-data/payer_id={payer_id}/year={dt.strftime('%Y')}/month={dt.strftime('%m')}/day={dt.strftime('%d')}/{account_id}.json"
+              """Return Hive-partitioned S3 key for raw JSONL staging area."""
+              return f"{prefix}/raw/payer_id={payer_id}/year={dt.strftime('%Y')}/month={dt.strftime('%m')}/day={dt.strftime('%d')}/{account_id}.json"
 
           def build_role_arn(account_id, role_name, region):
               """Return partition-aware IAM role ARN."""
               partition = boto3.session.Session().get_partition_for_region(region_name=region)
               return f"arn:{partition}:iam::{account_id}:role/{role_name}"
 
-          def store_to_s3(s3_client, events, account_id, payer_id, collection_time):
-              """Write events as JSONL to /tmp/data.json and upload to S3. Returns count."""
+          def store_to_s3(s3_client, records, account_id, payer_id):
+              """Write records as JSONL to /tmp/data.json and upload to S3. Returns count."""
               count = 0
               with open(TMP_FILE, 'w', encoding='utf-8') as f:
-                  for event in events:
-                      event['account_id'] = account_id
-                      event['payer_id'] = payer_id
-                      event['collection_time'] = collection_time
-                      f.write(json.dumps(event) + '\n')
+                  for record in records:
+                      f.write(json.dumps(record) + '\n')
                       count += 1
               if count == 0:
                   return 0
@@ -192,7 +216,7 @@ Resources:
 
           def update_marker(s3_client, account_id, end_time):
               """Write last_collected marker file to S3."""
-              key = f"{PREFIX}/{PREFIX}-data/last_collected/{account_id}.json"
+              key = f"{PREFIX}/raw/last_collected/{account_id}.json"
               body = json.dumps({'last_collected_timestamp': end_time.isoformat()})
               s3_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=body)
 
@@ -221,39 +245,43 @@ Resources:
                       return
                   raise
 
-              s3_client = boto3.client('s3')
-              logs_client = boto3.client(
-                  'logs',
+              dest_s3 = boto3.client('s3')
+              src_s3 = boto3.client(
+                  's3',
                   aws_access_key_id=creds['AccessKeyId'],
                   aws_secret_access_key=creds['SecretAccessKey'],
                   aws_session_token=creds['SessionToken'],
               )
 
+              source_bucket = f"bedrock-logs-{account_id}-{region}"
               now = datetime.now(tz=timezone.utc)
-              last_collected = get_last_collected(s3_client, account_id)
-              start_time = last_collected if last_collected else now - timedelta(hours=24)
-              end_time = now
-
-              start_ms = int(start_time.timestamp() * 1000)
-              end_ms = int(end_time.timestamp() * 1000)
+              last_collected = get_last_collected(dest_s3, account_id)
+              after_dt = last_collected if last_collected else now - timedelta(hours=24)
 
               try:
-                  events = list(get_log_events(logs_client, '/aws/bedrock/modelinvocations', start_ms, end_ms))
+                  log_files = list(list_s3_log_files(src_s3, source_bucket, account_id, after_dt))
               except botocore.exceptions.ClientError as exc:
-                  if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException'):
-                      logger.warning(f"AccessDenied reading CW Logs in account {account_id}: {exc}")
+                  if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException', 'NoSuchBucket'):
+                      logger.warning(f"Cannot access source bucket in account {account_id}: {exc}")
                       return
                   raise
 
-              if not events:
-                  logger.info(f"No log events found for account {account_id} in window {start_time} to {end_time}")
+              if not log_files:
+                  logger.info(f"No new log files for account {account_id} since {after_dt}")
                   return
 
+              def all_records():
+                  for key in log_files:
+                      try:
+                          yield from parse_gz_log_file(src_s3, source_bucket, key, account_id, payer_id, collection_time)
+                      except Exception as exc:  #pylint: disable=broad-exception-caught
+                          logger.error(f"Error parsing {key}: {exc}")
+
               try:
-                  count = store_to_s3(s3_client, iter(events), account_id, payer_id, collection_time)
+                  count = store_to_s3(dest_s3, all_records(), account_id, payer_id)
                   if count > 0:
-                      update_marker(s3_client, account_id, end_time)
-                      logger.info(f"Collection complete for account {account_id}: {count} records")
+                      update_marker(dest_s3, account_id, now)
+                      logger.info(f"Collection complete for account {account_id}: {count} records from {len(log_files)} files")
               except Exception as exc:  #pylint: disable=broad-exception-caught
                   logger.error(f"Error storing data for account {account_id}: {exc}")
       Handler: 'index.lambda_handler'
@@ -289,7 +317,7 @@ Resources:
       DatabaseName: !Ref DatabaseName
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/processed/"
       Configuration: |
         {
           "Version": 1.0,
@@ -307,7 +335,7 @@ Resources:
           }
         }
       SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
+        UpdateBehavior: LOG
         DeleteBehavior: LOG
       RecrawlPolicy:
         RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
@@ -352,3 +380,245 @@ Resources:
     Properties:
       ServiceToken: !Ref LambdaAnalyticsARN
       Name: !Ref CFDataName
+
+  # ---------------------------------------------------------------------------
+  # Glue ETL: uploads PySpark script at deploy time, converts raw JSONL to
+  # Parquet partitioned by account_id/year/month/day for fast Athena queries.
+  # ---------------------------------------------------------------------------
+  GlueScriptUploaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-GlueScriptUploaderRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: S3ScriptUpload
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${DestinationBucketARN}/${CFDataName}/glue-scripts/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  GlueScriptUploaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ResourcePrefix}${CFDataName}-GlueScriptUploader"
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt GlueScriptUploaderRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+
+          SCRIPT = r"""
+          import sys
+          from awsglue.utils import getResolvedOptions
+          from awsglue.context import GlueContext
+          from awsglue.job import Job
+          from pyspark.context import SparkContext
+          from pyspark.sql import functions as F
+          from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+
+          args = getResolvedOptions(sys.argv, ['JOB_NAME', 'SOURCE_BUCKET', 'SOURCE_PREFIX', 'PROCESSED_PREFIX', 'DATABASE_NAME'])
+          sc = SparkContext()
+          glueContext = GlueContext(sc)
+          spark = glueContext.spark_session
+          job = Job(glueContext)
+          job.init(args['JOB_NAME'], args)
+
+          SOURCE_BUCKET = args['SOURCE_BUCKET']
+          SOURCE_PREFIX = args['SOURCE_PREFIX']
+          PROCESSED_PREFIX = args['PROCESSED_PREFIX']
+          DATABASE_NAME = args['DATABASE_NAME']
+          OUTPUT_PATH = f's3://{SOURCE_BUCKET}/{PROCESSED_PREFIX}/'
+
+          LOG_SCHEMA = StructType([
+              StructField('schemaType', StringType(), True),
+              StructField('schemaVersion', StringType(), True),
+              StructField('timestamp', StringType(), True),
+              StructField('accountId', StringType(), True),
+              StructField('region', StringType(), True),
+              StructField('requestId', StringType(), True),
+              StructField('operation', StringType(), True),
+              StructField('modelId', StringType(), True),
+              StructField('payer_id', StringType(), True),
+              StructField('collection_time', StringType(), True),
+              StructField('input', StructType([
+                  StructField('inputBodyJson', StringType(), True),
+                  StructField('inputContentType', StringType(), True),
+                  StructField('inputTokenCount', IntegerType(), True),
+              ]), True),
+              StructField('output', StructType([
+                  StructField('outputBodyJson', StringType(), True),
+                  StructField('outputContentType', StringType(), True),
+                  StructField('outputTokenCount', IntegerType(), True),
+              ]), True),
+          ])
+
+          df = spark.read \
+              .option('multiLine', False) \
+              .option('recursiveFileLookup', 'true') \
+              .schema(LOG_SCHEMA) \
+              .json(f's3://{SOURCE_BUCKET}/{SOURCE_PREFIX}/')
+
+          df_processed = df \
+              .filter(F.col('accountId').isNotNull()) \
+              .withColumn('account_id', F.col('accountId')) \
+              .withColumn('year',  F.date_format(F.to_timestamp(F.col('timestamp')), 'yyyy')) \
+              .withColumn('month', F.date_format(F.to_timestamp(F.col('timestamp')), 'MM')) \
+              .withColumn('day',   F.date_format(F.to_timestamp(F.col('timestamp')), 'dd')) \
+              .withColumnRenamed('schemaType',    'schematype') \
+              .withColumnRenamed('schemaVersion', 'schemaversion') \
+              .withColumnRenamed('requestId',     'requestid') \
+              .withColumnRenamed('modelId',       'modelid') \
+              .drop('accountId')
+
+          df_processed.write \
+              .mode('overwrite') \
+              .partitionBy('account_id', 'year', 'month', 'day') \
+              .parquet(OUTPUT_PATH)
+
+          tables = spark.sql(f"SHOW TABLES IN {DATABASE_NAME}").collect()
+          table_exists = any(row.tableName == "processed" for row in tables)
+          if table_exists:
+              spark.sql(f"MSCK REPAIR TABLE {DATABASE_NAME}.processed")
+          else:
+              print("WARNING: Table processed does not exist in " + DATABASE_NAME + " — skipping MSCK REPAIR")
+
+          job.commit()
+          """
+
+          def handler(event, context):
+              props = event.get('ResourceProperties', {})
+              bucket = props['Bucket']
+              key = props['Key']
+              try:
+                  s3 = boto3.client('s3')
+                  if event['RequestType'] in ('Create', 'Update'):
+                      s3.put_object(Bucket=bucket, Key=key, Body=SCRIPT.strip())
+                  elif event['RequestType'] == 'Delete':
+                      s3.delete_object(Bucket=bucket, Key=key)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as exc:  #pylint: disable=broad-exception-caught
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(exc)})
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC in this case"
+          - id: W92
+            reason: "No need for simultaneous execution"
+
+  GlueScriptUpload:
+    Type: Custom::GlueScriptUpload
+    DependsOn: LambdaFunction
+    Properties:
+      ServiceToken: !GetAtt GlueScriptUploaderFunction.Arn
+      Bucket: !Ref DestinationBucket
+      Key: !Sub "${CFDataName}/glue-scripts/bedrock_logs_etl.py"
+      Version: '3'
+
+  GlueEtlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-GlueEtlRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSGlueServiceRole"
+      Policies:
+        - PolicyName: GlueEtlS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}"
+                  - !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref DestinationBucketARN
+                  - !Sub "${DestinationBucketARN}/*"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: KMSPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:GenerateDataKey
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name to identify role actions"
+
+  BedrockLogsEtlJob:
+    Type: AWS::Glue::Job
+    DependsOn: GlueScriptUpload
+    Properties:
+      Name: !Sub "${ResourcePrefix}${CFDataName}-EtlJob"
+      Role: !GetAtt GlueEtlRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub "s3://${DestinationBucket}/${CFDataName}/glue-scripts/bedrock_logs_etl.py"
+      DefaultArguments:
+        '--job-language': 'python'
+        '--SOURCE_BUCKET': !Sub "bedrock-logs-${AWS::AccountId}-${AWS::Region}"
+        '--PROCESSED_PREFIX': !Sub "${CFDataName}/processed"
+        '--DESTINATION_BUCKET': !Ref DestinationBucket
+        '--job-bookmark-option': 'job-bookmark-disable'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-glue-datacatalog': 'true'
+      GlueVersion: '4.0'
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Timeout: 60
+
+  BedrockLogsEtlTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: !Sub "${ResourcePrefix}${CFDataName}-EtlTrigger"
+      Type: SCHEDULED
+      Schedule: 'cron(30 5 * * ? *)'
+      StartOnCreation: true
+      Actions:
+        - JobName: !Ref BedrockLogsEtlJob

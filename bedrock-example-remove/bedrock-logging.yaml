@@ -1,0 +1,340 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bedrock Observability - CloudWatch Logs, S3 bucket, IAM role, and Application Inference Profile for model invocation logging'
+
+Parameters:
+  CentralDataLakeAccountId:
+    Type: String
+    Description: 'AWS Account ID of the central Bedrock data lake account (12-digit numeric)'
+    AllowedPattern: '[0-9]{12}'
+    ConstraintDescription: 'Must be exactly 12 decimal digits - the AWS account ID of the central data lake account'
+    Default: '260990198475'
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # KMS Key for CloudWatch Log Group encryption
+  # ---------------------------------------------------------------------------
+  BedrockLogsKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for encrypting Bedrock CloudWatch log group'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations'
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+  BedrockLogsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/bedrock-logs-key
+      TargetKeyId: !Ref BedrockLogsKmsKey
+
+  # CloudWatch Log Group for Bedrock model invocation logs
+  BedrockLogsGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /aws/bedrock/modelinvocations
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt BedrockLogsKmsKey.Arn
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+  # ---------------------------------------------------------------------------
+  # S3 Access Logging Bucket
+  # ---------------------------------------------------------------------------
+  S3AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-logging-access-logs-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+  S3AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt S3AccessLogsBucket.Arn
+              - !Sub '${S3AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # S3 bucket for Bedrock model invocation logs (long-term storage)
+  BedrockLogsS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-logs-${AWS::AccountId}-${AWS::Region}'
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: 'bedrock-logs-bucket/'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ReplicationConfiguration:
+        Role: !GetAtt BedrockS3ReplicationRole.Arn
+        Rules:
+          - Id: ReplicateAllToDataLake
+            Priority: 1
+            Status: Enabled
+            Filter:
+              Prefix: !Sub '${AWS::AccountId}/'
+            Destination:
+              Bucket: !Sub 'arn:aws:s3:::bedrock-data-lake-${CentralDataLakeAccountId}'
+              StorageClass: STANDARD
+              Account: !Ref CentralDataLakeAccountId
+              AccessControlTranslation:
+                Owner: Destination
+            DeleteMarkerReplication:
+              Status: Disabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+  # Bucket policy enforcing TLS and allowing Bedrock to write logs
+  BedrockLogsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BedrockLogsS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BedrockLogsS3Bucket.Arn
+              - !Sub '${BedrockLogsS3Bucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: AllowBedrockLogging
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${BedrockLogsS3Bucket.Arn}/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # IAM Managed Policy for Bedrock Logging
+  # ---------------------------------------------------------------------------
+  BedrockLoggingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'bedrock-logging-policy-${AWS::Region}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations:*'
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}/${AWS::AccountId}/*'
+
+  # IAM Role that Bedrock assumes to write logs to CloudWatch and S3
+  BedrockLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bedrock-logging-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Ref BedrockLoggingPolicy
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+  # Application Inference Profile for cost attribution by project/team
+  BedrockObservabilityProfile:
+    Type: AWS::Bedrock::ApplicationInferenceProfile
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3001   # cfn-lint schema may not yet include AWS::Bedrock::ApplicationInferenceProfile
+    Properties:
+      InferenceProfileName: bedrock-observability-profile
+      Description: Inference profile for Bedrock observability and cost tracking demo
+      ModelSource:
+        CopyFrom: arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+        - Key: Project
+          Value: bedrock-observability
+        - Key: Team
+          Value: finops
+
+  # ---------------------------------------------------------------------------
+  # IAM Managed Policy for S3 Replication
+  # ---------------------------------------------------------------------------
+  BedrockS3ReplicationPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'bedrock-s3-replication-policy-${AWS::Region}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SourceBucketRead
+            Effect: Allow
+            Action:
+              - s3:GetReplicationConfiguration
+              - s3:ListBucket
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}'
+          - Sid: SourceObjectRead
+            Effect: Allow
+            Action:
+              - s3:GetObjectVersionForReplication
+              - s3:GetObjectVersionAcl
+              - s3:GetObjectVersionTagging
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}/*'
+          - Sid: DestinationWrite
+            Effect: Allow
+            Action:
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+              - s3:ReplicateTags
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::bedrock-data-lake-${CentralDataLakeAccountId}/*'
+
+  # IAM Role that S3 assumes to replicate logs to the central data lake.
+  # Resource ARNs for the source bucket are constructed via !Sub (not !GetAtt) to
+  # break the circular dependency: BedrockLogsS3Bucket references this role's ARN
+  # in its ReplicationConfiguration, so this role must not reference the bucket resource.
+  BedrockS3ReplicationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bedrock-s3-replication-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref BedrockS3ReplicationPolicy
+      Tags:
+        - Key: FinOps
+          Value: bedrock-logging
+
+Outputs:
+  BedrockLogsGroupName:
+    Description: CloudWatch Log Group name for Bedrock model invocations
+    Value: !Ref BedrockLogsGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
+
+  BedrockLogsS3BucketName:
+    Description: S3 bucket name for Bedrock model invocation logs
+    Value: !Ref BedrockLogsS3Bucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LogsBucketName'
+
+  BedrockLoggingRoleArn:
+    Description: ARN of the IAM role for Bedrock logging
+    Value: !GetAtt BedrockLoggingRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LoggingRoleArn'
+
+  BedrockInferenceProfileArn:
+    Description: ARN of the Application Inference Profile
+    Value: !Ref BedrockObservabilityProfile
+    Export:
+      Name: !Sub '${AWS::StackName}-InferenceProfileArn'
+
+  BedrockS3ReplicationRoleArn:
+    Description: 'ARN of the S3 replication role - required for central data lake bucket policy'
+    Value: !GetAtt BedrockS3ReplicationRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ReplicationRoleArn'

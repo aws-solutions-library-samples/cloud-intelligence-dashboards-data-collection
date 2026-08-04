@@ -111,10 +111,25 @@ Resources:
               Service: bedrock.amazonaws.com
             Action:
               - s3:PutObject
-            Resource: !Sub '${BedrockLogsS3Bucket.Arn}/${AWS::AccountId}/*'
+              - s3:GetBucketAcl
+            Resource:
+              - !GetAtt BedrockLogsS3Bucket.Arn
+              - !Sub '${BedrockLogsS3Bucket.Arn}/${AWS::AccountId}/*'
             Condition:
               StringEquals:
                 'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: AllowDataCollectionRead
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt BedrockLogsS3Bucket.Arn
+              - !Sub '${BedrockLogsS3Bucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:PrincipalAccount': !Ref DataCollectionAccountID
 
   # ---------------------------------------------------------------------------
   # IAM Managed Policy and Role for Bedrock logging
@@ -191,6 +206,11 @@ Resources:
                 Condition:
                   StringEquals:
                     'iam:PassedToService': bedrock.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}'
     Metadata:
       cfn_nag:
         rules_to_suppress:

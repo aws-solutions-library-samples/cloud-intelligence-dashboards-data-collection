@@ -537,14 +537,12 @@ Resources:
         Statement:
           - Effect: "Allow"
             Action:
-              - "logs:DescribeLogGroups"
-              - "logs:DescribeLogStreams"
-            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations"
+              - "s3:ListBucket"
+            Resource: !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}"
           - Effect: "Allow"
             Action:
-              - "logs:FilterLogEvents"
-              - "logs:GetLogEvents"
-            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/bedrock/modelinvocations:log-stream:*"
+              - "s3:GetObject"
+            Resource: !Sub "arn:${AWS::Partition}:s3:::bedrock-logs-${AWS::AccountId}-${AWS::Region}/*"
       Roles:
         - Ref: LambdaRole
     Metadata:

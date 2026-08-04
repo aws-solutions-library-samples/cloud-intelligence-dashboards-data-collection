@@ -1,0 +1,558 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bedrock Logging Data Lake - Central account resources for aggregating Bedrock invocation logs'
+
+Parameters:
+  SourceAccountReplicationRoleArns:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of IAM role ARNs from source accounts that will replicate to this bucket (e.g. arn:aws:iam::466959819186:role/bedrock-s3-replication-role,arn:aws:iam::904247366374:role/bedrock-s3-replication-role)'
+    ConstraintDescription: 'Must be a comma-separated list of valid IAM role ARNs'
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # S3 Access Logging Bucket
+  # Stores server access logs for BedrockDataLakeBucket and BedrockAthenaResultsBucket
+  # ---------------------------------------------------------------------------
+  S3AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-datalake-access-logs-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  # Enforce TLS-only access to the access-logs bucket.
+  S3AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt S3AccessLogsBucket.Arn
+              - !Sub '${S3AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  BedrockDataLakeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-data-lake-${AWS::AccountId}'
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: 'data-lake-bucket/'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Prefix: 'logs/'
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 365
+                StorageClass: GLACIER
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  # ---------------------------------------------------------------------------
+  # Component 2: Athena Results Bucket
+  # Satisfies: Requirements 2.1, 2.2, 2.3, 2.4
+  # ---------------------------------------------------------------------------
+  BedrockAthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'bedrock-athena-results-${AWS::AccountId}'
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: 'athena-results-bucket/'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireResults
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  # Enforce TLS-only access to the Athena results bucket. Query results can
+  # contain full prompt/response bodies, so plaintext transport must be denied.
+  BedrockAthenaResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BedrockAthenaResultsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BedrockAthenaResultsBucket.Arn
+              - !Sub '${BedrockAthenaResultsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # ---------------------------------------------------------------------------
+  # Component 3: Glue Database
+  # Satisfies: Requirement 3.1
+  # ---------------------------------------------------------------------------
+  BedrockLogsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: bedrock_logs
+        Description: 'Bedrock model invocation logs from all source accounts'
+
+  # ---------------------------------------------------------------------------
+  # Component 4: Data Lake Bucket Policy
+  # Satisfies: Requirements 1.5, 1.6, 2.5
+  # NOTE: Omitted from initial deploy — linked account replication roles must
+  # exist first or CFN's ResourceExistenceCheck will reject the changeset.
+  # Add back and update-stack once bedrock-logging.yaml is deployed to all
+  # linked accounts.
+  # ---------------------------------------------------------------------------
+  BedrockDataLakeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BedrockDataLakeBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonHTTPS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BedrockDataLakeBucket.Arn
+              - !Sub '${BedrockDataLakeBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          # SECURITY NOTE (customers): this grant is scoped only to the role
+          # ARNs passed in SourceAccountReplicationRoleArns and has no additional
+          # guardrail. Consider adding a PrincipalOrgID-like condition to limit
+          # access to principals inside your AWS Organization, e.g.:
+          #     Condition:
+          #       StringEquals:
+          #         'aws:PrincipalOrgID': 'o-xxxxxxxxxx'
+          # This provides defence-in-depth so that even a mistyped or compromised
+          # role ARN cannot replicate into the lake from outside your org.
+          - Sid: AllowCrossAccountReplication
+            Effect: Allow
+            Principal:
+              AWS: !Ref SourceAccountReplicationRoleArns
+            Action:
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+              - s3:ReplicateTags
+              - s3:ObjectOwnerOverrideToBucketOwner
+            Resource: !Sub '${BedrockDataLakeBucket.Arn}/*'
+
+  # ---------------------------------------------------------------------------
+  # Component 6: Custom resource — uploads Glue ETL script to S3 at deploy time
+  # This removes the manual "aws s3 cp" step — script is embedded in the template.
+  # ---------------------------------------------------------------------------
+  GlueScriptUploaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ScriptUpload
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${BedrockDataLakeBucket.Arn}/glue-scripts/*'
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  GlueScriptUploaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: bedrock-glue-script-uploader
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt GlueScriptUploaderRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3, json
+          from urllib.request import urlopen, Request
+
+          def send_response(event, context, status, data={}):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': data.get('Error', 'See CloudWatch'),
+                  'PhysicalResourceId': event.get('PhysicalResourceId', context.log_stream_name),
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data,
+              }).encode()
+              req = Request(event['ResponseURL'], data=body,
+                            headers={'Content-Type': '', 'Content-Length': len(body)},
+                            method='PUT')
+              urlopen(req)
+
+          SCRIPT = r"""
+          import sys
+          from awsglue.transforms import *
+          from awsglue.utils import getResolvedOptions
+          from awsglue.context import GlueContext
+          from awsglue.job import Job
+          from pyspark.context import SparkContext
+          from pyspark.sql import functions as F
+          from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+
+          args = getResolvedOptions(sys.argv, ['JOB_NAME', 'SOURCE_BUCKET', 'PROCESSED_PREFIX'])
+          sc = SparkContext()
+          glueContext = GlueContext(sc)
+          spark = glueContext.spark_session
+          job = Job(glueContext)
+          job.init(args['JOB_NAME'], args)
+
+          SOURCE_BUCKET = args['SOURCE_BUCKET']
+          PROCESSED_PREFIX = args['PROCESSED_PREFIX']
+          SOURCE_PATH = f's3://{SOURCE_BUCKET}/'
+          OUTPUT_PATH = f's3://{SOURCE_BUCKET}/{PROCESSED_PREFIX}/'
+
+          LOG_SCHEMA = StructType([
+              StructField('schemaType', StringType(), True),
+              StructField('schemaVersion', StringType(), True),
+              StructField('timestamp', StringType(), True),
+              StructField('accountId', StringType(), True),
+              StructField('region', StringType(), True),
+              StructField('requestId', StringType(), True),
+              StructField('operation', StringType(), True),
+              StructField('modelId', StringType(), True),
+              StructField('input', StructType([
+                  StructField('inputBodyJson', StringType(), True),
+                  StructField('inputContentType', StringType(), True),
+                  StructField('inputTokenCount', IntegerType(), True),
+              ]), True),
+              StructField('output', StructType([
+                  StructField('outputBodyJson', StringType(), True),
+                  StructField('outputContentType', StringType(), True),
+                  StructField('outputTokenCount', IntegerType(), True),
+              ]), True),
+          ])
+
+          raw_path = f'{SOURCE_PATH}*/AWSLogs/*/BedrockModelInvocationLogs/*/*/*/*/*/*.json.gz'
+          df = spark.read.option('multiLine', False).schema(LOG_SCHEMA).json(raw_path)
+
+          df_processed = df \
+              .withColumn('account_id', F.col('accountId')) \
+              .withColumn('year',  F.date_format(F.to_timestamp(F.col('timestamp')), 'yyyy')) \
+              .withColumn('month', F.date_format(F.to_timestamp(F.col('timestamp')), 'MM')) \
+              .withColumn('day',   F.date_format(F.to_timestamp(F.col('timestamp')), 'dd')) \
+              .withColumnRenamed('schemaType',    'schematype') \
+              .withColumnRenamed('schemaVersion', 'schemaversion') \
+              .withColumnRenamed('requestId',     'requestid') \
+              .withColumnRenamed('modelId',       'modelid') \
+              .drop('accountId')
+
+          df_processed.write \
+              .mode('overwrite') \
+              .partitionBy('account_id', 'year', 'month', 'day') \
+              .parquet(OUTPUT_PATH)
+
+          # Register new partitions in Glue catalog — replaces need for crawler
+          tables = spark.sql("SHOW TABLES IN bedrock_logs").collect()
+          table_exists = any(row.tableName == "bedrock_invocations_processed" for row in tables)
+          if table_exists:
+              spark.sql("MSCK REPAIR TABLE bedrock_logs.bedrock_invocations_processed")
+          else:
+              print("WARNING: Table bedrock_logs.bedrock_invocations_processed does not exist — skipping MSCK REPAIR")
+
+          job.commit()
+          """
+
+          def handler(event, context):
+              props = event.get('ResourceProperties', {})
+              bucket = props['Bucket']
+              key = props['Key']
+              try:
+                  s3 = boto3.client('s3')
+                  if event['RequestType'] in ('Create', 'Update'):
+                      s3.put_object(Bucket=bucket, Key=key, Body=SCRIPT.strip())
+                  elif event['RequestType'] == 'Delete':
+                      s3.delete_object(Bucket=bucket, Key=key)
+                  send_response(event, context, 'SUCCESS')
+              except Exception as e:
+                  send_response(event, context, 'FAILED', {'Error': str(e)})
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  GlueScriptUpload:
+    Type: Custom::GlueScriptUpload
+    DependsOn: BedrockDataLakeBucket
+    Properties:
+      ServiceToken: !GetAtt GlueScriptUploaderFunction.Arn
+      Bucket: !Sub 'bedrock-data-lake-${AWS::AccountId}'
+      Key: glue-scripts/bedrock_logs_etl.py
+      Version: '2'
+
+  # ---------------------------------------------------------------------------
+  # Component 6: Glue ETL Job — converts raw JSON.GZ to partitioned Parquet
+  # Script is automatically uploaded to S3 by the GlueScriptUpload custom resource.
+  # ---------------------------------------------------------------------------
+  GlueEtlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: bedrock-glue-etl-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+            # CD-1 remediation: prevent cross-service confused-deputy by scoping
+            # the trust to this account and the specific Glue job that uses it.
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/bedrock-logs-etl'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueEtlS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt BedrockDataLakeBucket.Arn
+                  - !Sub '${BedrockDataLakeBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetPartitions
+                  - glue:BatchCreatePartition
+                  - glue:CreatePartition
+                  - glue:UpdatePartition
+                  - glue:GetDatabase
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/bedrock_logs'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/bedrock_logs/*'
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+  BedrockLogsEtlJob:
+    Type: AWS::Glue::Job
+    DependsOn: GlueScriptUpload
+    Properties:
+      Name: bedrock-logs-etl
+      Role: !GetAtt GlueEtlRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub 's3://bedrock-data-lake-${AWS::AccountId}/glue-scripts/bedrock_logs_etl.py'
+      DefaultArguments:
+        '--job-language': 'python'
+        '--SOURCE_BUCKET': !Sub 'bedrock-data-lake-${AWS::AccountId}'
+        '--PROCESSED_PREFIX': 'processed'
+        '--job-bookmark-option': 'job-bookmark-enable'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-glue-datacatalog': 'true'
+      GlueVersion: '4.0'
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      Timeout: 60
+      Tags:
+        FinOps: bedrock-data-lake
+
+  BedrockLogsEtlTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: bedrock-logs-etl-daily
+      Type: SCHEDULED
+      Schedule: 'cron(30 5 * * ? *)'
+      StartOnCreation: true
+      Actions:
+        - JobName: !Ref BedrockLogsEtlJob
+      Tags:
+        FinOps: bedrock-data-lake
+
+  # ---------------------------------------------------------------------------
+  # Component 7: Processed Glue Table (Parquet, Hive partitions)
+  # Query this table instead of bedrock_invocations for fast results.
+  # ---------------------------------------------------------------------------
+  BedrockLogsProcessedTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref BedrockLogsGlueDatabase
+      TableInput:
+        Name: bedrock_invocations_processed
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub 's3://bedrock-data-lake-${AWS::AccountId}/processed/'
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+          Columns:
+            - Name: schematype
+              Type: string
+            - Name: schemaversion
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: region
+              Type: string
+            - Name: requestid
+              Type: string
+            - Name: operation
+              Type: string
+            - Name: modelid
+              Type: string
+            - Name: input
+              Type: 'struct<inputbodyjson:string,inputcontenttype:string,inputtokencount:int>'
+            - Name: output
+              Type: 'struct<outputbodyjson:string,outputcontenttype:string,outputtokencount:int>'
+        Parameters:
+          classification: parquet
+          compressionType: snappy
+
+  # ---------------------------------------------------------------------------
+  # Component 5: Athena WorkGroup
+  # Satisfies: Requirements 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
+  # ---------------------------------------------------------------------------
+  BedrockAthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: bedrock-analytics
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://bedrock-athena-results-${AWS::AccountId}/results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240
+      Tags:
+        - Key: FinOps
+          Value: bedrock-data-lake
+
+Outputs:
+  BedrockDataLakeBucketName:
+    Description: 'Name of the central S3 data lake bucket'
+    Value: !Ref BedrockDataLakeBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataLakeBucketName'
+
+  BedrockDataLakeBucketArn:
+    Description: 'ARN of the central S3 data lake bucket'
+    Value: !GetAtt BedrockDataLakeBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DataLakeBucketArn'
+
+  BedrockAthenaResultsBucketName:
+    Description: 'Name of the Athena query results bucket'
+    Value: !Ref BedrockAthenaResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AthenaResultsBucketName'
+
+  BedrockLogsGlueDatabaseName:
+    Description: 'Name of the Glue database for Bedrock logs'
+    Value: !Ref BedrockLogsGlueDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueDatabaseName'
+
+  BedrockAthenaWorkGroupName:
+    Description: 'Name of the Athena workgroup for Bedrock log queries'
+    Value: !Ref BedrockAthenaWorkGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AthenaWorkGroupName'

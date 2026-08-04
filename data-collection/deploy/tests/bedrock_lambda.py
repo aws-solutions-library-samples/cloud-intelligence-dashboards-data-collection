@@ -5,8 +5,10 @@ All logic is identical to the inline ZipFile code in the CloudFormation template
 """
 import os
 import json
+import gzip
 import logging
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
 import boto3
 import botocore.exceptions
@@ -27,27 +29,47 @@ def get_last_collected(s3_client, account_id):
         resp = s3_client.get_object(Bucket=BUCKET_NAME, Key=key)
         data = json.loads(resp['Body'].read())
         return datetime.fromisoformat(data['last_collected_timestamp'])
-    except s3_client.exceptions.NoSuchKey:
-        return None
+    except botocore.exceptions.ClientError as exc:
+        if exc.response['Error']['Code'] in ('NoSuchKey', 'NoSuchBucket'):
+            return None
+        raise
     except Exception:  #pylint: disable=broad-exception-caught
         return None
 
 
-def get_log_events(logs_client, log_group, start_time_ms, end_time_ms):
-    """Paginate filter_log_events exhausting all nextToken pages; yield each event dict."""
-    kwargs = {
-        'logGroupName': log_group,
-        'startTime': start_time_ms,
-        'endTime': end_time_ms,
-    }
-    while True:
-        resp = logs_client.filter_log_events(**kwargs)
-        for event in resp.get('events', []):
-            yield event
-        next_token = resp.get('nextToken')
-        if not next_token:
-            break
-        kwargs['nextToken'] = next_token
+def list_s3_log_files(s3_client, source_bucket, account_id, after_dt):
+    """List .json.gz log objects in the linked account's Bedrock logs bucket written after after_dt."""
+    prefix = f"model-invocation-logs/AWSLogs/{account_id}/BedrockModelInvocationLogs/"
+    paginator = s3_client.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=source_bucket, Prefix=prefix):
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if not key.endswith('.json.gz'):
+                continue
+            last_modified = obj['LastModified']
+            if last_modified.tzinfo is None:
+                last_modified = last_modified.replace(tzinfo=timezone.utc)
+            if last_modified > after_dt:
+                yield key
+
+
+def parse_gz_log_file(s3_client, source_bucket, key, account_id, payer_id, collection_time):
+    """Download and decompress a .json.gz log file; yield one dict per line."""
+    resp = s3_client.get_object(Bucket=source_bucket, Key=key)
+    compressed = resp['Body'].read()
+    with gzip.GzipFile(fileobj=BytesIO(compressed)) as gz:
+        for raw_line in gz:
+            line = raw_line.decode('utf-8').strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                record['account_id'] = account_id
+                record['payer_id'] = payer_id
+                record['collection_time'] = collection_time
+                yield record
+            except json.JSONDecodeError:
+                logger.warning(f"Skipping unparseable line in {key}")
 
 
 def build_s3_key(prefix, account_id, payer_id, dt):
@@ -61,15 +83,12 @@ def build_role_arn(account_id, role_name, region):
     return f"arn:{partition}:iam::{account_id}:role/{role_name}"
 
 
-def store_to_s3(s3_client, events, account_id, payer_id, collection_time):
-    """Write events as JSONL to /tmp/data.json and upload to S3. Returns count."""
+def store_to_s3(s3_client, records, account_id, payer_id):
+    """Write records as JSONL to /tmp/data.json and upload to S3. Returns count."""
     count = 0
     with open(TMP_FILE, 'w', encoding='utf-8') as f:
-        for event in events:
-            event['account_id'] = account_id
-            event['payer_id'] = payer_id
-            event['collection_time'] = collection_time
-            f.write(json.dumps(event) + '\n')
+        for record in records:
+            f.write(json.dumps(record) + '\n')
             count += 1
     if count == 0:
         return 0
@@ -111,38 +130,42 @@ def lambda_handler(event, context):  #pylint: disable=W0613
             return
         raise
 
-    s3_client = boto3.client('s3')
-    logs_client = boto3.client(
-        'logs',
+    dest_s3 = boto3.client('s3')
+    src_s3 = boto3.client(
+        's3',
         aws_access_key_id=creds['AccessKeyId'],
         aws_secret_access_key=creds['SecretAccessKey'],
         aws_session_token=creds['SessionToken'],
     )
 
+    source_bucket = f"bedrock-logs-{account_id}-{region}"
     now = datetime.now(tz=timezone.utc)
-    last_collected = get_last_collected(s3_client, account_id)
-    start_time = last_collected if last_collected else now - timedelta(hours=24)
-    end_time = now
-
-    start_ms = int(start_time.timestamp() * 1000)
-    end_ms = int(end_time.timestamp() * 1000)
+    last_collected = get_last_collected(dest_s3, account_id)
+    after_dt = last_collected if last_collected else now - timedelta(hours=24)
 
     try:
-        events = list(get_log_events(logs_client, '/aws/bedrock/modelinvocations', start_ms, end_ms))
+        log_files = list(list_s3_log_files(src_s3, source_bucket, account_id, after_dt))
     except botocore.exceptions.ClientError as exc:
-        if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException'):
-            logger.warning(f"AccessDenied reading CW Logs in account {account_id}: {exc}")
+        if exc.response['Error']['Code'] in ('AccessDenied', 'AccessDeniedException', 'NoSuchBucket'):
+            logger.warning(f"Cannot access source bucket in account {account_id}: {exc}")
             return
         raise
 
-    if not events:
-        logger.info(f"No log events found for account {account_id} in window {start_time} to {end_time}")
+    if not log_files:
+        logger.info(f"No new log files for account {account_id} since {after_dt}")
         return
 
+    def all_records():
+        for key in log_files:
+            try:
+                yield from parse_gz_log_file(src_s3, source_bucket, key, account_id, payer_id, collection_time)
+            except Exception as exc:  #pylint: disable=broad-exception-caught
+                logger.error(f"Error parsing {key}: {exc}")
+
     try:
-        count = store_to_s3(s3_client, iter(events), account_id, payer_id, collection_time)
+        count = store_to_s3(dest_s3, all_records(), account_id, payer_id)
         if count > 0:
-            update_marker(s3_client, account_id, end_time)
-            logger.info(f"Collection complete for account {account_id}: {count} records")
+            update_marker(dest_s3, account_id, now)
+            logger.info(f"Collection complete for account {account_id}: {count} records from {len(log_files)} files")
     except Exception as exc:  #pylint: disable=broad-exception-caught
         logger.error(f"Error storing data for account {account_id}: {exc}")
