@@ -317,7 +317,7 @@ Resources:
       DatabaseName: !Ref DatabaseName
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/processed/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/bedrock_logs/"
       Configuration: |
         {
           "Version": 1.0,
@@ -435,7 +435,7 @@ Resources:
           from awsglue.job import Job
           from pyspark.context import SparkContext
           from pyspark.sql import functions as F
-          from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+          from pyspark.sql.types import StructType, StructField, StringType, IntegerType, MapType
 
           args = getResolvedOptions(sys.argv, ['JOB_NAME', 'SOURCE_BUCKET', 'SOURCE_PREFIX', 'PROCESSED_PREFIX', 'DATABASE_NAME'])
           sc = SparkContext()
@@ -459,6 +459,10 @@ Resources:
               StructField('requestId', StringType(), True),
               StructField('operation', StringType(), True),
               StructField('modelId', StringType(), True),
+              StructField('identity', StructType([
+                  StructField('arn', StringType(), True),
+              ]), True),
+              StructField('requestMetadata', MapType(StringType(), StringType()), True),
               StructField('payer_id', StringType(), True),
               StructField('collection_time', StringType(), True),
               StructField('input', StructType([
@@ -482,6 +486,7 @@ Resources:
           df_processed = df \
               .filter(F.col('accountId').isNotNull()) \
               .withColumn('account_id', F.col('accountId')) \
+              .withColumn('identity_arn', F.col('identity.arn')) \
               .withColumn('year',  F.date_format(F.to_timestamp(F.col('timestamp')), 'yyyy')) \
               .withColumn('month', F.date_format(F.to_timestamp(F.col('timestamp')), 'MM')) \
               .withColumn('day',   F.date_format(F.to_timestamp(F.col('timestamp')), 'dd')) \
@@ -489,7 +494,9 @@ Resources:
               .withColumnRenamed('schemaVersion', 'schemaversion') \
               .withColumnRenamed('requestId',     'requestid') \
               .withColumnRenamed('modelId',       'modelid') \
-              .drop('accountId')
+              .withColumnRenamed('requestMetadata', 'requestmetadata') \
+              .drop('accountId') \
+              .drop('identity')
 
           df_processed.write \
               .mode('overwrite') \
@@ -497,11 +504,11 @@ Resources:
               .parquet(OUTPUT_PATH)
 
           tables = spark.sql(f"SHOW TABLES IN {DATABASE_NAME}").collect()
-          table_exists = any(row.tableName == "processed" for row in tables)
+          table_exists = any(row.tableName == "bedrock_logs" for row in tables)
           if table_exists:
-              spark.sql(f"MSCK REPAIR TABLE {DATABASE_NAME}.processed")
+              spark.sql(f"MSCK REPAIR TABLE {DATABASE_NAME}.bedrock_logs")
           else:
-              print("WARNING: Table processed does not exist in " + DATABASE_NAME + " — skipping MSCK REPAIR")
+              print("WARNING: Table bedrock_logs does not exist in " + DATABASE_NAME + " — skipping MSCK REPAIR")
 
           job.commit()
           """
@@ -534,7 +541,7 @@ Resources:
       ServiceToken: !GetAtt GlueScriptUploaderFunction.Arn
       Bucket: !Ref DestinationBucket
       Key: !Sub "${CFDataName}/glue-scripts/bedrock_logs_etl.py"
-      Version: '1'
+      Version: '2'
 
   GlueEtlRole:
     Type: AWS::IAM::Role
@@ -598,7 +605,7 @@ Resources:
         '--job-language': 'python'
         '--SOURCE_BUCKET': !Ref DestinationBucket
         '--SOURCE_PREFIX': !Sub "${CFDataName}/raw"
-        '--PROCESSED_PREFIX': !Sub "${CFDataName}/processed"
+        '--PROCESSED_PREFIX': !Sub "${CFDataName}/bedrock_logs"
         '--DATABASE_NAME': !Ref DatabaseName
         '--job-bookmark-option': 'job-bookmark-disable'
         '--enable-continuous-cloudwatch-log': 'true'
