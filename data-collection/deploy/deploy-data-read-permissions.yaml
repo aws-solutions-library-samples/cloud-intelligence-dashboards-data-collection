@@ -35,6 +35,7 @@ Metadata:
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
+          - IncludeBedrockModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -86,6 +87,8 @@ Metadata:
         default: "Include Identity Center Data Collection Module"
       IncludeMarketplaceModule:
         default: "Include Marketplace Agreements Module"
+      IncludeBedrockModule:
+        default: "Include Amazon Bedrock Data Collection Module"
 
 Parameters:
   ManagementAccountRole:
@@ -207,8 +210,14 @@ Parameters:
     Description: Collects Marketplace Agreement information
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeBedrockModule:
+    Type: String
+    Description: Collects Amazon Bedrock model invocation logs from linked accounts and configures Bedrock logging
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployModuleReadInMgmt: !Equals [!Ref AllowModuleReadInMgmt, "yes"]
+  DeployBedrockLogging: !Equals [!Ref IncludeBedrockModule, "yes"]
 
 Resources:
   DataCollectorMgmtAccountReadStack:
@@ -232,7 +241,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployModuleReadInMgmt
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://cid-data-${DataCollectionAccountID}.s3.${AWS::URLSuffix}/cfn-templates/deploy-in-linked-account.yaml"
       Parameters:
         DataCollectionAccountID: !Ref DataCollectionAccountID
         MultiAccountRoleName: !Ref MultiAccountRoleName
@@ -248,6 +257,16 @@ Resources:
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
         IncludeMarketplaceModule: !Ref IncludeMarketplaceModule
+        IncludeBedrockModule: !Ref IncludeBedrockModule
+
+  BedrockLoggingMgmtAccountStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployBedrockLogging
+    Properties:
+      TemplateURL: !Sub "https://cid-data-${DataCollectionAccountID}.s3.${AWS::URLSuffix}/cfn-templates/bedrock-logging.yaml"
+      Parameters:
+        DataCollectionAccountID: !Ref DataCollectionAccountID
+        ResourcePrefix: !Ref ResourcePrefix
         
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
@@ -292,6 +311,8 @@ Resources:
           ParameterValue: !Ref IncludeResilienceHubModule
         - ParameterKey: IncludeMarketplaceModule
           ParameterValue: !Ref IncludeMarketplaceModule
+        - ParameterKey: IncludeBedrockModule
+          ParameterValue: !Ref IncludeBedrockModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]
@@ -301,4 +322,35 @@ Resources:
         - CAPABILITY_IAM
         - CAPABILITY_NAMED_IAM
       StackSetName: !Sub "StackSet-${AWS::AccountId}-OptimizationDataRole"
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://cid-data-${DataCollectionAccountID}.s3.${AWS::URLSuffix}/cfn-templates/deploy-in-linked-account.yaml"
+
+  BedrockLoggingStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Condition: DeployBedrockLogging
+    Properties:
+      Description: "StackSet deploying Bedrock logging infrastructure to linked accounts v3.14.6"
+      PermissionModel: SERVICE_MANAGED
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      ManagedExecution:
+        Active: true
+      OperationPreferences:
+        MaxConcurrentPercentage: 100
+        FailureTolerancePercentage: 100
+        RegionConcurrencyType: PARALLEL
+      Parameters:
+        - ParameterKey: DataCollectionAccountID
+          ParameterValue: !Ref DataCollectionAccountID
+        - ParameterKey: ResourcePrefix
+          ParameterValue: !Ref ResourcePrefix
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]
+          Regions:
+            - !Ref "AWS::Region"
+      Capabilities:
+        - CAPABILITY_IAM
+        - CAPABILITY_NAMED_IAM
+      StackSetName: !Sub "StackSet-${AWS::AccountId}-BedrockLogging"
+      TemplateURL: !Sub "https://cid-data-${DataCollectionAccountID}.s3.${AWS::URLSuffix}/cfn-templates/bedrock-logging.yaml"

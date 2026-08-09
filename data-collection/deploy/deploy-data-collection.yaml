@@ -1642,7 +1642,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployBedrockModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.6/module-bedrock.yaml"
+      TemplateURL: !Sub "https://cid-data-${AWS::AccountId}.s3.${AWS::URLSuffix}/cfn-templates/module-bedrock.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
