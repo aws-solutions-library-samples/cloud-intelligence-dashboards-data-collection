@@ -624,3 +624,48 @@ Resources:
       StartOnCreation: true
       Actions:
         - JobName: !Ref BedrockLogsEtlJob
+
+  BedrockInvocationsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: !Sub "Flattened view of Bedrock model invocation logs with token usage and prompt/response previews"
+      Name: !Sub "${CFDataName}_invocations_view"
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW ${DatabaseName}.bedrock_invocations_view AS
+        SELECT
+            account_id,
+            payer_id,
+            timestamp,
+            region,
+            requestid,
+            operation,
+            modelid,
+            identity_arn,
+            requestmetadata,
+            year,
+            month,
+            day,
+            input.inputtokencount                                                    AS input_token_count,
+            input.inputcontenttype                                                   AS input_content_type,
+            output.outputtokencount                                                  AS output_token_count,
+            output.outputcontenttype                                                 AS output_content_type,
+            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.inputTokens')              AS INTEGER) AS usage_input_tokens,
+            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.outputTokens')             AS INTEGER) AS usage_output_tokens,
+            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.totalTokens')              AS INTEGER) AS usage_total_tokens,
+            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.cacheReadInputTokenCount')  AS INTEGER) AS usage_cache_read_tokens,
+            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.cacheWriteInputTokenCount') AS INTEGER) AS usage_cache_write_tokens,
+            json_extract_scalar(output.outputbodyjson, '$.stopReason')               AS stop_reason,
+            COALESCE(
+                json_extract_scalar(output.outputbodyjson, '$.output.message.content[0].text'),
+                json_extract_scalar(output.outputbodyjson, '$.content[0].text'),
+                json_extract_scalar(output.outputbodyjson, '$.completion'),
+                json_extract_scalar(output.outputbodyjson, '$.outputText')
+            )                                                                        AS response_preview,
+            COALESCE(
+                json_extract_scalar(input.inputbodyjson, '$.messages[0].content[0].text'),
+                json_extract_scalar(input.inputbodyjson, '$.messages[0].content'),
+                json_extract_scalar(input.inputbodyjson, '$.prompt'),
+                json_extract_scalar(input.inputbodyjson, '$.inputText')
+            )                                                                        AS prompt_preview
+        FROM ${DatabaseName}.bedrock_logs
