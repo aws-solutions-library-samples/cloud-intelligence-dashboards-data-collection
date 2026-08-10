@@ -642,7 +642,7 @@ Resources:
             operation,
             modelid,
             identity_arn,
-            requestmetadata,
+            JSON_FORMAT(CAST(requestmetadata AS JSON))                       AS requestmetadata,
             year,
             month,
             day,
