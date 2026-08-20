@@ -70,7 +70,7 @@ Resources:
       CatalogId: !Ref AWS::AccountId
       DatabaseName: !Ref DatabaseName
       TableInput:
-        Name: !Sub "${CFDataName}_data"
+        Name: service_quotas_data
         Parameters:
           "use.null.for.invalid.data": "true"
           "classification": "json"
@@ -133,7 +133,7 @@ Resources:
       CatalogId: !Ref AWS::AccountId
       DatabaseName: !Ref DatabaseName
       TableInput:
-        Name: !Sub "${CFDataName}_history"
+        Name: service_quotas_history
         Parameters:
           "use.null.for.invalid.data": "true"
           "classification": "json"
@@ -524,7 +524,7 @@ Resources:
                   list(executor.map(collect_region, region_args))
 
       Handler: 'index.lambda_handler'
-      MemorySize: 2688
+      MemorySize: 1024
       Timeout: 900
       Role: !GetAtt LambdaRole.Arn
       Environment:
