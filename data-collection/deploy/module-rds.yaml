@@ -112,6 +112,9 @@ Parameters:
     Default: 'rds'
     Description: 'Data name prefix used in resource naming and S3 paths'
 
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+
 Resources:
   # IAM Role for Lambda Functions
   LambdaRole:
@@ -136,31 +139,8 @@ Resources:
               - Effect: 'Allow'
                 Action:
                   - 's3:PutObject'
-                  - 's3:GetObject'
                 Resource:
-                  - !Sub
-                    - 'arn:${AWS::Partition}:s3:::${BucketName}/*'
-                    - BucketName: !Ref DestinationBucket
-              - Effect: 'Allow'
-                Action:
-                  - 's3:ListBucket'
-                Resource:
-                  - !Sub
-                    - 'arn:${AWS::Partition}:s3:::${BucketName}'
-                    - BucketName: !Ref DestinationBucket
-                Condition:
-                  StringLike:
-                    s3:prefix:
-                      - 'rds-*'
-        - PolicyName: 'RDSMaintenanceDescribe'
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: 'Allow'
-                Action:
-                  - 'rds:DescribePendingMaintenanceActions'
-                  - 'ec2:DescribeRegions'
-                Resource: '*'
+                  - !Sub '${DestinationBucketARN}/*'
         - PolicyName: 'AssumeMultiAccountRole'
           PolicyDocument:
             Version: '2012-10-17'
@@ -168,13 +148,22 @@ Resources:
               - Effect: 'Allow'
                 Action: 'sts:AssumeRole'
                 Resource: !Sub 'arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}'
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: W28
             reason: "Need explicit name to identify role actions"
-          - id: W11
-            reason: "RDS Describe and EC2 DescribeRegions do not support resource-level permissions"
 
   # Lambda Functions
   RDSMaintenanceLambda:
@@ -228,18 +217,20 @@ Resources:
                       aws_session_token=credentials['SessionToken']
                   )
                   return rds_client
-              except Exception as exc:
+              except Exception as exc:  #pylint: disable=broad-exception-caught
                   logger.error(f"Error assuming role for account {account_id} in region {region}: {exc}")
                   raise
 
           def get_maintenance_actions(rds_client, region):
               logger.info(f"Getting maintenance actions for region {region}")
               try:
-                  response = rds_client.describe_pending_maintenance_actions()
-                  actions_count = len(response.get('PendingMaintenanceActions', []))
-                  logger.info(f"Found {actions_count} maintenance actions in region {region}")
-                  return response['PendingMaintenanceActions']
-              except Exception as exc:
+                  actions = []
+                  paginator = rds_client.get_paginator('describe_pending_maintenance_actions')
+                  for page in paginator.paginate():
+                      actions.extend(page.get('PendingMaintenanceActions', []))
+                  logger.info(f"Found {len(actions)} maintenance actions in region {region}")
+                  return actions
+              except Exception as exc:  #pylint: disable=broad-exception-caught
                   logger.error(f"Error getting maintenance actions in region {region}: {exc}")
                   return []
 
@@ -302,11 +293,11 @@ Resources:
                       del rds_client
                       del pending_actions
                       return region_actions
-                  except Exception as region_exc:
+                  except Exception as region_exc:  #pylint: disable=broad-exception-caught
                       logger.error(f"Error processing region {region}: {region_exc}")
                       return []
 
-              with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
+              with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', delete=False) as temp_file:
                   try:
                       logger.info(f"Created temporary file: {temp_file.name}")
                       with ThreadPoolExecutor(max_workers=5) as executor:
@@ -322,7 +313,7 @@ Resources:
                                   for action in region_actions:
                                       temp_file.write(json.dumps(action, default=str) + '\n')
                                       action_count += 1
-                              except Exception as exc:
+                              except Exception as exc:  #pylint: disable=broad-exception-caught
                                   logger.error(f"Error getting result for region {region}: {exc}")
                               if processed_regions % 5 == 0:
                                   log_memory_usage(f"after {processed_regions} regions")
@@ -357,7 +348,7 @@ Resources:
                               'regionsProcessed': processed_regions
                           }
                       }
-                  except Exception as exc:
+                  except Exception as exc:  #pylint: disable=broad-exception-caught
                       logger.error(f"Error in main processing: {exc}", exc_info=True)
                       if os.path.exists(temp_file.name):
                           os.unlink(temp_file.name)
@@ -374,6 +365,12 @@ Resources:
             reason: "No need for VPC in this case"
           - id: W92
             reason: "No need for reserved concurrent executions"
+
+  RDSMaintenanceLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${RDSMaintenanceLambda}"
+      RetentionInDays: 60
 
   StepFunctionmaintenance:
     Type: 'AWS::StepFunctions::StateMachine'
@@ -461,7 +458,7 @@ Resources:
   Schedulermaintenance:
     Type: 'AWS::Scheduler::Schedule'
     Properties:
-      Name: !Sub '${ResourcePrefix}${CFDataName}-maintenance-Scheduler'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-maintenance-RefreshSchedule'
       ScheduleExpression: !Ref Schedule
       State: 'ENABLED'
       FlexibleTimeWindow:
@@ -477,6 +474,12 @@ Resources:
             "params": "maintenance"
           }
 
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
+
   Crawlermaintenance:
     Type: 'AWS::Glue::Crawler'
     Properties:
@@ -488,7 +491,10 @@ Resources:
           - Path: !Sub
               - 's3://${BucketName}/rds-maintenance-data/'
               - BucketName: !Ref DestinationBucket
-      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"},"Tables":{"TableThreshold":1,"AddOrUpdateBehavior":"MergeNewColumns"}}}'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
 
   # Clusters Step Function (INVENTORY)
   StepFunctionclustersnapshot:
@@ -577,7 +583,7 @@ Resources:
   Schedulerclustersnapshot:
     Type: 'AWS::Scheduler::Schedule'
     Properties:
-      Name: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-Scheduler'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-RefreshSchedule'
       ScheduleExpression: !Ref Schedule
       State: 'DISABLED'
       FlexibleTimeWindow:
@@ -604,7 +610,10 @@ Resources:
           - Path: !Sub
               - 's3://${BucketName}/inventory/inventory-rds-cluster-snapshots-data'
               - BucketName: !Ref DestinationBucket
-      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Tables":{"TableThreshold":1}}}'
+      Configuration: '{"Version":1.0,"Grouping":{"TableGroupingPolicy":"CombineCompatibleSchemas"},"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"},"Tables":{"TableThreshold":1,"AddOrUpdateBehavior":"MergeNewColumns"}}}'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
 
   MaintenanceGlueTable:
     Type: AWS::Glue::Table
@@ -614,6 +623,7 @@ Resources:
       TableInput:
         Name: rds_maintenance_data
         TableType: EXTERNAL_TABLE
+        Parameters: { "classification" : "json", "compressionType": "none" }
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -665,6 +675,7 @@ Resources:
       TableInput:
         Name: inventory_rds_cluster_snapshots_data
         TableType: EXTERNAL_TABLE
+        Parameters: { "classification" : "json", "compressionType": "none" }
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -717,7 +728,7 @@ Resources:
             - Name: iamdatabaseauthenticationenabled
               Type: boolean
             - Name: taglist
-              Type: array<struct<key:string,value:string>>
+              Type: string
             - Name: dbclusterresourceid
               Type: string
             - Name: accountid
