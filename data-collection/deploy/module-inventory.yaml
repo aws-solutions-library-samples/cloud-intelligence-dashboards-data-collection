@@ -315,7 +315,7 @@ Mappings:
             - Name: clonegroupid
               Type: string
             - Name: dbclustermembers
-              Type: array<struct<DBInstanceIdentifier:string,IsClusterWriter:boolean,DBClusterParameterGroupStatus:string,PromotionTier:int>>
+              Type: string
             - Name: kmskeyid
               Type: string
             - Name: collection_date
@@ -323,7 +323,7 @@ Mappings:
             - Name: region
               Type: string
             - Name: taglist
-              Type: array<struct<Key:string,Value:string>>
+              Type: string
             - Name: globalclusteridentifier
               Type: string
             InputFormat: org.apache.hadoop.mapred.TextInputFormat
@@ -445,7 +445,7 @@ Mappings:
             - Name: maxallocatedstorage
               Type: int
             - Name: taglist
-              Type: array<struct<Key:string,Value:string>>
+              Type: string
             - Name: customerownedipenabled
               Type: boolean
             - Name: activitystreamstatus
@@ -554,7 +554,7 @@ Mappings:
             - Name: dbiresourceid
               Type: string
             - Name: taglist
-              Type: array<struct<Key:string,Value:string>>
+              Type: string
             - Name: originalsnapshotcreatetime
               Type: string
             - Name: snapshottarget
