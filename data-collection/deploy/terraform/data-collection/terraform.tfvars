@@ -1,0 +1,32 @@
+# Default values for variables
+resource_prefix = "CID-DC-"
+tag_version = "3.6.2"
+
+destination_bucket = "cid-data-"
+management_account_id = "987654321987"  # Required: Add your management account IDs as a comma separated list
+management_account_role = "Lambda-Assume-Role-Management-Account"  # Required: Add your management account role
+multi_account_role_name = "Optimization-Data-Multi-Account-Role"  # Required: Add your multi-account role name
+regions_in_scope = "us-east-1,eu-west-1,eu-central-1"  # Update with your desired regions
+data_buckets_kms_keys_arns = "KMS_KEY_ARN"
+schedule = "rate(1 day)"  # Update with your desired schedule
+schedule_frequent = "rate(1 day)"  # Update with your desired frequent schedule
+database_name = "optimization_data"
+cfn_source_bucket = "aws-managed-cost-intelligence-dashboards" # Don't Change
+include_ta_module = "true"
+include_rds_usage_module = "true"
+include_org_data_module = "true"
+include_ce_rightsizing_module = "true"
+include_cost_anomaly_module = "true"
+include_support_cases_module = "true"
+include_backup_module = "true"
+include_inventory_module = "true"
+include_pricing_module = "true"
+include_compute_optimizer_module = "false"
+include_ecs_chargeback_module = "true"
+include_budgets_module = "true"
+include_transit_gateway_module = "true"
+include_aws_feeds_module = "true"
+include_health_events_module = "true"
+include_license_manager_module = "true"
+include_service_quotas_module = "true"
+include_quicksight_module = "true"
