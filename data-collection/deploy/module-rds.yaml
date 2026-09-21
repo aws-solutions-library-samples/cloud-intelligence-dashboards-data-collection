@@ -585,7 +585,7 @@ Resources:
     Properties:
       Name: !Sub '${ResourcePrefix}${CFDataName}-clustersnapshot-RefreshSchedule'
       ScheduleExpression: !Ref Schedule
-      State: 'DISABLED'
+      State: 'ENABLED'
       FlexibleTimeWindow:
         MaximumWindowInMinutes: 30
         Mode: 'FLEXIBLE'
