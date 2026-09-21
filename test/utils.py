@@ -435,7 +435,7 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}resilience-hub-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
-        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}identity-center-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}identity_center-StateMachine",
     ]
     lambda_arns = []
     lambda_norun_arns = []
