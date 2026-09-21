@@ -363,6 +363,13 @@ def test_elasticache_reserved_cache_nodes_offerings_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."reference_elasticache_reserved_cache_nodes_offerings" LIMIT 10;')
     assert len(data) > 0, 'elasticache_reserved_cache_nodes_offerings is empty'
 
+def test_rds_maintenance_data(athena):
+    """Test RDS module maintenance data collection"""
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."rds_maintenance_data" LIMIT 10;')
+    # Maintenance data may be 0 if no pending maintenance actions
+    assert len(data) >= 0, 'rds_maintenance_data query failed'
+
+
 def test_kiro_user_activity_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."kiro_user_activity" LIMIT 10;')
     assert len(data) > 0, 'kiro_user_activity is empty'

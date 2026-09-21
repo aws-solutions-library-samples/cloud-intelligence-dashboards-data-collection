@@ -204,7 +204,7 @@ Mappings:
       table:
         - Name: inventory_rds_db_clusters_data
           TableType: EXTERNAL_TABLE
-
+          Parameters: { "classification" : "json", "compressionType": "none" }
           PartitionKeys:
           - { Name: payer_id, Type: string }
           - { Name: year, Type: string }
@@ -322,6 +322,10 @@ Mappings:
               Type: string
             - Name: region
               Type: string
+            - Name: taglist
+              Type: string
+            - Name: globalclusteridentifier
+              Type: string
             InputFormat: org.apache.hadoop.mapred.TextInputFormat
             Location: !Sub s3://${DestinationBucket}/inventory/inventory-rds-db-clusters-data/
             OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
@@ -329,7 +333,7 @@ Mappings:
               UPDATED_BY_CRAWLER: !Sub ${ResourcePrefix}inventory-RdsDbClusters-Crawler
             SerdeInfo:
               Parameters:
-                paths: readreplicaidentifiers,capacity,charactersetname,preferredbackupwindow,copytagstosnapshot,activitystreamkinesisstreamname,multiaz,backtrackwindow,earliestrestorabletime,engine,earliestbacktracktime,httpendpointenabled,payer_id,percentprogress,day,dbclusterparametergroup,hostedzoneid,status,associatedroles,dbclusteridentifier,backtrackconsumedchangerecords,iamdatabaseauthenticationenabled,serverlessv2scalingconfiguration,customendpoints,port,activitystreamkmskeyid,masterusername,dbclusterresourceid,clustercreatetime,vpcsecuritygroups,dbsubnetgroup,latestrestorabletime,availabilityzones,dbclusteroptiongroupmemberships,replicationsourceidentifier,year,deletionprotection,endpoint,preferredmaintenancewindow,readerendpoint,accountid,enabledcloudwatchlogsexports,scalingconfigurationinfo,storageencrypted,enginemode,databasename,activitystreammode,month,crossaccountclone,dbclusterarn,activitystreamstatus,allocatedstorage,engineversion,backupretentionperiod,clonegroupid,dbclustermembers,kmskeyid,collection_date,region
+                paths: readreplicaidentifiers,capacity,charactersetname,preferredbackupwindow,copytagstosnapshot,activitystreamkinesisstreamname,multiaz,backtrackwindow,earliestrestorabletime,engine,earliestbacktracktime,httpendpointenabled,payer_id,percentprogress,day,dbclusterparametergroup,hostedzoneid,status,associatedroles,dbclusteridentifier,backtrackconsumedchangerecords,iamdatabaseauthenticationenabled,serverlessv2scalingconfiguration,customendpoints,port,activitystreamkmskeyid,masterusername,dbclusterresourceid,clustercreatetime,vpcsecuritygroups,dbsubnetgroup,latestrestorabletime,availabilityzones,dbclusteroptiongroupmemberships,replicationsourceidentifier,year,deletionprotection,endpoint,preferredmaintenancewindow,readerendpoint,accountid,enabledcloudwatchlogsexports,scalingconfigurationinfo,storageencrypted,enginemode,databasename,activitystreammode,month,crossaccountclone,dbclusterarn,activitystreamstatus,allocatedstorage,engineversion,backupretentionperiod,clonegroupid,dbclustermembers,kmskeyid,collection_date,region,TagList,GlobalClusterIdentifier
               SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
 
     RdsDbInstances:
@@ -390,6 +394,8 @@ Mappings:
               Type: boolean
             - Name: readreplicadbinstanceidentifiers
               Type: array<string>
+            - Name: readreplicasourcedbinstanceidentifier
+              Type: string
             - Name: licensemodel
               Type: string
             - Name: iops
@@ -439,7 +445,7 @@ Mappings:
             - Name: maxallocatedstorage
               Type: int
             - Name: taglist
-              Type: array<string>
+              Type: string
             - Name: customerownedipenabled
               Type: boolean
             - Name: activitystreamstatus
@@ -466,6 +472,12 @@ Mappings:
               Type: string
             - Name: promotiontier
               Type: int
+            - Name: dbname
+              Type: string
+            - Name: enginelifecyclesupport
+              Type: string
+            - Name: databaseinsightsmode
+              Type: string
             InputFormat: org.apache.hadoop.mapred.TextInputFormat
             Location: !Sub s3://${DestinationBucket}/inventory/inventory-rds-db-instances-data/
             OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
@@ -473,7 +485,7 @@ Mappings:
               UPDATED_BY_CRAWLER: !Sub ${ResourcePrefix}inventory-RdsDbInstances-Crawler
             SerdeInfo:
               Parameters:
-                paths: ActivityStreamStatus,AllocatedStorage,AssociatedRoles,AutoMinorVersionUpgrade,AvailabilityZone,BackupRetentionPeriod,BackupTarget,CACertificateIdentifier,CertificateDetails,CopyTagsToSnapshot,CustomerOwnedIpEnabled,DBClusterIdentifier,DBInstanceArn,DBInstanceClass,DBInstanceIdentifier,DBInstanceStatus,DBParameterGroups,DBSecurityGroups,DBSubnetGroup,DbInstancePort,DbiResourceId,DedicatedLogVolume,DeletionProtection,DomainMemberships,Endpoint,Engine,EngineVersion,EnhancedMonitoringResourceArn,IAMDatabaseAuthenticationEnabled,InstanceCreateTime,Iops,IsStorageConfigUpgradeAvailable,KmsKeyId,LatestRestorableTime,LicenseModel,MasterUsername,MaxAllocatedStorage,MonitoringInterval,MonitoringRoleArn,MultiAZ,NetworkType,OptionGroupMemberships,PendingModifiedValues,PerformanceInsightsEnabled,PerformanceInsightsKMSKeyId,PerformanceInsightsRetentionPeriod,PreferredBackupWindow,PreferredMaintenanceWindow,PromotionTier,PubliclyAccessible,ReadReplicaDBInstanceIdentifiers,SecondaryAvailabilityZone,StorageEncrypted,StorageThroughput,StorageType,TagList,VpcSecurityGroups,accountid,collection_date,region
+                paths: ActivityStreamStatus,AllocatedStorage,AssociatedRoles,AutoMinorVersionUpgrade,AvailabilityZone,BackupRetentionPeriod,BackupTarget,CACertificateIdentifier,CertificateDetails,CopyTagsToSnapshot,CustomerOwnedIpEnabled,DatabaseInsightsMode,DBClusterIdentifier,DBInstanceArn,DBInstanceClass,DBInstanceIdentifier,DBInstanceStatus,DBName,DBParameterGroups,DBSecurityGroups,DBSubnetGroup,DbInstancePort,DbiResourceId,DedicatedLogVolume,DeletionProtection,DomainMemberships,Endpoint,Engine,EngineLifecycleSupport,EngineVersion,EnhancedMonitoringResourceArn,IAMDatabaseAuthenticationEnabled,InstanceCreateTime,Iops,IsStorageConfigUpgradeAvailable,KmsKeyId,LatestRestorableTime,LicenseModel,MasterUsername,MaxAllocatedStorage,MonitoringInterval,MonitoringRoleArn,MultiAZ,NetworkType,OptionGroupMemberships,PendingModifiedValues,PerformanceInsightsEnabled,PerformanceInsightsKMSKeyId,PerformanceInsightsRetentionPeriod,PreferredBackupWindow,PreferredMaintenanceWindow,PromotionTier,PubliclyAccessible,ReadReplicaDBInstanceIdentifiers,ReadReplicaSourceDBInstanceIdentifier,SecondaryAvailabilityZone,StorageEncrypted,StorageThroughput,StorageType,TagList,VpcSecurityGroups,accountid,collection_date,region
               SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
 
     RdsDbSnapshots:
@@ -542,7 +554,7 @@ Mappings:
             - Name: dbiresourceid
               Type: string
             - Name: taglist
-              Type: array<string>
+              Type: string
             - Name: originalsnapshotcreatetime
               Type: string
             - Name: snapshottarget
@@ -1511,6 +1523,12 @@ Resources:
                       function_name='describe_db_snapshots',
                       obj_name='DBSnapshots[*]'
                   ),
+                  'rds-cluster-snapshots': partial(
+                      paginated_scan,
+                      service='rds',
+                      function_name='describe_db_cluster_snapshots',
+                      obj_name='DBClusterSnapshots[*]'
+                  ),
                   'ebs': partial(
                       paginated_scan,
                       service='ec2',
@@ -1643,11 +1661,18 @@ Resources:
                 "TableGroupingPolicy": "CombineCompatibleSchemas"
               },
               "CrawlerOutput": {
+                "Partitions": {
+                  "AddOrUpdateBehavior": "InheritFromTable"
+                },
                 "Tables": {
-                  "TableThreshold": 1
+                  "TableThreshold": 1,
+                  "AddOrUpdateBehavior": "MergeNewColumns"
                 }
               }
             }
+          SchemaChangePolicy:
+            UpdateBehavior: UPDATE_IN_DATABASE
+            DeleteBehavior: LOG
       'Table${AwsObject}':
         Type: Custom::ManageGlueTable
         Properties:

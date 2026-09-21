@@ -206,6 +206,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeECSChargebackModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeInventoryCollectorModule', 'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeRDSUtilizationModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeRDSModule',                'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeRightsizingModule',        'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeTAModule',                 'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeTransitGatewayModule',     'ParameterValue': "yes"},
@@ -257,6 +258,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'KiroSourceBuckets',               'ParameterValue': KIRO_SOURCE_BUCKETS},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeRDSModule',          'ParameterValue': "yes"},
         ]
     )
 
@@ -436,6 +438,8 @@ def trigger_update(account_id):
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}marketplace-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}reference-StateMachine",
         f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}identity-center-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}rds-maintenance-StateMachine",
+        f"arn:{partition}:states:{region}:{account_id}:stateMachine:{PREFIX}rds-clustersnapshot-StateMachine"
     ]
     lambda_arns = []
     lambda_norun_arns = []

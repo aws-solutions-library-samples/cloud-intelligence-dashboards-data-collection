@@ -44,7 +44,8 @@ Metadata:
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
           - IncludeKiroUserActivityModule
-          - IncludeReferenceModule          
+          - IncludeReferenceModule
+          - IncludeRDSModule
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
         Parameters:
@@ -122,6 +123,8 @@ Metadata:
         default: 'Include Identity Center Data Collection Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Data Collection Module'
+      IncludeRDSModule:
+        default: 'Include RDS Data Collection Module'
       IncludeKiroUserActivityModule:
         default: 'Include Kiro User Activity Data Collection Module'
       KiroSourceBuckets:
@@ -330,6 +333,11 @@ Parameters:
     Description: Collects Reference data for other modules
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRDSModule:
+    Type: String
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -388,6 +396,7 @@ Conditions:
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
+  DeployRDSModule: !Equals [ !Ref IncludeRDSModule, "yes"]
 
 Rules:
   # Guard: an enabled Kiro module must be given at least one source bucket.
@@ -1665,6 +1674,33 @@ Resources:
         StepFunctionTemplate: !FindInMap [StepFunctionCode, standalone-state-machine, TemplatePath]
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        RegionsInScope:
+          Fn::If:
+            - RegionsInScopeIsEmpty
+            - !Sub "${AWS::Region}"
+            - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
+
+  RDSModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployRDSModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.8/module-rds.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        GlueRoleARN: !GetAtt GlueRole.Arn
+        MultiAccountRoleName: !Sub "${ResourcePrefix}${MultiAccountRoleName}"
+        Schedule: !Ref Schedule
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
         RegionsInScope:
           Fn::If:
             - RegionsInScopeIsEmpty
