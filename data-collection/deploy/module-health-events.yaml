@@ -248,7 +248,7 @@ Resources:
 
           def search(function, args={}, expression='@', max_list_size=0):
               event_id = args.get("eventArn", "").rsplit("/", 1)[-1]
-              logger.debug(f"Search entered for '{function.__name__}' for event {event_id}")
+              logger.debug(f"Search entered for '{function.__name__}' for event {event_id}. (max setting {'-no limit-' if max_list_size == 0 else max_list_size})")
               compiled = jmespath.compile(expression)
               result_c = 0
               while True:
@@ -261,10 +261,12 @@ Resources:
                       # Yield result directly if it is not a list.
                       result_c += 1
                       yield results
-                  if 'nextToken' in page and page['nextToken'] and (max_list_size == 0 or result_c <= max_list_size):
+                  if ('nextToken' in page and page['nextToken']) and (max_list_size == 0 or result_c <= max_list_size):
                       args['nextToken'] = page['nextToken']
                   else:
-                      logger.debug(f"Total {function.__name__} results {result_c} for event {event_id}. (max setting {'-no limit-' if max_list_size == 0 else max_list_size})")
+                      if ('nextToken' in page and page['nextToken']):
+                          logger.warn(f"Truncating '{function.__name__}' for event {event_id} because {max_list_size} limit reached.")
+                      logger.debug(f"Total {function.__name__} results {result_c} for event {event_id}.")
                       break
 
           def pull_event_details(event, health_client):
