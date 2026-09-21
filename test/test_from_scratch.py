@@ -152,7 +152,11 @@ def test_rds_db_clusters_data(athena):
     assert len(data) > 0, 'rds_db_clusters_data is empty'
 
 def test_eks_clusters_data(athena):
-    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_eks_clusters_data" LIMIT 10;')
+    # Table is actually named inventory_eks_data (module-inventory.yaml), not
+    # inventory_eks_clusters_data like the other inventory_*_data tables. Matching
+    # the deployed name here rather than renaming the table, since renaming it
+    # would break existing deployments. Tech debt: rename the table for consistency.
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_eks_data" LIMIT 10;')
     assert len(data) > 0, 'eks_clusters_data is empty'
 
 def test_pricing_computesavingsplan_data(athena):

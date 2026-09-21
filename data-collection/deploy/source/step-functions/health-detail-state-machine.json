@@ -19,7 +19,8 @@
         "MAP_KEY": "{% $states.input.file %}",
         "ACCOUNT": "{% $states.input.account %}",
         "INGEST_TIME": "{% $states.input.ingestion_time %}",
-        "STACK_VERSION": "{% $states.input.stack_version %}"
+        "STACK_VERSION": "{% $states.input.stack_version %}",
+        "EVENTS_PER_BATCH": "{% $states.input.events_per_batch %}"
       },
       "Next": "SetGlobalVariables2"
     },
@@ -93,7 +94,7 @@
       },
       "MaxConcurrency": 1,
       "ItemBatcher": {
-        "MaxItemsPerBatch": 500,
+        "MaxItemsPerBatch": "{% $EVENTS_PER_BATCH %}",
         "BatchInput": {
           "account": "{% $ACCOUNT %}",
           "ingestion_time": "{% $INGEST_TIME %}",

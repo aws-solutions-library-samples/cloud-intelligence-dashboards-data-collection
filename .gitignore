@@ -191,7 +191,7 @@ sqlite_mcp_server.db
 
 .ai/*
 !.ai/specs/
-
+_wip/
 
 # Local testing suites
 local-test
