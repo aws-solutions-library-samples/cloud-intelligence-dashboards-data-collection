@@ -367,6 +367,10 @@ def test_kiro_user_activity_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."kiro_user_activity" LIMIT 10;')
     assert len(data) > 0, 'kiro_user_activity is empty'
 
+def test_bedrock_logs_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."bedrock_logs" LIMIT 10;')
+    assert len(data) > 0, 'bedrock_logs is empty'
+
 if __name__ == '__main__':
     pytest.params = {}
     if '--no-teardown' in sys.argv:
