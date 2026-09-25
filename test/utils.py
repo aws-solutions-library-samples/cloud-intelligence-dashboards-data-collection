@@ -1,4 +1,6 @@
 import os
+import io
+import gzip
 import json
 import time
 import logging
@@ -31,6 +33,10 @@ REGIONS = "us-east-1,eu-west-1"
 # per-account naming convention; override with KIRO_SOURCE_BUCKETS to point at
 # a specific bucket without committing an account id to source control.
 KIRO_SOURCE_BUCKETS = os.environ.get('KIRO_SOURCE_BUCKETS', f'cid-dc-kiro-activity-{account_id}')
+# Bedrock source bucket holding the test model-invocation logs. Defaults to the
+# per-account naming convention; override with BEDROCK_SOURCE_BUCKETS to point at
+# a specific bucket without committing an account id to source control.
+BEDROCK_SOURCE_BUCKETS = os.environ.get('BEDROCK_SOURCE_BUCKETS', f'bedrock-logs-{account_id}-{region}')
 TMP_BUCKET_PREFIX =  f'cid-{account_id}-test'
 TMP_BUCKET = f'{TMP_BUCKET_PREFIX}-{region}'
 
@@ -255,6 +261,8 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeMarketplaceModule',        'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeKiroUserActivityModule',   'ParameterValue': "yes"},
             {'ParameterKey': 'KiroSourceBuckets',               'ParameterValue': KIRO_SOURCE_BUCKETS},
+            {'ParameterKey': 'IncludeBedrockModule',            'ParameterValue': "yes"},
+            {'ParameterKey': 'BedrockSourceBuckets',            'ParameterValue': BEDROCK_SOURCE_BUCKETS},
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
         ]
@@ -518,11 +526,62 @@ def trigger_kiro_collection(account_id):
     logger.info(f'Kiro collector response: {payload}')
 
 
+def trigger_bedrock_collection(account_id):
+    """Seed a Bedrock model-invocation log at today's partition and run the collector.
+
+    The Bedrock collector is a scheduled Lambda (not part of the state-machine
+    collection triggered by trigger_update). It reads .json.gz objects from the
+    source bucket, so we seed a synthetic gzipped invocation record for today and
+    invoke the Lambda synchronously to populate the bedrock_logs table.
+    """
+    source_bucket = BEDROCK_SOURCE_BUCKETS.split(',')[0].strip()
+    now = time.gmtime()
+    key = (
+        f"model-invocation-logs/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/"
+        f"{now.tm_year}/{now.tm_mon:02d}/{now.tm_mday:02d}/00/"
+        f"{now.tm_year}{now.tm_mon:02d}{now.tm_mday:02d}T000000000Z_test.json.gz"
+    )
+    record = {
+        "schemaType": "ModelInvocationLog",
+        "schemaVersion": "1.0",
+        "timestamp": f"{now.tm_year}-{now.tm_mon:02d}-{now.tm_mday:02d}T00:00:00Z",
+        "accountId": account_id,
+        "region": region,
+        "requestId": "test-request-0001",
+        "operation": "InvokeModel",
+        "modelId": "amazon.nova-micro-v1:0",
+        "identity": {"arn": f"arn:aws:sts::{account_id}:assumed-role/test-role/test-session"},
+        "requestMetadata": {},
+        "input": {
+            "inputBodyJson": {"messages": [{"role": "user", "content": [{"text": "test"}]}]},
+            "inputContentType": "application/json",
+            "inputTokenCount": 3,
+        },
+        "output": {
+            "outputBodyJson": {"output": {"message": {"content": [{"text": "hi"}]}},
+                               "usage": {"inputTokens": 3, "outputTokens": 5, "totalTokens": 8}},
+            "outputContentType": "application/json",
+            "outputTokenCount": 5,
+        },
+    }
+    gz = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz, mode='wb') as f:
+        f.write(json.dumps(record).encode('utf-8'))
+    boto3.client('s3').put_object(Bucket=source_bucket, Key=key, Body=gz.getvalue(), ContentType='application/gzip')
+    response = boto3.client('lambda').invoke(
+        FunctionName=f'{PREFIX}bedrock-Lambda',
+        InvocationType='RequestResponse',
+    )
+    payload = json.loads(response['Payload'].read())
+    logger.info(f'Bedrock collector response: {payload}')
+
+
 def prepare_stacks(cloudformation, account_id, org_unit_id, s3, s3client, bucket):
     initial_deploy_stacks(cloudformation=cloudformation, account_id=account_id, org_unit_id=org_unit_id, bucket=bucket)
     clean_bucket(s3=s3, s3client=s3client,  account_id=account_id, full=True)
     trigger_update(account_id=account_id)
     trigger_kiro_collection(account_id=account_id)
+    trigger_bedrock_collection(account_id=account_id)
 
 def build_layer():
     """delete all content and the bucket"""
