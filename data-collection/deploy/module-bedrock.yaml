@@ -68,7 +68,7 @@ Outputs:
     Value: !Ref LambdaRole
   CollectorLambdaArn:
     Description: "ARN of the collector Lambda function"
-    Value: !GetAtt BedrockCollectorLambda.Arn
+    Value: !GetAtt LambdaFunction.Arn
   TableName:
     Description: "Athena table name for the Bedrock invocation logs data"
     Value: !Sub "${DatabaseName}.bedrock_logs"
@@ -184,7 +184,7 @@ Resources:
                   - "s3:GetObject"
                 Resource:
                   - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/${BedrockLogPrefix}*"
-  BedrockCollectorLambda:
+  LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
@@ -434,7 +434,7 @@ Resources:
             reason: "No need for VPC - accessing S3 over public endpoints"
           - id: W92
             reason: "No need for reserved concurrency - runs once daily"
-  LambdaSchedule:
+  ModuleRefreshSchedule:
     Type: AWS::Scheduler::Schedule
     Properties:
       Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
@@ -444,15 +444,15 @@ Resources:
         Mode: FLEXIBLE
         MaximumWindowInMinutes: 30
       Target:
-        Arn: !GetAtt BedrockCollectorLambda.Arn
+        Arn: !GetAtt LambdaFunction.Arn
         RoleArn: !Ref SchedulerExecutionRoleARN
   LambdaSchedulePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref BedrockCollectorLambda
+      FunctionName: !Ref LambdaFunction
       Action: lambda:InvokeFunction
       Principal: scheduler.amazonaws.com
-      SourceArn: !GetAtt LambdaSchedule.Arn
+      SourceArn: !GetAtt ModuleRefreshSchedule.Arn
   # Explicit Glue Table partitioned by account_id, region, year, month, day.
   #
   # account_id and region are Hive PARTITION KEYS (not data columns) - their
