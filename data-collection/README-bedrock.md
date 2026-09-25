@@ -144,7 +144,6 @@ the Bedrock S3 delivery path, not stored in the row body).
 | `operation` | string | e.g. `InvokeModel` |
 | `modelid` | string | e.g. `amazon.nova-micro-v1:0` |
 | `requestmetadata` | map<string,string> | |
-| `payer_id` | string | Data-collection (payer) account id |
 | `collection_time` | string | When the row was collected |
 | `input` | struct | `inputbodyjson`, `inputcontenttype`, `inputtokencount` |
 | `output` | struct | `outputbodyjson`, `outputcontenttype`, `outputtokencount` |

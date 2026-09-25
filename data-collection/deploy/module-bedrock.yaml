@@ -29,10 +29,6 @@ Parameters:
   ResourcePrefix:
     Type: String
     Description: This prefix will be placed in front of all roles created.
-  ManagementAccountID:
-    Type: String
-    Description: "Comma delimited list of Management (payer) Account IDs. Used to stamp payer_id on collected records, consistent with other CID modules."
-    Default: ""
   LambdaAnalyticsARN:
     Type: String
     Description: Arn of lambda for Analytics
@@ -209,14 +205,13 @@ Resources:
           DEST_PREFIX = 'bedrock/bedrock_logs'
           GLUE_DATABASE = os.environ['GLUE_DATABASE']
           GLUE_TABLE = os.environ['GLUE_TABLE']
-          MANAGEMENT_ACCOUNT_ID = os.environ.get('MANAGEMENT_ACCOUNT_ID', '')
 
           # Output record schema (flattened to match the Glue table). Nested
           # input/output are kept as structs so the invocations view can extract
           # token counts and prompt/response bodies. account_id and region are NOT
           # emitted as columns - they are Glue partition keys derived from the S3
           # path, so keeping them out of the body avoids duplicating the value.
-          def flatten_record(raw, payer_id, collection_time):
+          def flatten_record(raw, collection_time):
               """Normalise one raw Bedrock model-invocation record to the table
               schema (lowercase keys, nested input/output structs preserved)."""
               identity = raw.get('identity') or {}
@@ -230,7 +225,6 @@ Resources:
                   'operation': raw.get('operation'),
                   'modelid': raw.get('modelId'),
                   'requestmetadata': raw.get('requestMetadata') or {},
-                  'payer_id': payer_id,
                   'collection_time': collection_time,
                   'input': {
                       'inputbodyjson': _as_text(inp.get('inputBodyJson')),
@@ -310,7 +304,7 @@ Resources:
               except glue.exceptions.AlreadyExistsException:
                   pass
 
-          def transform_gz(body_bytes, payer_id, collection_time):
+          def transform_gz(body_bytes, collection_time):
               """Gunzip a Bedrock log object and return (jsonl_text, row_count).
               Each source object may contain one JSON record or newline-delimited
               records; both are handled."""
@@ -333,7 +327,7 @@ Resources:
               for raw in records:
                   if not isinstance(raw, dict):
                       continue
-                  rows.append(json.dumps(flatten_record(raw, payer_id, collection_time)))
+                  rows.append(json.dumps(flatten_record(raw, collection_time)))
               return ('\n'.join(rows), len(rows))
 
           def lambda_handler(event, context):  #pylint: disable=W0613
@@ -341,14 +335,6 @@ Resources:
               # source bucket holds against what has already been imported and pulls
               # only the difference. The destination itself is the checkpoint, so
               # transient failures self-heal and older gaps backfill on later runs.
-              # payer_id is supplied by the framework (ManagementAccountID), matching
-              # how other CID modules stamp the payer. If more than one management
-              # account is configured, the pull-based collector has no per-source
-              # account -> payer mapping, so the first id is used. Falls back to the
-              # collection account only if the parameter was left empty.
-              payer_id = (MANAGEMENT_ACCOUNT_ID.split(',')[0].strip()
-                          if MANAGEMENT_ACCOUNT_ID
-                          else boto3.client('sts').get_caller_identity()['Account'])
               collection_time = datetime.now(timezone.utc).isoformat()
               try:
                   sd_template = glue.get_table(
@@ -386,7 +372,7 @@ Resources:
                                   continue  # already imported - checkpoint hit
                               try:
                                   resp = s3.get_object(Bucket=source_bucket, Key=key)
-                                  jsonl, rows = transform_gz(resp['Body'].read(), payer_id, collection_time)
+                                  jsonl, rows = transform_gz(resp['Body'].read(), collection_time)
                                   if rows > 0:
                                       s3.put_object(
                                           Bucket=DEST_BUCKET,
@@ -426,7 +412,6 @@ Resources:
           SOURCE_PREFIX: !Ref BedrockLogPrefix
           GLUE_DATABASE: !Ref DatabaseName
           GLUE_TABLE: bedrock_logs
-          MANAGEMENT_ACCOUNT_ID: !Ref ManagementAccountID
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -513,8 +498,6 @@ Resources:
               Type: string
             - Name: requestmetadata
               Type: map<string,string>
-            - Name: payer_id
-              Type: string
             - Name: collection_time
               Type: string
             - Name: input
@@ -536,7 +519,6 @@ Resources:
         CREATE OR REPLACE VIEW ${DatabaseName}.bedrock_invocations_view AS
         SELECT
             account_id,
-            payer_id,
             CAST(from_iso8601_timestamp(timestamp) AS TIMESTAMP)                    AS timestamp,
             region,
             requestid,

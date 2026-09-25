@@ -1665,7 +1665,6 @@ Resources:
         DestinationBucketARN: !GetAtt S3Bucket.Arn
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
         ResourcePrefix: !Ref ResourcePrefix
-        ManagementAccountID: !Ref ManagementAccountID
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         BedrockSourceBuckets: !Ref BedrockSourceBuckets
