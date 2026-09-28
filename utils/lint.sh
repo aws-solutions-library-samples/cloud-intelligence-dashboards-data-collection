@@ -49,7 +49,11 @@ for file in $yaml_files; do
         echo -e "cfn-lint     ${GREEN}OK${NC}"  | awk '{ print "\t" $0 }'
     fi
 
-    if [ "$(basename $file)" == "${exclude_files[0]}" ] || [ "$(basename $file)" == "${exclude_files[1]}" ] || [ "$(basename $file)" == "${exclude_files[2]}" ]; then
+    excluded=0
+    for excluded_file in "${exclude_files[@]}"; do
+        [ "$(basename $file)" == "$excluded_file" ] && excluded=1
+    done
+    if [ $excluded -eq 1 ]; then
         echo -e "cfn_nag_scan ${YELLOW}SKIP${NC} For::Each breaks cfn_nag"  | awk '{ print "\t" $0 }'
         continue
     fi
