@@ -150,10 +150,10 @@ Resources:
           import json
           import uuid
           import logging
-          from datetime import date, datetime, timedelta, timezone
-
-          import jmespath
           import socket
+          import jmespath
+
+          from datetime import date, datetime, timedelta, timezone
 
           import boto3
           from botocore.config import Config
@@ -172,6 +172,10 @@ Resources:
           DETAIL_SM_ARN = os.environ['DETAIL_SM_ARN']
           TMP_FILE = "/tmp/data.json"
           MAX_RETRIES = int(os.environ.get('MAX_RETRIES', "10"))
+
+          # Added to limit the the total resources returned, which can prevent some throttling and time out
+          MAX_LIST_SIZE = int(os.environ.get('MAX_LIST_SIZE', 0))
+          EVENTS_PER_BATCH = int(os.environ.get('EVENTS_PER_BATCH', 100))
 
           config = Config(retries={"max_attempts": MAX_RETRIES, "mode": "adaptive"})
 
@@ -242,32 +246,44 @@ Resources:
               return start_date, end_date
 
 
-          def search(function, args=None, expression='@'):
+          def search(function, args={}, expression='@', max_list_size=0):
+              event_id = args.get("eventArn", "").rsplit("/", 1)[-1]
+              logger.debug(f"Search entered for '{function.__name__}' for event {event_id}. (max setting {'-no limit-' if max_list_size == 0 else max_list_size})")
               compiled = jmespath.compile(expression)
-              args = args or {}
+              result_c = 0
               while True:
                   page = function(**args)
                   results = compiled.search(dict(page))
                   if isinstance(results, list):
+                      result_c += len(results)
                       yield from results
                   else:
                       # Yield result directly if it is not a list.
+                      result_c += 1
                       yield results
-                  if 'nextToken' in page and page['nextToken']:
+                  if ('nextToken' in page and page['nextToken']) and (max_list_size == 0 or result_c <= max_list_size):
                       args['nextToken'] = page['nextToken']
                   else:
+                      if ('nextToken' in page and page['nextToken']):
+                          logger.warn(f"Truncating '{function.__name__}' for event {event_id} because {max_list_size} limit reached.")
+                      logger.debug(f"Total {function.__name__} results {result_c} for event {event_id}.")
                       break
 
           def pull_event_details(event, health_client):
+              logger.debug(f"Processing event: {event['arn']}")
               event_arn = event['arn']
+              event_id = event_arn.rsplit("/", 1)[-1]
               if event['eventScopeCode'] == 'PUBLIC':
                   accounts = [None]
               else:
+                  logger.debug(f"Looking for accounts for {event_id}")
                   accounts = list(search(
                       function=health_client.describe_affected_accounts_for_organization,
-                      args={'eventArn': event_arn},
+                      args={'eventArn': event_arn, 'maxResults': 100},
                       expression='affectedAccounts',
+                      max_list_size=MAX_LIST_SIZE
                   ))
+              logger.debug(f"Accounts found: {len(accounts)} for {event_id}")
 
               # describe_event_details_for_organization only can get 10 per call
               details = []
@@ -277,30 +293,35 @@ Resources:
                       filters = [{'eventArn':event_arn, 'awsAccountId': account} for account in account_chunk]
                   else:
                       filters = [{'eventArn':event_arn}]
+
+                  #logger.debug(f"Filters for {event_id}: {filters}. Now looking for details")
                   details += list(search(
                       function=health_client.describe_event_details_for_organization,
                       args=dict(
                           organizationEventDetailFilters=filters
                       ),
                       expression='successfulSet',
+                      max_list_size=MAX_LIST_SIZE
                   ))
+                  logger.debug(f"Details found: {len(details)} for {event_id}")
+
                   affected_entities += list(search(
                       function=health_client.describe_affected_entities_for_organization,
                       args=dict(
-                          organizationEntityFilters=filters
+                          organizationEntityFilters=filters,
+                          maxResults=100
                       ),
                       expression='entities',
+                      max_list_size=MAX_LIST_SIZE
                   ))
+                  logger.debug(f"Entities found: {len(affected_entities)} for {event_id}")
 
               # merge with details and affected entities
               event_details_per_affected = []
-              logger.debug(f"Raw event: {event}")
-              logger.debug(f"Raw details: {details}")
               if len(affected_entities) == 0:
                   detail = details[0] if len(details) > 0 else {}
                   event = {**event, **detail}
                   event_details_per_affected.append(event)
-                  logger.debug(f"Merged WITHOUT entities: {event}\n\n")
 
               for affected_entity in affected_entities:
                   account = affected_entity['awsAccountId']
@@ -316,8 +337,8 @@ Resources:
                   merged_dict = {**event, **affected_entity}
                   if len(detail) > 0:
                       merged_dict = {**merged_dict, **detail[0]}
-                  logger.debug(f"Merged WITH entities: {merged_dict}")
                   event_details_per_affected.append(merged_dict)
+              logger.debug(f"Finished processing entities for {event_id}")
               return event_details_per_affected
 
           def get_active_health_region():
@@ -338,16 +359,18 @@ Resources:
                   return default_region
 
               active_region = split_active_endpoint[1]
+              logger.debug(f"Active region is {active_region}")
               return active_region
 
           def lambda_handler(event, context): #pylint: disable=unused-argument
               """ this lambda collects AWS Health Events data
               and must be called from the corresponding Step Function to orchestrate
               """
-              logger.info(f"Event data: {event}")
+              logger.info(f"Handler entered")
+              logger.debug(f"Event data: {event}. Regions in scope {REGIONS}.")
               account = event.get('account')
               items = event.get('items')
-              regions = event.get('regions', REGIONS)
+              #regions = event.get('regions', REGIONS)
               if not account:
                   raise ValueError(
                       "Please do not trigger this Lambda manually."
@@ -377,7 +400,7 @@ Resources:
               count = 0
               if is_summary_mode:
                   start_from, start_to = calculate_dates(BUCKET_NAME, f"{PREFIX}/{PREFIX}-detail-data/payer_id={account_id}")
-                  logger.info(f"Collecting events from {start_from} to {start_to}")
+                  logger.info(f"Collecting event summary from {start_from} to {start_to}")
                   args = {
                       'maxResults':100,
                       'filter': {
@@ -393,7 +416,7 @@ Resources:
                   try:
                       with open(TMP_FILE, "w", encoding='utf-8') as f:
                           f.write('eventArn,eventScopeCode\n')
-                          for _, h_event in enumerate(search(health_client.describe_events_for_organization, args, expression='events')):
+                          for _, h_event in enumerate(search(health_client.describe_events_for_organization, args, expression='events', max_list_size=MAX_LIST_SIZE)):
                               f.write(f'{h_event["arn"]},{h_event["eventScopeCode"]}\n')
                               count += 1
                       if count > 0:
@@ -411,7 +434,8 @@ Resources:
                               "ingestion_time": int(round(ingestion_time.timestamp())),
                               "main_exe_uuid": main_exe_uuid,
                               "params": "detail",
-                              "stack_version": stack_version
+                              "stack_version": stack_version,
+                              "events_per_batch": EVENTS_PER_BATCH
                           }
                           sf_input = json.dumps(sf_input).replace('"', '\"') #need to escape the json for SF
                           sf.start_execution(stateMachineArn=DETAIL_SM_ARN, input=sf_input)
@@ -440,14 +464,16 @@ Resources:
                               metadata = flatten_event.get('event_metadata')
                               metadata = json.dumps(metadata) if (not isinstance(metadata, str)) and (metadata != None) else metadata
                               flatten_event['event_metadata'] = metadata
-                              logger.debug(f"Final flattened event: {flatten_event}")
+                              #logger.debug(f"Final flattened event: {flatten_event}")
                               f.write(to_json(flatten_event) + '\n')
                               count += 1
                   if count > 0:
                       rand = uuid.uuid4()
                       key = ingestion_time.strftime(f"{PREFIX}/{PREFIX}-detail-data/payer_id={account_id}/year=%Y/month=%m/day=%d/%Y-%m-%d-%H-%M-%S-{rand}.json")
                       boto3.client('s3', config=config).upload_file(TMP_FILE, BUCKET_NAME, key)
-                      logger.info(f'Uploaded {count} summary records to s3://{BUCKET_NAME}/{key}')
+                      logger.info(f'Uploaded {count} detail records to s3://{BUCKET_NAME}/{key}')
+                  else:
+                      logger.info(f'No detail records uploaded')
               return {"status":"200","Recorded":f'"{count}"'}
       Handler: "index.lambda_handler"
       MemorySize: 2688
