@@ -35,7 +35,7 @@ Parameters:
     Description: Arn of lambda for Analytics
   AwsServices:
     Type: CommaDelimitedList
-    Default: AmazonRDS, AmazonEC2, AmazonElastiCache, AmazonES, AWSComputeSavingsPlan, AWSLambda, RegionalServices, RegionNames, AmazonWorkSpaces
+    Default: AmazonRDS, AmazonEC2, AmazonElastiCache, AmazonES, AWSComputeSavingsPlan, AWSDatabaseSavingsPlan, AmazonRedshift, AmazonEKS, ElasticMapReduce, AmazonECS, AmazonMSK, AmazonDocDB, AmazonMemoryDB, AmazonNeptune, AmazonSageMaker, AWSMachineLearningSavingsPlans, AWSLambda, RegionalServices, RegionNames, AmazonWorkSpaces
     Description: Services for pulling price data
   CodeBucket:
     Type: String
@@ -326,6 +326,464 @@ Mappings:
       - { Type: string, Name: "DiscountedRegionCode" }
       jsonPaths: ["SKU","RateCode","Unit","EffectiveDate","DiscountedRate","Currency","DiscountedSKU","DiscountedServiceCode","DiscountedUsageType","DiscountedOperation","PurchaseOption","LeaseContractLength","LeaseContractLengthUnit","ServiceCode","UsageType","Operation","Description","Instance Family","Location","Location Type","Granularity","Product Family","DiscountedRegionCode"]
 
+    AWSDatabaseSavingsPlan:
+      path: databasesavingsplan
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "DiscountedRate" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "DiscountedSKU" }
+      - { Type: string, Name: "DiscountedServiceCode" }
+      - { Type: string, Name: "DiscountedUsageType" }
+      - { Type: string, Name: "DiscountedOperation" }
+      - { Type: string, Name: "PurchaseOption" }
+      - { Type: string, Name: "LeaseContractLength" }
+      - { Type: string, Name: "LeaseContractLengthUnit" }
+      - { Type: string, Name: "ServiceCode" }
+      - { Type: string, Name: "UsageType" }
+      - { Type: string, Name: "Operation" }
+      - { Type: string, Name: "Description" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Granularity" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "DiscountedRegionCode" }
+      - { Type: string, Name: "DiscountedInstanceType" }
+      jsonPaths: ["SKU","RateCode","Unit","EffectiveDate","DiscountedRate","Currency","DiscountedSKU","DiscountedServiceCode","DiscountedUsageType","DiscountedOperation","PurchaseOption","LeaseContractLength","LeaseContractLengthUnit","ServiceCode","UsageType","Operation","Description","Instance Family","Location","Location Type","Granularity","Product Family","DiscountedRegionCode","DiscountedInstanceType"]
+
+    AmazonRedshift:
+      path: redshift
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "LeaseContractLength" }
+      - { Type: string, Name: "PurchaseOption" }
+      - { Type: string, Name: "OfferingClass" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Description" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Current Generation" }
+      - { Type: string, Name: "vCPU" }
+      - { Type: string, Name: "Memory" }
+      - { Type: string, Name: "Storage" }
+      - { Type: string, Name: "I/O" }
+      - { Type: string, Name: "Storage Media" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "ConcurrencyScalingFreeUsage" }
+      - { Type: string, Name: "ECU" }
+      - { Type: string, Name: "Payment Option" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "Term" }
+      - { Type: string, Name: "Usage Family" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","LeaseContractLength","PurchaseOption","OfferingClass","Product Family","serviceCode","Description","Location","Location Type","Instance Type","Current Generation","vCPU","Memory","Storage","I/O","Storage Media","usageType","operation","ConcurrencyScalingFreeUsage","ECU","Payment Option","Region Code","serviceName","Term","Usage Family"]
+
+    AmazonEKS:
+      path: eks
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Tenancy" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "CapabilityType" }
+      - { Type: string, Name: "CPUType" }
+      - { Type: string, Name: "EKSCapabilityUnits" }
+      - { Type: string, Name: "EKSProductType" }
+      - { Type: string, Name: "InstanceType" }
+      - { Type: string, Name: "MemoryType" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "StorageType" }
+      - { Type: string, Name: "TierType" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Location","Location Type","Tenancy","usageType","operation","CapabilityType","CPUType","EKSCapabilityUnits","EKSProductType","InstanceType","MemoryType","Region Code","serviceName","StorageType","TierType"]
+
+    ElasticMapReduce:
+      path: emr
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Compute" }
+      - { Type: string, Name: "ComputeProvider" }
+      - { Type: string, Name: "MeterUnit" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "Software Type" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Location","Location Type","Instance Type","Instance Family","usageType","operation","Compute","ComputeProvider","MeterUnit","Region Code","serviceName","Software Type"]
+
+    AmazonECS:
+      path: ecs
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Tenancy" }
+      - { Type: string, Name: "Operating System" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "CPU Architecture" }
+      - { Type: string, Name: "CPUType" }
+      - { Type: string, Name: "External Instance Type" }
+      - { Type: string, Name: "MemoryType" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "Resource" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "StorageType" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Location","Location Type","Instance Type","Tenancy","Operating System","usageType","operation","CPU Architecture","CPUType","External Instance Type","MemoryType","Region Code","Resource","serviceName","StorageType"]
+
+    AmazonMSK:
+      path: msk
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Description" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "vCPU" }
+      - { Type: string, Name: "Group" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Compute Family" }
+      - { Type: string, Name: "DataChannel" }
+      - { Type: string, Name: "Memory (GiB)" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "Storage Family" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Description","Location","Location Type","vCPU","Group","usageType","operation","Compute Family","DataChannel","Memory (GiB)","Region Code","serviceName","Storage Family"]
+
+    AmazonDocDB:
+      path: docdb
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Current Generation" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "vCPU" }
+      - { Type: string, Name: "Physical Processor" }
+      - { Type: string, Name: "Clock Speed" }
+      - { Type: string, Name: "Memory" }
+      - { Type: string, Name: "Instance Storage" }
+      - { Type: string, Name: "Network Performance" }
+      - { Type: string, Name: "Processor Architecture" }
+      - { Type: string, Name: "Storage Media" }
+      - { Type: string, Name: "Volume Type" }
+      - { Type: string, Name: "Min Volume Size" }
+      - { Type: string, Name: "Max Volume Size" }
+      - { Type: string, Name: "Engine Code" }
+      - { Type: string, Name: "Database Engine" }
+      - { Type: string, Name: "Group" }
+      - { Type: string, Name: "Group Description" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Engine_Major_Version" }
+      - { Type: string, Name: "Enhanced Networking Supported" }
+      - { Type: string, Name: "Instance Type Family" }
+      - { Type: string, Name: "Normalization Size Factor" }
+      - { Type: string, Name: "Processor Features" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "Storage Type" }
+      - { Type: string, Name: "Volume_Optimization" }
+      - { Type: string, Name: "Year_Number" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Location","Location Type","Instance Type","Current Generation","Instance Family","vCPU","Physical Processor","Clock Speed","Memory","Instance Storage","Network Performance","Processor Architecture","Storage Media","Volume Type","Min Volume Size","Max Volume Size","Engine Code","Database Engine","Group","Group Description","usageType","operation","Engine_Major_Version","Enhanced Networking Supported","Instance Type Family","Normalization Size Factor","Processor Features","Region Code","serviceName","Storage Type","Volume_Optimization","Year_Number"]
+
+    AmazonMemoryDB:
+      path: memorydb
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "RelatedTo" }
+      - { Type: string, Name: "LeaseContractLength" }
+      - { Type: string, Name: "PurchaseOption" }
+      - { Type: string, Name: "OfferingClass" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Current Generation" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "vCPU" }
+      - { Type: string, Name: "Memory" }
+      - { Type: string, Name: "Network Performance" }
+      - { Type: string, Name: "Storage Media" }
+      - { Type: string, Name: "Transfer Type" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Engine" }
+      - { Type: string, Name: "Normalization Size Factor" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "SSD" }
+      - { Type: string, Name: "Type" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","RelatedTo","LeaseContractLength","PurchaseOption","OfferingClass","Product Family","serviceCode","Location","Location Type","Instance Type","Current Generation","Instance Family","vCPU","Memory","Network Performance","Storage Media","Transfer Type","usageType","operation","Engine","Normalization Size Factor","Region Code","serviceName","SSD","Type"]
+
+    AmazonNeptune:
+      path: neptune
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Current Generation" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "vCPU" }
+      - { Type: string, Name: "Physical Processor" }
+      - { Type: string, Name: "Clock Speed" }
+      - { Type: string, Name: "Memory" }
+      - { Type: string, Name: "Storage" }
+      - { Type: string, Name: "Network Performance" }
+      - { Type: string, Name: "Processor Architecture" }
+      - { Type: string, Name: "Storage Media" }
+      - { Type: string, Name: "Volume Type" }
+      - { Type: string, Name: "Min Volume Size" }
+      - { Type: string, Name: "Max Volume Size" }
+      - { Type: string, Name: "Engine Code" }
+      - { Type: string, Name: "Database Engine" }
+      - { Type: string, Name: "License Model" }
+      - { Type: string, Name: "Deployment Option" }
+      - { Type: string, Name: "Group" }
+      - { Type: string, Name: "Group Description" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Dedicated EBS Throughput" }
+      - { Type: string, Name: "Enhanced Networking Supported" }
+      - { Type: string, Name: "m-NCU" }
+      - { Type: string, Name: "Normalization Size Factor" }
+      - { Type: string, Name: "Processor Features" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "serviceName" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","Product Family","serviceCode","Location","Location Type","Instance Type","Current Generation","Instance Family","vCPU","Physical Processor","Clock Speed","Memory","Storage","Network Performance","Processor Architecture","Storage Media","Volume Type","Min Volume Size","Max Volume Size","Engine Code","Database Engine","License Model","Deployment Option","Group","Group Description","usageType","operation","Dedicated EBS Throughput","Enhanced Networking Supported","m-NCU","Normalization Size Factor","Processor Features","Region Code","serviceName"]
+
+    AmazonSageMaker:
+      path: sagemaker
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "OfferTermCode" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "TermType" }
+      - { Type: string, Name: "PriceDescription" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "StartingRange" }
+      - { Type: string, Name: "EndingRange" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "PricePerUnit" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "RelatedTo" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "serviceCode" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Instance Type" }
+      - { Type: string, Name: "Current Generation" }
+      - { Type: string, Name: "Clock Speed" }
+      - { Type: string, Name: "Memory" }
+      - { Type: string, Name: "Storage" }
+      - { Type: string, Name: "Network Performance" }
+      - { Type: string, Name: "Processor Architecture" }
+      - { Type: string, Name: "Volume Type" }
+      - { Type: string, Name: "Max throughput/volume" }
+      - { Type: string, Name: "Group" }
+      - { Type: string, Name: "Group Description" }
+      - { Type: string, Name: "usageType" }
+      - { Type: string, Name: "operation" }
+      - { Type: string, Name: "Automatic Label" }
+      - { Type: string, Name: "Component" }
+      - { Type: string, Name: "Compute Type" }
+      - { Type: string, Name: "DataGenerationTechniques" }
+      - { Type: string, Name: "DataStore StorageType" }
+      - { Type: string, Name: "GPU" }
+      - { Type: string, Name: "GPU Memory" }
+      - { Type: string, Name: "Instance Name" }
+      - { Type: string, Name: "Integrating API" }
+      - { Type: string, Name: "Integrating Feature" }
+      - { Type: string, Name: "Integrating Service" }
+      - { Type: string, Name: "Integration Type" }
+      - { Type: string, Name: "Labeling Task Type" }
+      - { Type: string, Name: "Memory(GB)" }
+      - { Type: string, Name: "Model Description" }
+      - { Type: string, Name: "ModelName" }
+      - { Type: string, Name: "PartnerAppResourceName" }
+      - { Type: string, Name: "PartnerAppResourceService" }
+      - { Type: string, Name: "PartnerAppResourceType" }
+      - { Type: string, Name: "PartnerAppTier" }
+      - { Type: string, Name: "PartnerAppType" }
+      - { Type: string, Name: "PEFTType" }
+      - { Type: string, Name: "Physical CPU" }
+      - { Type: string, Name: "Physical GPU" }
+      - { Type: string, Name: "PlatoClassificationType" }
+      - { Type: string, Name: "PlatoInstanceName" }
+      - { Type: string, Name: "PlatoInstanceType" }
+      - { Type: string, Name: "Region Code" }
+      - { Type: string, Name: "ScepterUsageType" }
+      - { Type: string, Name: "serviceName" }
+      - { Type: string, Name: "Storage Type" }
+      - { Type: string, Name: "Technique" }
+      - { Type: string, Name: "ThroughputCapacity" }
+      - { Type: string, Name: "TokenType" }
+      - { Type: string, Name: "Tracking Server Size" }
+      - { Type: string, Name: "Unified Studio Compute" }
+      - { Type: string, Name: "V CPU" }
+      - { Type: string, Name: "Workforce Type" }
+      jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","RelatedTo","Product Family","serviceCode","Location","Location Type","Instance Type","Current Generation","Clock Speed","Memory","Storage","Network Performance","Processor Architecture","Volume Type","Max throughput/volume","Group","Group Description","usageType","operation","Automatic Label","Component","Compute Type","DataGenerationTechniques","DataStore StorageType","GPU","GPU Memory","Instance Name","Integrating API","Integrating Feature","Integrating Service","Integration Type","Labeling Task Type","Memory(GB)","Model Description","ModelName","PartnerAppResourceName","PartnerAppResourceService","PartnerAppResourceType","PartnerAppTier","PartnerAppType","PEFTType","Physical CPU","Physical GPU","PlatoClassificationType","PlatoInstanceName","PlatoInstanceType","Region Code","ScepterUsageType","serviceName","Storage Type","Technique","ThroughputCapacity","TokenType","Tracking Server Size","Unified Studio Compute","V CPU","Workforce Type"]
+
+    AWSMachineLearningSavingsPlans:
+      path: machinelearningsavingsplan
+      partition:
+      - { Name: region, Type: string }
+      fields:
+      - { Type: string, Name: "SKU" }
+      - { Type: string, Name: "RateCode" }
+      - { Type: string, Name: "Unit" }
+      - { Type: string, Name: "EffectiveDate" }
+      - { Type: string, Name: "DiscountedRate" }
+      - { Type: string, Name: "Currency" }
+      - { Type: string, Name: "DiscountedSKU" }
+      - { Type: string, Name: "DiscountedServiceCode" }
+      - { Type: string, Name: "DiscountedUsageType" }
+      - { Type: string, Name: "DiscountedOperation" }
+      - { Type: string, Name: "PurchaseOption" }
+      - { Type: string, Name: "LeaseContractLength" }
+      - { Type: string, Name: "LeaseContractLengthUnit" }
+      - { Type: string, Name: "ServiceCode" }
+      - { Type: string, Name: "UsageType" }
+      - { Type: string, Name: "Operation" }
+      - { Type: string, Name: "Description" }
+      - { Type: string, Name: "Instance Family" }
+      - { Type: string, Name: "Location" }
+      - { Type: string, Name: "Location Type" }
+      - { Type: string, Name: "Granularity" }
+      - { Type: string, Name: "Product Family" }
+      - { Type: string, Name: "DiscountedRegionCode" }
+      - { Type: string, Name: "DiscountedInstanceType" }
+      jsonPaths: ["SKU","RateCode","Unit","EffectiveDate","DiscountedRate","Currency","DiscountedSKU","DiscountedServiceCode","DiscountedUsageType","DiscountedOperation","PurchaseOption","LeaseContractLength","LeaseContractLengthUnit","ServiceCode","UsageType","Operation","Description","Instance Family","Location","Location Type","Granularity","Product Family","DiscountedRegionCode","DiscountedInstanceType"]
+
     AWSLambda:
       path: lambda
       partition:
@@ -567,6 +1025,10 @@ Resources:
               try:
                   if service == 'AWSComputeSavingsPlan':
                       url = offers['AmazonEC2']['currentSavingsPlanIndexUrl']
+                  elif service == 'AWSDatabaseSavingsPlan':
+                      url = offers['AmazonRDS']['currentSavingsPlanIndexUrl']
+                  elif service == 'AWSMachineLearningSavingsPlans':
+                      url = offers['AmazonSageMaker']['currentSavingsPlanIndexUrl']
                   else:
                       url = offers[service]['currentRegionIndexUrl']
                   regions = get_json(BASE_URL + url)["regions"]
