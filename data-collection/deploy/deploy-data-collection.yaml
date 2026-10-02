@@ -44,6 +44,7 @@ Metadata:
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
           - IncludeKiroUserActivityModule
+          - IncludeBedrockModule
           - IncludeReferenceModule          
       - Label:
           default: 'EUC (End User Compute) Module Configuration'
@@ -53,6 +54,10 @@ Metadata:
           default: 'Kiro User Activity Module Configuration'
         Parameters:
           - KiroSourceBuckets
+      - Label:
+          default: 'Amazon Bedrock Module Configuration'
+        Parameters:
+          - BedrockSourceBuckets
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -126,6 +131,10 @@ Metadata:
         default: 'Include Kiro User Activity Data Collection Module'
       KiroSourceBuckets:
         default: 'Kiro Source Bucket Names (comma-separated)'
+      IncludeBedrockModule:
+        default: 'Include Amazon Bedrock Data Collection Module'
+      BedrockSourceBuckets:
+        default: 'Bedrock Source Bucket Names (comma-separated)'
 
 Mappings:
   RegionMap:
@@ -320,6 +329,15 @@ Parameters:
     Type: String
     Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Required if IncludeKiroUserActivityModule is yes. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
     Default: ""
+  IncludeBedrockModule:
+    Type: String
+    Description: "Collects Amazon Bedrock model-invocation logs from customer-managed source buckets (pull-based). Customers enable Bedrock invocation logging themselves and apply a bucket policy granting read access to the collection Lambda role."
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
+  BedrockSourceBuckets:
+    Type: String
+    Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Required if IncludeBedrockModule is yes. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
+    Default: ""
   IncludeIdentityCenterModule:
     Type: String
     Description: Collects AWS Identity Center data
@@ -353,6 +371,7 @@ Conditions:
   DeployResilienceHubModule: !Equals [ !Ref IncludeResilienceHubModule, "yes"]
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
   DeployKiroUserActivityModule: !Equals [ !Ref IncludeKiroUserActivityModule, "yes"]
+  DeployBedrockModule: !Equals [ !Ref IncludeBedrockModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
@@ -400,6 +419,16 @@ Rules:
     Assertions:
       - Assert: !Not [ !Equals [ !Ref KiroSourceBuckets, "" ] ]
         AssertDescription: "IncludeKiroUserActivityModule is 'yes' but KiroSourceBuckets is empty. Provide at least one source bucket name (comma-separated)."
+  # Guard: an enabled Bedrock module must be given at least one source bucket.
+  # Without this, BedrockSourceBuckets="" flows into the module's
+  # CommaDelimitedList as [""], and its Fn::ForEach would emit a bucket-read
+  # policy with an empty ARN (arn:aws:s3:::) and an empty logical-ID suffix.
+  # Reject at stack-create time instead so no malformed IAM policy is created.
+  BedrockSourceBucketsRequiredWhenModuleEnabled:
+    RuleCondition: !Equals [ !Ref IncludeBedrockModule, "yes" ]
+    Assertions:
+      - Assert: !Not [ !Equals [ !Ref BedrockSourceBuckets, "" ] ]
+        AssertDescription: "IncludeBedrockModule is 'yes' but BedrockSourceBuckets is empty. Provide at least one source bucket name (comma-separated)."
 
 Resources:
   S3Bucket:
@@ -1624,6 +1653,22 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         KiroSourceBuckets: !Ref KiroSourceBuckets
+
+  BedrockModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployBedrockModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.8/module-bedrock.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        ResourcePrefix: !Ref ResourcePrefix
+        ManagementAccountID: !Ref ManagementAccountID
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
+        BedrockSourceBuckets: !Ref BedrockSourceBuckets
 
   IdentityCenterModule:
     Type: AWS::CloudFormation::Stack
