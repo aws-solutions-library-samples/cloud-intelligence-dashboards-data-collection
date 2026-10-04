@@ -335,7 +335,7 @@ Parameters:
     Default: 'no'
   IncludeRDSModule:
     Type: String
-    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts. Requires the Inventory, Reference, and Org Data modules - otherwise the RDS module is skipped.
     AllowedValues: ['yes', 'no']
     Default: 'no'
 Conditions:
@@ -396,7 +396,11 @@ Conditions:
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
-  DeployRDSModule: !Equals [ !Ref IncludeRDSModule, "yes"]
+  DeployRDSModule: !And
+    - !Condition DeployInventoryCollectorModule
+    - !Condition DeployIncludeReferenceModule
+    - !Condition DeployOrgDataModule
+    - !Equals [ !Ref IncludeRDSModule, "yes"]
 
 Rules:
   # Guard: an enabled Kiro module must be given at least one source bucket.
