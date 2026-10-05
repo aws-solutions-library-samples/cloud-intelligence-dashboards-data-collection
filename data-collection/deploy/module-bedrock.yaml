@@ -506,57 +506,10 @@ Resources:
               Type: struct<outputbodyjson:string,outputcontenttype:string,outputtokencount:int>
             - Name: identity_arn
               Type: string
-  # Flattened, query-friendly view over bedrock_logs. Extracts token usage and
-  # prompt/response previews from the nested input/output body JSON. Kept as a
-  # NamedQuery for discoverability; sample queries are also provided in the docs.
-  BedrockInvocationsView:
-    Type: AWS::Athena::NamedQuery
-    Properties:
-      Database: !Ref DatabaseName
-      Description: "Flattened view of Bedrock model invocation logs with token usage and prompt/response previews"
-      Name: !Sub "${CFDataName}_invocations_view"
-      QueryString: !Sub |
-        CREATE OR REPLACE VIEW ${DatabaseName}.bedrock_invocations_view AS
-        SELECT
-            account_id,
-            CAST(from_iso8601_timestamp(timestamp) AS TIMESTAMP)                    AS timestamp,
-            region,
-            requestid,
-            operation,
-            modelid,
-            identity_arn,
-            IF(identity_arn LIKE '%:assumed-role/%',
-                element_at(split(identity_arn, '/'), -1),
-                identity_arn
-            )                                                                        AS identity,
-            JSON_FORMAT(CAST(requestmetadata AS JSON))                               AS requestmetadata,
-            year,
-            month,
-            day,
-            input.inputtokencount                                                    AS input_token_count,
-            input.inputcontenttype                                                   AS input_content_type,
-            output.outputtokencount                                                   AS output_token_count,
-            output.outputcontenttype                                                  AS output_content_type,
-            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.inputTokens')              AS INTEGER) AS usage_input_tokens,
-            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.outputTokens')             AS INTEGER) AS usage_output_tokens,
-            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.totalTokens')              AS INTEGER) AS usage_total_tokens,
-            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.cacheReadInputTokenCount')  AS INTEGER) AS usage_cache_read_tokens,
-            CAST(json_extract_scalar(output.outputbodyjson, '$.usage.cacheWriteInputTokenCount') AS INTEGER) AS usage_cache_write_tokens,
-            json_extract_scalar(output.outputbodyjson, '$.stopReason')               AS stop_reason,
-            COALESCE(
-                json_extract_scalar(output.outputbodyjson, '$.output.message.content[0].text'),
-                json_extract_scalar(output.outputbodyjson, '$.content[0].text'),
-                json_extract_scalar(output.outputbodyjson, '$.completion'),
-                json_extract_scalar(output.outputbodyjson, '$.outputText')
-            )                                                                        AS response_preview,
-            COALESCE(
-                json_extract_scalar(input.inputbodyjson, '$.messages[0].content[0].text'),
-                json_extract_scalar(input.inputbodyjson, '$.messages[0].content'),
-                json_extract_scalar(input.inputbodyjson, '$.prompt'),
-                json_extract_scalar(input.inputbodyjson, '$.inputText')
-            )                                                                        AS prompt_preview
-        FROM ${DatabaseName}.bedrock_logs
-        WHERE from_iso8601_timestamp(timestamp) >= date_add('month', -6, current_timestamp)
+  # The flattened bedrock_invocations_view is NOT created here. cid-cmd creates
+  # and maintains it as part of the dashboard deployment (it is listed in the
+  # dashboard's dependsOn.views), so defining it here as well would duplicate the
+  # view and risk drift between the two definitions.
   AnalyticsExecutor:
     Type: Custom::LambdaAnalyticsExecutor
     Condition: HasAnalyticsLambda

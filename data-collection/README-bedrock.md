@@ -14,8 +14,9 @@ module copies the logs into the central data-collection bucket on a schedule.
 
 **Schedule:** Daily (configurable via the `Schedule` parameter)
 **Collection scope:** The S3 bucket(s) you list in `BedrockSourceBuckets`
-**Output:** One Athena table (`bedrock_logs`) plus a saved view
-(`bedrock_invocations_view`) in the `optimization_data` database
+**Output:** One Athena table (`bedrock_logs`) in the `optimization_data`
+database. The flattened `bedrock_invocations_view` is created by `cid-cmd`
+during dashboard deployment, not by this module.
 
 ---
 
@@ -155,9 +156,11 @@ prompt/response content can be extracted per query.
 ### View: `optimization_data.bedrock_invocations_view`
 
 A flattened, dashboard-friendly view over `bedrock_logs` that extracts token
-usage and prompt/response previews from the nested body JSON. It is provided as a
-saved Athena query (`bedrock_invocations_view`); run it once in Athena to create
-the view in your account, or use the sample queries below directly.
+usage and prompt/response previews from the nested body JSON. `cid-cmd` creates
+and maintains this view automatically when you deploy or update the Bedrock
+Unified Insights Lens Dashboard, so you do not need to create it by hand. To
+query the raw data before deploying the dashboard, use the sample queries below
+against `bedrock_logs` directly.
 
 ---
 
