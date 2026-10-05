@@ -8,9 +8,15 @@ full pull-based collection pipeline to prove it works against a deployed stack:
         ->  run the collector Lambda  ->  it writes JSONL + registers a Glue
             partition  ->  the new day appears in the Athena table.
 
-By default it only sends invocations (the original behaviour). Pass
-``--collect`` to also wait for delivery, trigger the collector, and verify the
-data is queryable in Athena.
+Invocations alternate between the Converse API and the raw InvokeModel API so
+the generated logs contain BOTH usage schemas: Converse logs Bedrock's camelCase
+format (inputTokens / outputTokens / stopReason) while InvokeModel logs the
+model's own native format (for Claude: snake_case input_tokens / stop_reason /
+cache_read_input_tokens). This exercises the dashboard view's COALESCE handling
+across the different spellings.
+
+By default it only sends invocations. Pass ``--collect`` to also wait for
+delivery, trigger the collector, and verify the data is queryable in Athena.
 
 The Bedrock model can be given explicitly with ``--model-id`` or read from a
 CloudFormation stack output (``BedrockInferenceProfileArn``) with
@@ -53,19 +59,65 @@ def get_inference_profile_arn(session, stack_name):
     raise ValueError(f"BedrockInferenceProfileArn not found in stack {stack_name}")
 
 
-def invoke(client, model_id, i):
-    body = json.dumps({
-        "messages": [{"role": "user", "content": [{"text": f"Test invocation {i}"}]}],
+def invoke_converse(client, model_id, i):
+    """Call the Converse API. Bedrock logs usage in its own camelCase schema
+    (inputTokens / outputTokens / stopReason), the same for every model."""
+    resp = client.converse(
+        modelId=model_id,
+        messages=[{"role": "user", "content": [{"text": f"Converse test invocation {i}"}]}],
+        inferenceConfig={"maxTokens": 10},
+    )
+    return resp["output"]["message"]["content"][0]["text"]
+
+
+def _invoke_model_body(model_id):
+    """Return a native-request body for invoke_model, matching the target
+    model family. The response Bedrock logs is the model's OWN schema, which
+    differs from Converse: Claude uses snake_case (input_tokens, stop_reason,
+    cache_read_input_tokens); Nova uses its own nested usage object."""
+    mid = model_id.lower()
+    if "anthropic" in mid or "claude" in mid:
+        return json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "InvokeModel test invocation"}],
+        }).encode()
+    if "nova" in mid:
+        return json.dumps({
+            "messages": [{"role": "user", "content": [{"text": "InvokeModel test invocation"}]}],
+            "inferenceConfig": {"max_new_tokens": 10},
+        }).encode()
+    if "titan" in mid:
+        return json.dumps({
+            "inputText": "InvokeModel test invocation",
+            "textGenerationConfig": {"maxTokenCount": 10},
+        }).encode()
+    # Fallback to the Nova/Converse-on-invoke shape
+    return json.dumps({
+        "messages": [{"role": "user", "content": [{"text": "InvokeModel test invocation"}]}],
         "inferenceConfig": {"max_new_tokens": 10},
     }).encode()
+
+
+def invoke_invoke_model(client, model_id, i):
+    """Call the raw InvokeModel API with the model's native body."""
     resp = client.invoke_model(
         modelId=model_id,
-        body=body,
+        body=_invoke_model_body(model_id),
         contentType="application/json",
         accept="application/json",
     )
     result = json.loads(resp["body"].read())
-    return result["output"]["message"]["content"][0]["text"]
+    # Extract text across the different native response shapes
+    if "output" in result:                      # Nova
+        return result["output"]["message"]["content"][0]["text"]
+    if "content" in result:                      # Claude messages
+        return result["content"][0]["text"]
+    if "results" in result:                      # Titan
+        return result["results"][0]["outputText"]
+    if "completion" in result:                   # legacy Claude
+        return result["completion"]
+    return json.dumps(result)[:200]
 
 
 def find_collector_stack(session, name_prefix):
@@ -193,7 +245,8 @@ def main():
                         help="Stack exposing BedrockInferenceProfileArn (used when --model-id is not given)")
     parser.add_argument("--model-id", default=None,
                         help="Bedrock model or inference profile ID (default: read from --stack-name output)")
-    parser.add_argument("--count", type=int, default=3, help="Number of invocations to send")
+    parser.add_argument("--count", type=int, default=4,
+                        help="Number of invocations to send (alternates Converse / InvokeModel)")
     parser.add_argument("--collect", action="store_true",
                         help="After invoking, wait for delivery, run the collector, and verify in Athena")
     parser.add_argument("--collector-stack-name", default="CidDataCollectionStack-BedrockModule",
@@ -228,12 +281,22 @@ def main():
                                     pipeline["source_prefix"], today)
 
     client = session.client("bedrock-runtime")
+    # Alternate between the two APIs so the logs contain BOTH schemas:
+    # Converse (camelCase: inputTokens/stopReason) and InvokeModel (the model's
+    # native format, e.g. Claude snake_case input_tokens/stop_reason). This is
+    # what the dashboard view must handle via COALESCE across spellings.
     for i in range(1, args.count + 1):
-        print(f"\n--- Invocation {i} ---")
-        print(invoke(client, model_id, i))
+        if i % 2 == 1:
+            print(f"\n--- Invocation {i} [Converse] ---")
+            print(invoke_converse(client, model_id, i))
+        else:
+            print(f"\n--- Invocation {i} [InvokeModel] ---")
+            print(invoke_invoke_model(client, model_id, i))
 
     if not args.collect:
         print("\nDone. Check bedrock-logs-{account}-{region} for JSON.GZ log files.")
+        print("Logs include both Converse and InvokeModel calls to exercise the "
+              "camelCase vs native (snake_case) usage schemas.")
         print("Re-run with --collect to drive the full pipeline and verify in Athena.")
         return 0
 
