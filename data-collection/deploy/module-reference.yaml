@@ -98,6 +98,7 @@ Resources:
                   - "ec2:DescribeInstanceTypes"
                   - "elasticache:DescribeCacheEngineVersions"
                   - "elasticache:DescribeReservedCacheNodesOfferings"
+                  - "pricing:GetProducts"
                 Resource: "*" ## Policy is used for scanning of a wide range of resources
         - PolicyName: "S3Access"
           PolicyDocument:
@@ -121,8 +122,9 @@ Resources:
       FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
       Description: !Sub "Lambda function to retrieve ${CFDataName}"
       Runtime: python3.13
-      Architectures: [x86_64]
+      Architectures: [arm64]
       Timeout: 900
+      MemorySize: 2688
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
@@ -258,6 +260,49 @@ Resources:
                       for rec in elasticache.get_paginator('describe_reserved_cache_nodes_offerings').paginate().search('ReservedCacheNodesOfferings'):
                           rec['region'] = region
                           write(rec)
+
+              # Pull pricing data for instance types (pricing API is global, us-east-1 only)
+              pricing = boto3.client('pricing', region_name='us-east-1')
+              pricing_errors = []
+
+              # ElastiCache instance pricing
+              try:
+                  with s3_uploader(f'{prefix}/{prefix}_pricing_elasticache_instances/pricing_elasticache_instances.json') as write:
+                      for rec in pricing.get_paginator('get_products').paginate(
+                          ServiceCode='AmazonElastiCache',
+                          Filters=[{'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Cache Instance'}]
+                      ).search('PriceList'):
+                          write(json.loads(rec))
+              except Exception as e:
+                  logger.error("Failed to collect ElastiCache pricing: %s", e)
+                  pricing_errors.append(f"ElastiCache: {e}")
+
+              # RDS instance pricing
+              try:
+                  with s3_uploader(f'{prefix}/{prefix}_pricing_rds_instances/pricing_rds_instances.json') as write:
+                      for rec in pricing.get_paginator('get_products').paginate(
+                          ServiceCode='AmazonRDS',
+                          Filters=[{'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Database Instance'}]
+                      ).search('PriceList'):
+                          write(json.loads(rec))
+              except Exception as e:
+                  logger.error("Failed to collect RDS pricing: %s", e)
+                  pricing_errors.append(f"RDS: {e}")
+
+              # OpenSearch instance pricing
+              try:
+                  with s3_uploader(f'{prefix}/{prefix}_pricing_opensearch_instances/pricing_opensearch_instances.json') as write:
+                      for rec in pricing.get_paginator('get_products').paginate(
+                          ServiceCode='AmazonES',
+                          Filters=[{'Type': 'TERM_MATCH', 'Field': 'productFamily', 'Value': 'Amazon OpenSearch Service Instance'}]
+                      ).search('PriceList'):
+                          write(json.loads(rec))
+              except Exception as e:
+                  logger.error("Failed to collect OpenSearch pricing: %s", e)
+                  pricing_errors.append(f"OpenSearch: {e}")
+
+              if pricing_errors:
+                  raise RuntimeError(f"Pricing collection failed for: {', '.join(pricing_errors)}")
 
 
       Handler: 'index.lambda_handler'
@@ -525,6 +570,66 @@ Resources:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
         TableType: EXTERNAL_TABLE
 
+  PricingElastiCacheInstancesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: reference_pricing_elasticache_instances
+        StorageDescriptor:
+          Columns:
+            - Name: product
+              Type: struct<attributes:struct<cachetype:string,instancetype:string,instancefamily:string,vcpu:string,memory:string,networkperformance:string,region:string,regioncode:string,usagetype:string,currentgeneration:string>>
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_pricing_elasticache_instances/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "product"
+        TableType: EXTERNAL_TABLE
+
+  PricingRDSInstancesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: reference_pricing_rds_instances
+        StorageDescriptor:
+          Columns:
+            - Name: product
+              Type: struct<attributes:struct<instancetype:string,instancetypefamily:string,vcpu:string,memory:string,networkperformance:string,region:string,regioncode:string,usagetype:string,currentgeneration:string,databaseengine:string,deploymentoption:string>>
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_pricing_rds_instances/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "product"
+        TableType: EXTERNAL_TABLE
+
+  PricingOpenSearchInstancesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: reference_pricing_opensearch_instances
+        StorageDescriptor:
+          Columns:
+            - Name: product
+              Type: struct<attributes:struct<instancetype:string,instancefamily:string,vcpu:string,memory:string,networkperformance:string,region:string,regioncode:string,usagetype:string,currentgeneration:string>>
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}_pricing_opensearch_instances/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "product"
+        TableType: EXTERNAL_TABLE
+
   ReferenceDataCrawler:
     Type: AWS::Glue::Crawler
     Properties:
@@ -725,5 +830,158 @@ Resources:
           region
         FROM elasticache_reserved_cache_nodes_offerings
         CROSS JOIN UNNEST(recurringcharges) AS t(charge)
+
+  KpiInstanceMappingView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref DatabaseName
+      Description: "KPI instance mapping view - computes instance generation, processor, and upgrade paths from raw EC2 instance types and pricing data"
+      Name: !Sub "${CFDataName}_kpi_instance_mapping_view"
+      QueryString: |
+        -- NOTE: For EC2, processor is derived from the API-provided ProcessorInfo.Manufacturer field (authoritative).
+        -- For ElastiCache, RDS, and OpenSearch, processor is resolved by joining against
+        -- ec2_instance_types on the instance family prefix to get the authoritative manufacturer.
+        -- Fallback: suffix heuristic ('g' = Graviton, 'a' = AMD, else Intel) for families
+        -- not found in EC2 (e.g. service-specific families like cv11, mv11).
+        CREATE OR REPLACE VIEW kpi_instance_mapping AS
+        -- EC2: uses API-provided processorinfo.manufacturer (authoritative)
+        WITH ec2_manufacturers AS (
+          SELECT DISTINCT
+            regexp_extract(instancetype, '^(.*?)\.', 1) AS instance_prefix,
+            processorinfo.manufacturer AS manufacturer
+          FROM ec2_instance_types
+          WHERE region = 'us-east-1'
+        ),
+        ec2_families AS (
+          SELECT DISTINCT
+            regexp_extract(instancetype, '^([a-z]+)', 1) AS family,
+            CAST(regexp_extract(instancetype, '[a-z]+(\d+)', 1) AS INTEGER) AS generation_number,
+            regexp_extract(instancetype, '[a-z]+\d+(.*?)\.', 1) AS suffix,
+            regexp_extract(instancetype, '^(.*?)\.', 1) AS instance_family,
+            CASE processorinfo.manufacturer
+              WHEN 'Intel' THEN 'Intel'
+              WHEN 'AMD' THEN 'AMD'
+              WHEN 'AWS' THEN 'Graviton'
+              ELSE 'Unknown'
+            END AS instance_processor,
+            'AmazonEC2' AS service
+          FROM ec2_instance_types
+          WHERE region = 'us-east-1'
+            AND regexp_extract(instancetype, '^([a-z]+)', 1) IN ('t','r','m','i','c','d','g','p','hs','cr','cc')
+        ),
+        -- ElastiCache/RDS/OpenSearch: resolve processor via ec2_manufacturers JOIN.
+        -- Falls back to suffix heuristic only when no EC2 match exists.
+        elasticache_families AS (
+          SELECT DISTINCT
+            regexp_extract(product.attributes.cachetype, '^([a-z]+)', 1) AS family,
+            CAST(regexp_extract(product.attributes.cachetype, '[a-z]+(\d+)', 1) AS INTEGER) AS generation_number,
+            regexp_extract(product.attributes.cachetype, '[a-z]+\d+(.*)', 1) AS suffix,
+            product.attributes.cachetype AS instance_family,
+            CASE
+              WHEN m.manufacturer = 'Intel' THEN 'Intel'
+              WHEN m.manufacturer = 'AMD' THEN 'AMD'
+              WHEN m.manufacturer = 'AWS' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.cachetype, '[a-z]+\d+(.*)', 1) LIKE '%g%' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.cachetype, '[a-z]+\d+(.*)', 1) LIKE '%a%' THEN 'AMD'
+              ELSE 'Intel'
+            END AS instance_processor,
+            'AmazonElastiCache' AS service
+          FROM reference_pricing_elasticache_instances
+          LEFT JOIN ec2_manufacturers m ON m.instance_prefix = product.attributes.cachetype
+          WHERE product.attributes.cachetype IS NOT NULL
+            AND regexp_extract(product.attributes.cachetype, '\d+') IS NOT NULL
+        ),
+        rds_families AS (
+          SELECT DISTINCT
+            regexp_extract(product.attributes.instancetypefamily, '\.([a-z]+)', 1) AS family,
+            CAST(regexp_extract(product.attributes.instancetypefamily, '[a-z]+(\d+)', 1) AS INTEGER) AS generation_number,
+            regexp_extract(product.attributes.instancetypefamily, '[a-z]+\d+(.*)', 1) AS suffix,
+            regexp_replace(product.attributes.instancetypefamily, '^db\.', '') AS instance_family,
+            CASE
+              WHEN m.manufacturer = 'Intel' THEN 'Intel'
+              WHEN m.manufacturer = 'AMD' THEN 'AMD'
+              WHEN m.manufacturer = 'AWS' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.instancetypefamily, '[a-z]+\d+(.*)', 1) LIKE '%g%' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.instancetypefamily, '[a-z]+\d+(.*)', 1) LIKE '%a%' THEN 'AMD'
+              ELSE 'Intel'
+            END AS instance_processor,
+            'AmazonRDS' AS service
+          FROM reference_pricing_rds_instances
+          LEFT JOIN ec2_manufacturers m ON m.instance_prefix = regexp_replace(product.attributes.instancetypefamily, '^db\.', '')
+          WHERE product.attributes.instancetypefamily IS NOT NULL
+            AND product.attributes.instancetypefamily LIKE 'db.%'
+            AND regexp_extract(product.attributes.instancetypefamily, '\d+') IS NOT NULL
+        ),
+        opensearch_families AS (
+          SELECT DISTINCT
+            regexp_extract(product.attributes.instancetype, '^([a-z]+)', 1) AS family,
+            CAST(regexp_extract(product.attributes.instancetype, '[a-z]+(\d+)', 1) AS INTEGER) AS generation_number,
+            regexp_extract(product.attributes.instancetype, '[a-z]+\d+(.*?)\.', 1) AS suffix,
+            regexp_extract(product.attributes.instancetype, '^(.*?)\.', 1) AS instance_family,
+            CASE
+              WHEN m.manufacturer = 'Intel' THEN 'Intel'
+              WHEN m.manufacturer = 'AMD' THEN 'AMD'
+              WHEN m.manufacturer = 'AWS' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.instancetype, '[a-z]+\d+(.*?)\.', 1) LIKE '%g%' THEN 'Graviton'
+              WHEN regexp_extract(product.attributes.instancetype, '[a-z]+\d+(.*?)\.', 1) LIKE '%a%' THEN 'AMD'
+              ELSE 'Intel'
+            END AS instance_processor,
+            'AmazonES' AS service
+          FROM reference_pricing_opensearch_instances
+          LEFT JOIN ec2_manufacturers m ON m.instance_prefix = regexp_extract(product.attributes.instancetype, '^(.*?)\.', 1)
+          WHERE product.attributes.instancetype IS NOT NULL
+            AND product.attributes.instancetype NOT LIKE 'ultrawarm%'
+            AND regexp_extract(product.attributes.instancetype, '\d+') IS NOT NULL
+        ),
+        all_families AS (
+          SELECT * FROM ec2_families
+          UNION ALL SELECT * FROM elasticache_families
+          UNION ALL SELECT * FROM rds_families
+          UNION ALL SELECT * FROM opensearch_families
+        ),
+        with_latest AS (
+          SELECT
+            f.*,
+            (SELECT MAX(f2.instance_family) FROM all_families f2
+             WHERE f2.service = f.service AND f2.family = f.family
+               AND f2.instance_processor = 'Intel'
+               AND f2.generation_number > f.generation_number
+               AND regexp_replace(f2.suffix, '[iag]', '') = regexp_replace(f.suffix, '[iag]', '')
+            ) AS latest_intel,
+            (SELECT MAX(f2.instance_family) FROM all_families f2
+             WHERE f2.service = f.service AND f2.family = f.family
+               AND f2.instance_processor = 'AMD'
+               AND f2.generation_number > f.generation_number
+               AND regexp_replace(f2.suffix, '[iag]', '') = regexp_replace(f.suffix, '[iag]', '')
+            ) AS latest_amd,
+            (SELECT MAX(f2.instance_family) FROM all_families f2
+             WHERE f2.service = f.service AND f2.family = f.family
+               AND f2.instance_processor = 'Graviton'
+               AND f2.generation_number > f.generation_number
+               AND regexp_replace(f2.suffix, '[iag]', '') = regexp_replace(f.suffix, '[iag]', '')
+            ) AS latest_graviton,
+            (SELECT MAX(f2.instance_family) FROM all_families f2
+             WHERE f2.service = f.service AND f2.family = f.family
+               AND f2.instance_processor = 'Intel'
+               AND f2.generation_number < f.generation_number
+               AND regexp_replace(f2.suffix, '[iag]', '') = regexp_replace(f.suffix, '[iag]', '')
+            ) AS previous_intel
+          FROM all_families f
+        )
+        SELECT DISTINCT
+          instance_family AS family,
+          service,
+          CASE instance_processor
+            WHEN 'Intel' THEN CASE WHEN latest_intel IS NULL THEN 'Current' ELSE 'Previous' END
+            WHEN 'AMD' THEN CASE WHEN latest_amd IS NULL THEN 'Current' ELSE 'Previous' END
+            WHEN 'Graviton' THEN CASE WHEN latest_graviton IS NULL THEN 'Current' ELSE 'Previous' END
+            ELSE 'Previous'
+          END AS generation,
+          instance_processor,
+          COALESCE(latest_intel, '') AS latest_intel,
+          COALESCE(latest_amd, '') AS latest_amd,
+          COALESCE(latest_graviton, '') AS latest_graviton,
+          COALESCE(previous_intel, '') AS previous_intel
+        FROM with_latest
 
   
