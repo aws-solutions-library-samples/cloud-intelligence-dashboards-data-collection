@@ -12,7 +12,7 @@ invocation logging yourself (per account and region, as you choose), grant the
 collection Lambda read access to your logs bucket with a bucket policy, and the
 module copies the logs into the central data-collection bucket on a schedule.
 
-**Schedule:** Daily (configurable via the `Schedule` parameter)
+**Schedule:** Daily
 **Collection scope:** The S3 bucket(s) you list in `BedrockSourceBuckets`
 **Output:** One Athena table (`bedrock_logs`) in the `optimization_data`
 database. The flattened `bedrock_invocations_view` is created by `cid-cmd`
@@ -31,7 +31,9 @@ side effect of a data-collection stack. So this module:
 - **Respects any logging config you already have.** You keep full control of what
   is logged, in which accounts and regions.
 - **Uses least-privilege reads.** The collection Lambda is granted `s3:GetObject`
-  only under your Bedrock log prefix, and `s3:ListBucket` only for that prefix.
+  and `s3:ListBucket` scoped to your Bedrock log prefix (`BedrockLogPrefix`). When
+  logs are delivered to the bucket root (the default), that scope is the whole
+  named source bucket; set a `keyPrefix` to narrow it.
 
 This mirrors the pull-based pattern used by the Kiro User Activity module.
 
@@ -41,10 +43,11 @@ This mirrors the pull-based pattern used by the Kiro User Activity module.
 
 ```
 You enable Bedrock invocation logging (S3 delivery) in your account(s)/region(s)
-  → Bedrock writes .json.gz logs to your bucket under model-invocation-logs/
+  → Bedrock writes .json.gz logs to your bucket (at the root by default, or under
+    the keyPrefix you set)
       → EventBridge Scheduler (daily) triggers the collection Lambda
-          → Lambda lists each source bucket and reconciles against what it has
-            already imported (the destination is the checkpoint)
+          → Lambda lists each source bucket and reconciles the last 30 days
+            against what it has already imported (the destination is the checkpoint)
           → For each new object: gunzip, flatten to the table schema, write
             JSONL to the destination under a Hive-partitioned path
           → Registers the (account_id, region, year, month, day) partition in Glue
@@ -71,8 +74,7 @@ aws bedrock put-model-invocation-logging-configuration \
   --region us-east-1 \
   --logging-config '{
     "s3Config": {
-      "bucketName": "YOUR-BEDROCK-LOGS-BUCKET-NAME",
-      "keyPrefix": "model-invocation-logs/"
+      "bucketName": "YOUR-BEDROCK-LOGS-BUCKET-NAME"
     },
     "textDataDeliveryEnabled": true,
     "imageDataDeliveryEnabled": true,
@@ -82,6 +84,11 @@ aws bedrock put-model-invocation-logging-configuration \
 
 Repeat for each account and region you want collected. The module reads whatever
 you have configured — it does not change these settings.
+
+`keyPrefix` is optional. Bedrock's default delivers logs to the bucket root, and
+the module's `BedrockLogPrefix` parameter defaults to empty to match. If you set
+a non-empty `keyPrefix` (for example `"model-invocation-logs/"`), set
+`BedrockLogPrefix` to the **same** value so the collector lists the right prefix.
 
 ### 2. Enable the module
 
@@ -102,6 +109,10 @@ After the stack deploys, the Bedrock module stack exposes a
 log prefix and the collection Lambda role. Add it to each source bucket's policy,
 replacing `YOUR-BEDROCK-LOGS-BUCKET-NAME` with the real bucket name:
 
+For the default (root delivery, empty `BedrockLogPrefix`) the statements look
+like this — note the resource/prefix cover the whole bucket because there is no
+key prefix:
+
 ```json
 [
   {
@@ -109,7 +120,7 @@ replacing `YOUR-BEDROCK-LOGS-BUCKET-NAME` with the real bucket name:
     "Effect": "Allow",
     "Principal": { "AWS": "<BedrockModule LambdaRoleArn output>" },
     "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/model-invocation-logs/*"
+    "Resource": "arn:aws:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/*"
   },
   {
     "Sid": "AllowCIDBedrockDataCollectionList",
@@ -117,14 +128,15 @@ replacing `YOUR-BEDROCK-LOGS-BUCKET-NAME` with the real bucket name:
     "Principal": { "AWS": "<BedrockModule LambdaRoleArn output>" },
     "Action": "s3:ListBucket",
     "Resource": "arn:aws:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME",
-    "Condition": { "StringLike": { "s3:prefix": "model-invocation-logs/*" } }
+    "Condition": { "StringLike": { "s3:prefix": "*" } }
   }
 ]
 ```
 
-Use the exact `LambdaRoleArn` and prefix from the stack's `BucketPolicyExample`
-output rather than hand-editing, so the principal and prefix match what was
-deployed.
+If you set a non-empty `keyPrefix`/`BedrockLogPrefix`, the resource and `s3:prefix`
+narrow to that prefix instead. Use the exact `LambdaRoleArn` and prefix from the
+stack's `BucketPolicyExample` output rather than hand-editing, so the principal
+and prefix match what was deployed.
 
 ---
 
@@ -144,6 +156,8 @@ the Bedrock S3 delivery path, not stored in the row body).
 | `requestid` | string | |
 | `operation` | string | e.g. `InvokeModel` |
 | `modelid` | string | e.g. `amazon.nova-micro-v1:0` |
+| `errorcode` | string | Error code on failed invocations (empty on success) |
+| `inferenceregion` | string | Region the model ran in (for cross-region profiles) |
 | `requestmetadata` | map<string,string> | |
 | `collection_time` | string | When the row was collected |
 | `input` | struct | `inputbodyjson`, `inputcontenttype`, `inputtokencount` |
@@ -188,8 +202,8 @@ Token usage per account and model:
 SELECT
   account_id,
   modelid,
-  sum(CAST(json_extract_scalar(output.outputbodyjson, '$.usage.inputTokens')  AS INTEGER)) AS input_tokens,
-  sum(CAST(json_extract_scalar(output.outputbodyjson, '$.usage.outputTokens') AS INTEGER)) AS output_tokens
+  sum(input.inputtokencount)  AS input_tokens,
+  sum(output.outputtokencount) AS output_tokens
 FROM optimization_data.bedrock_logs
 GROUP BY account_id, modelid
 ORDER BY output_tokens DESC;
@@ -230,4 +244,17 @@ LIMIT 50;
   queryable without any stack change or crawler run.
 - **Re-runs are safe.** The destination bucket is the import checkpoint, so each
   run only copies objects it has not already imported; transient failures
-  self-heal and older gaps backfill on the next run.
+  self-heal on the next run.
+- **Rolling 30-day window.** Each scheduled run reconciles only the last 30 days,
+  so listing, memory, and runtime stay bounded as history grows. To import older
+  history (for example a first-time deployment), invoke the collection Lambda
+  manually with a wider window:
+
+  ```bash
+  aws lambda invoke --function-name CID-DC-bedrock-Lambda \
+    --payload '{"days": 365}' --cli-binary-format raw-in-base64-out \
+    /dev/stdout
+  ```
+- **Failures are visible.** If any object fails to import, the Lambda raises after
+  the run (surfacing on the `Errors` metric) instead of returning success, so
+  gaps are not hidden.

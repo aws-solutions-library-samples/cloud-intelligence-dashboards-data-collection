@@ -1,6 +1,23 @@
 """
 Bedrock invocation end-to-end smoke test.
 
+NOTE: This is a standalone operational script, not a pytest test (despite the
+previous ``test_`` filename). It makes real Bedrock calls and drives live AWS
+resources, so it is not collected by the pytest suite and must be run by hand.
+
+Prerequisites:
+  * AWS credentials for the target account (``--profile`` / ``--region``).
+  * A Bedrock model or inference profile to invoke. Provide it directly with
+    ``--model-id`` (recommended), or let the script read it from a CloudFormation
+    stack output (``BedrockInferenceProfileArn``) via ``--stack-name``. The
+    ``--stack-name`` default (``bedrock-logging``) refers to an EXTERNAL stack
+    that is not part of this repository; pass ``--model-id`` if you do not have
+    that stack.
+  * For ``--collect``: the Bedrock data-collection module must already be
+    deployed (its stack is discovered via ``--collector-stack-name``), Bedrock
+    model-invocation logging must be enabled with S3 delivery, and the source
+    bucket policy must grant the collector read access.
+
 Generates real Amazon Bedrock model-invocation logs and (optionally) drives the
 full pull-based collection pipeline to prove it works against a deployed stack:
 
@@ -26,15 +43,15 @@ stack via ``--collector-stack-name`` (default
 ``CidDataCollectionStack-BedrockModule``*) or overridden individually.
 
 Usage:
-    # Just send 3 invocations (original behaviour)
-    python test/test_bedrock_invocation.py \
-        --profile awssteph+testing-RootAccountAdmin \
+    # Just send invocations
+    python scripts/bedrock_smoke_test.py \
+        --profile <aws-profile> \
         --region us-east-1 \
         --model-id amazon.nova-micro-v1:0
 
     # Full end-to-end: invoke, collect, and verify in Athena
-    python test/test_bedrock_invocation.py \
-        --profile awssteph+testing-RootAccountAdmin \
+    python scripts/bedrock_smoke_test.py \
+        --profile <aws-profile> \
         --region us-east-1 \
         --model-id amazon.nova-micro-v1:0 \
         --collect

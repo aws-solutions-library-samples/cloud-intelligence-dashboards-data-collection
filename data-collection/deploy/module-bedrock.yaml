@@ -42,9 +42,8 @@ Parameters:
     Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
   BedrockLogPrefix:
     Type: String
-    Description: "S3 prefix under which Bedrock writes model-invocation logs in each source bucket (include trailing slash). Bedrock's default S3 delivery uses 'model-invocation-logs/'."
-    Default: "model-invocation-logs/"
-    AllowedPattern: ^.+\/$
+    Description: "Optional S3 prefix under which Bedrock writes model-invocation logs in each source bucket. Leave empty (the default) when Bedrock delivers to the bucket root, which is Bedrock's default (keyPrefix: ''). If you set a non-empty keyPrefix in your Bedrock logging configuration, enter the same value here; a trailing slash is added automatically if missing."
+    Default: ""
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
@@ -196,15 +195,33 @@ Resources:
           from datetime import datetime, timezone
           import boto3
 
+          from datetime import timedelta
+
           s3 = boto3.client('s3')
           glue = boto3.client('glue')
 
           DEST_BUCKET = os.environ['DEST_BUCKET']
           SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
-          SOURCE_PREFIX = os.environ['SOURCE_PREFIX']
+          # Normalise the configured prefix: empty means Bedrock delivers to the
+          # bucket root (its default keyPrefix: ''). A non-empty prefix gets a
+          # single trailing slash. We never append 'AWSLogs/' to it - Bedrock's
+          # own layout already starts with AWSLogs/ right under the prefix, and
+          # the key filter below keys off '/BedrockModelInvocationLogs/'.
+          def _normalise_prefix(p):
+              p = (p or '').strip()
+              if p and not p.endswith('/'):
+                  p = p + '/'
+              return p
+
+          SOURCE_PREFIX = _normalise_prefix(os.environ.get('SOURCE_PREFIX', ''))
           DEST_PREFIX = 'bedrock/bedrock_logs'
           GLUE_DATABASE = os.environ['GLUE_DATABASE']
           GLUE_TABLE = os.environ['GLUE_TABLE']
+
+          # Default reconcile window. Each run only lists and reconciles the last
+          # DEFAULT_WINDOW_DAYS days so the work stays bounded as history grows.
+          # Override per invocation with {"days": N} in the event (manual backfill).
+          DEFAULT_WINDOW_DAYS = 30
 
           # Output record schema (flattened to match the Glue table). Nested
           # input/output are kept as structs so the invocations view can extract
@@ -224,6 +241,11 @@ Resources:
                   'requestid': raw.get('requestId'),
                   'operation': raw.get('operation'),
                   'modelid': raw.get('modelId'),
+                  # errorCode is present on failed invocations (empty/absent on
+                  # success); inferenceRegion records where the model actually ran,
+                  # which differs from the request region for cross-region profiles.
+                  'errorcode': raw.get('errorCode'),
+                  'inferenceregion': raw.get('inferenceRegion'),
                   'requestmetadata': raw.get('requestMetadata') or {},
                   'collection_time': collection_time,
                   'input': {
@@ -275,34 +297,78 @@ Resources:
               return (f'{DEST_PREFIX}/account_id={account_id}/region={region}/'
                       f'year={year}/month={month}/day={day}/{out_name}')
 
-          def list_imported_dest_keys():
-              """Set of destination keys already present, used as the import
-              checkpoint so we only pull source files that are missing."""
+          def window_day_tuples(days):
+              """(year, month, day) string tuples for the last `days` UTC days,
+              most recent first. Used to bound both listing and reconciliation."""
+              today = datetime.now(timezone.utc).date()
+              out = []
+              for i in range(days):
+                  d = today - timedelta(days=i)
+                  out.append((f'{d.year:04d}', f'{d.month:02d}', f'{d.day:02d}'))
+              return out
+
+          def list_imported_dest_keys(day_tuples):
+              """Set of destination keys already present WITHIN the window, used as
+              the import checkpoint so we only pull source files that are missing.
+              Scoped to the window so memory does not grow with total history."""
               imported = set()
               paginator = s3.get_paginator('list_objects_v2')
+              # Partition layout is account_id=.../region=.../year=.../month=.../day=...
+              # so we cannot prefix-filter by day cheaply; instead keep only keys
+              # whose year=/month=/day= segments fall inside the window.
+              want = set(day_tuples)
               for page in paginator.paginate(Bucket=DEST_BUCKET, Prefix=f'{DEST_PREFIX}/'):
                   for obj in page.get('Contents', []):
-                      imported.add(obj['Key'])
+                      k = obj['Key']
+                      ymd = _dest_key_ymd(k)
+                      if ymd is not None and ymd in want:
+                          imported.add(k)
               return imported
 
-          def register_partition(account_id, region, year, month, day, sd_template):
-              """Register one Hive partition in Glue (idempotent). The storage
-              descriptor is cloned from the table and pointed at the partition."""
-              location = (f's3://{DEST_BUCKET}/{DEST_PREFIX}/account_id={account_id}/'
-                          f'region={region}/year={year}/month={month}/day={day}/')
-              sd = dict(sd_template)
-              sd['Location'] = location
-              try:
-                  glue.create_partition(
-                      DatabaseName=GLUE_DATABASE,
-                      TableName=GLUE_TABLE,
-                      PartitionInput={
+          def _dest_key_ymd(key):
+              """Extract (year, month, day) from a Hive-partitioned destination key."""
+              y = m = d = None
+              for seg in key.split('/'):
+                  if seg.startswith('year='):
+                      y = seg[5:]
+                  elif seg.startswith('month='):
+                      m = seg[6:]
+                  elif seg.startswith('day='):
+                      d = seg[4:]
+              if y and m and d:
+                  return (y, m, d)
+              return None
+
+          def batch_register_partitions(partition_keys, sd_template):
+              """Register every (account_id, region, year, month, day) partition we
+              processed this run, in batches of 100 (Glue's BatchCreatePartition
+              limit), ignoring AlreadyExists. Registering EVERY day processed - not
+              only days with a newly written file - means a day cannot stay missing
+              from Athena because its file happened to be imported on an earlier run
+              that failed between the PUT and the registration."""
+              if sd_template is None or not partition_keys:
+                  return
+              items = sorted(partition_keys)
+              for i in range(0, len(items), 100):
+                  batch = items[i:i + 100]
+                  entries = []
+                  for (account_id, region, year, month, day) in batch:
+                      location = (f's3://{DEST_BUCKET}/{DEST_PREFIX}/account_id={account_id}/'
+                                  f'region={region}/year={year}/month={month}/day={day}/')
+                      sd = dict(sd_template)
+                      sd['Location'] = location
+                      entries.append({
                           'Values': [account_id, region, year, month, day],
                           'StorageDescriptor': sd,
-                      },
-                  )
-              except glue.exceptions.AlreadyExistsException:
-                  pass
+                      })
+                  try:
+                      glue.batch_create_partition(
+                          DatabaseName=GLUE_DATABASE,
+                          TableName=GLUE_TABLE,
+                          PartitionInputList=entries,
+                      )
+                  except glue.exceptions.AlreadyExistsException:
+                      pass
 
           def transform_gz(body_bytes, collection_time):
               """Gunzip a Bedrock log object and return (jsonl_text, row_count).
@@ -331,11 +397,25 @@ Resources:
               return ('\n'.join(rows), len(rows))
 
           def lambda_handler(event, context):  #pylint: disable=W0613
-              # Full source-vs-destination reconcile: every run compares what each
-              # source bucket holds against what has already been imported and pulls
-              # only the difference. The destination itself is the checkpoint, so
-              # transient failures self-heal and older gaps backfill on later runs.
+              # Rolling-window reconcile: each run compares what each source bucket
+              # holds against what has already been imported, but only for the last
+              # N days, and pulls the difference. The destination is the checkpoint,
+              # so transient failures self-heal on later runs. Bounding the window
+              # keeps listing, memory, and runtime flat as history grows.
+              #
+              # Pass {"days": N} in the event to widen the window for a manual
+              # backfill, for example {"days": 365} on first deployment.
+              event = event or {}
+              try:
+                  days = int(event.get('days', DEFAULT_WINDOW_DAYS))
+              except (TypeError, ValueError):
+                  days = DEFAULT_WINDOW_DAYS
+              days = max(1, days)
+
               collection_time = datetime.now(timezone.utc).isoformat()
+              window = window_day_tuples(days)
+              window_set = set(window)
+
               try:
                   sd_template = glue.get_table(
                       DatabaseName=GLUE_DATABASE, Name=GLUE_TABLE
@@ -344,9 +424,12 @@ Resources:
                   sd_template = None
                   print(f'Warning: could not read Glue table for partition registration: {e}')
 
-              imported = list_imported_dest_keys()
+              imported = list_imported_dest_keys(window)
               total_copied = 0
               total_rows = 0
+              # EVERY (account,region,day) we see in-window, whether or not a new
+              # file was written, so BatchCreatePartition can register them all and
+              # no day can stay permanently missing from Athena.
               partitions_seen = set()
               errors = []
 
@@ -367,6 +450,10 @@ Resources:
                               if not parsed:
                                   continue
                               account_id, region, year, month, day, filename = parsed
+                              if (year, month, day) not in window_set:
+                                  continue  # outside the reconcile window
+                              pkey = (account_id, region, year, month, day)
+                              partitions_seen.add(pkey)
                               dest_key = dest_key_for(account_id, region, year, month, day, filename)
                               if dest_key in imported:
                                   continue  # already imported - checkpoint hit
@@ -383,23 +470,37 @@ Resources:
                                       imported.add(dest_key)
                                       total_copied += 1
                                       total_rows += rows
-                                      pkey = (account_id, region, year, month, day)
-                                      if sd_template is not None and pkey not in partitions_seen:
-                                          register_partition(account_id, region, year, month, day, sd_template)
-                                          partitions_seen.add(pkey)
                               except Exception as e:  #pylint: disable=broad-exception-caught
                                   errors.append(f'{source_bucket}/{key}: {str(e)}')
                   except Exception as e:  #pylint: disable=broad-exception-caught
                       errors.append(f'Error listing {source_bucket}: {str(e)}')
 
+              # Register every day we processed (idempotent), not only days that got
+              # a new file this run - this closes the "partition registered only on
+              # first write" gap.
+              try:
+                  batch_register_partitions(partitions_seen, sd_template)
+              except Exception as e:  #pylint: disable=broad-exception-caught
+                  errors.append(f'Error registering partitions: {str(e)}')
+
               result = {
-                  'statusCode': 200,
+                  'window_days': days,
                   'total_files_copied': total_copied,
                   'total_rows_written': total_rows,
                   'partitions_registered': len(partitions_seen),
+                  'error_count': len(errors),
                   'errors': errors[:20],
               }
               print(json.dumps(result))
+
+              # Surface failures: a non-empty error list raises so the invocation is
+              # recorded as failed (Errors metric / dead-letter), instead of a silent
+              # 200 that hides gaps. Partitions and copied files are already durable.
+              if errors:
+                  raise RuntimeError(
+                      f'{len(errors)} error(s) during Bedrock collection; '
+                      f'first: {errors[0]}'
+                  )
               return result
       Handler: 'index.lambda_handler'
       MemorySize: 512
@@ -495,6 +596,10 @@ Resources:
             - Name: operation
               Type: string
             - Name: modelid
+              Type: string
+            - Name: errorcode
+              Type: string
+            - Name: inferenceregion
               Type: string
             - Name: requestmetadata
               Type: map<string,string>
