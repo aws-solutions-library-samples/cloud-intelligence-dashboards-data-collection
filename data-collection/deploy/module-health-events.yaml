@@ -247,10 +247,12 @@ Resources:
 
 
           def search(function, args={}, expression='@', max_list_size=0):
+              """Yields results. Return value (via StopIteration.value) is True if truncated by max_list_size."""
               event_id = args.get("eventArn", "").rsplit("/", 1)[-1]
               logger.debug(f"Search entered for '{function.__name__}' for event {event_id}. (max setting {'-no limit-' if max_list_size == 0 else max_list_size})")
               compiled = jmespath.compile(expression)
               result_c = 0
+              truncated = False
               while True:
                   page = function(**args)
                   results = compiled.search(dict(page))
@@ -265,9 +267,35 @@ Resources:
                       args['nextToken'] = page['nextToken']
                   else:
                       if ('nextToken' in page and page['nextToken']):
+                          truncated = True
                           logger.warn(f"Truncating '{function.__name__}' for event {event_id} because {max_list_size} limit reached.")
                       logger.debug(f"Total {function.__name__} results {result_c} for event {event_id}.")
                       break
+              return truncated
+
+          def search_with_status(*args, **kwargs):
+              """Like list(search(...)) but also returns search()'s truncated flag."""
+              gen = search(*args, **kwargs)
+              items = []
+              while True:
+                  try:
+                      items.append(next(gen))
+                  except StopIteration as stop:
+                      return items, stop.value
+
+          def truncation_entity(event_arn, account_id, ingestion_time):
+              """Pseudo-entity, shaped like describe_affected_entities_for_organization output, marking a truncated list."""
+              return {
+                  'entityArn': '',
+                  'eventArn': event_arn,
+                  'entityValue': 'WARNING: Entity list truncated. See Health Console for full list',
+                  'entityUrl': '',
+                  'awsAccountId': account_id,
+                  'lastUpdatedTime': ingestion_time,
+                  'statusCode': 'UNKNOWN',
+                  'tags': {},
+                  'entityMetadata': {},
+              }
 
           def pull_event_details(event, health_client):
               logger.debug(f"Processing event: {event['arn']}")
@@ -281,7 +309,7 @@ Resources:
                       function=health_client.describe_affected_accounts_for_organization,
                       args={'eventArn': event_arn, 'maxResults': 100},
                       expression='affectedAccounts',
-                      max_list_size=MAX_LIST_SIZE
+                      max_list_size=0     #0 = no limit, only limit on affected entities
                   ))
               logger.debug(f"Accounts found: {len(accounts)} for {event_id}")
 
@@ -301,11 +329,11 @@ Resources:
                           organizationEventDetailFilters=filters
                       ),
                       expression='successfulSet',
-                      max_list_size=MAX_LIST_SIZE
+                      max_list_size=0     #0 = no limit, only limit on affected entities
                   ))
                   logger.debug(f"Details found: {len(details)} for {event_id}")
 
-                  affected_entities += list(search(
+                  chunk_entities, truncated = search_with_status(
                       function=health_client.describe_affected_entities_for_organization,
                       args=dict(
                           organizationEntityFilters=filters,
@@ -313,7 +341,14 @@ Resources:
                       ),
                       expression='entities',
                       max_list_size=MAX_LIST_SIZE
-                  ))
+                  )
+                  if truncated:
+                      # Can't tell which accounts in the chunk were cut off, so flag all of them
+                      chunk_entities += [
+                          truncation_entity(event_arn, account_id, event['ingestion_time'])
+                          for account_id in account_chunk
+                      ]
+                  affected_entities += chunk_entities
                   logger.debug(f"Entities found: {len(affected_entities)} for {event_id}")
 
               # merge with details and affected entities
@@ -416,7 +451,7 @@ Resources:
                   try:
                       with open(TMP_FILE, "w", encoding='utf-8') as f:
                           f.write('eventArn,eventScopeCode\n')
-                          for _, h_event in enumerate(search(health_client.describe_events_for_organization, args, expression='events', max_list_size=MAX_LIST_SIZE)):
+                          for _, h_event in enumerate(search(health_client.describe_events_for_organization, args, expression='events', max_list_size=0)):
                               f.write(f'{h_event["arn"]},{h_event["eventScopeCode"]}\n')
                               count += 1
                       if count > 0:
