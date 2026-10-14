@@ -58,6 +58,7 @@ Metadata:
           default: 'Amazon Bedrock Module Configuration'
         Parameters:
           - BedrockSourceBuckets
+          - BedrockLogPrefix
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -135,6 +136,8 @@ Metadata:
         default: 'Include Amazon Bedrock Data Collection Module'
       BedrockSourceBuckets:
         default: 'Bedrock Source Bucket Names (comma-separated)'
+      BedrockLogPrefix:
+        default: 'Bedrock Log Prefix (optional; leave empty for root delivery)'
 
 Mappings:
   RegionMap:
@@ -337,6 +340,10 @@ Parameters:
   BedrockSourceBuckets:
     Type: String
     Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Required if IncludeBedrockModule is yes. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
+    Default: ""
+  BedrockLogPrefix:
+    Type: String
+    Description: "Optional S3 prefix under which Bedrock writes model-invocation logs. Leave empty (the default) when Bedrock delivers to the bucket root (its default). If you set a non-empty keyPrefix in your Bedrock logging configuration, enter the same value here."
     Default: ""
   IncludeIdentityCenterModule:
     Type: String
@@ -1668,6 +1675,7 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         BedrockSourceBuckets: !Ref BedrockSourceBuckets
+        BedrockLogPrefix: !Ref BedrockLogPrefix
 
   IdentityCenterModule:
     Type: AWS::CloudFormation::Stack
