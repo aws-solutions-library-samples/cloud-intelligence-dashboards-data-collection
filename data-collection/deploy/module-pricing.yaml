@@ -35,7 +35,7 @@ Parameters:
     Description: Arn of lambda for Analytics
   AwsServices:
     Type: CommaDelimitedList
-    Default: AmazonRDS, AmazonEC2, AmazonElastiCache, AmazonES, AWSComputeSavingsPlan, AWSDatabaseSavingsPlan, AmazonRedshift, AmazonEKS, ElasticMapReduce, AmazonECS, AmazonMSK, AmazonDocDB, AmazonMemoryDB, AmazonNeptune, AmazonSageMaker, AWSMachineLearningSavingsPlans, AWSLambda, RegionalServices, RegionNames, AmazonWorkSpaces
+    Default: AmazonRDS, AmazonEC2, AmazonElastiCache, AmazonES, AWSComputeSavingsPlan, AWSDatabaseSavingsPlan, AmazonRedshift, AmazonEKS, ElasticMapReduce, AmazonECS, AmazonMSK, AmazonDocDB, AmazonMemoryDB, AmazonNeptune, AmazonSageMaker, AWSLambda, RegionalServices, RegionNames, AmazonWorkSpaces
     Description: Services for pulling price data
   CodeBucket:
     Type: String
@@ -753,37 +753,6 @@ Mappings:
       - { Type: string, Name: "Workforce Type" }
       jsonPaths: ["SKU","OfferTermCode","RateCode","TermType","PriceDescription","EffectiveDate","StartingRange","EndingRange","Unit","PricePerUnit","Currency","RelatedTo","Product Family","serviceCode","Location","Location Type","Instance Type","Current Generation","Clock Speed","Memory","Storage","Network Performance","Processor Architecture","Volume Type","Max throughput/volume","Group","Group Description","usageType","operation","Automatic Label","Component","Compute Type","DataGenerationTechniques","DataStore StorageType","GPU","GPU Memory","Instance Name","Integrating API","Integrating Feature","Integrating Service","Integration Type","Labeling Task Type","Memory(GB)","Model Description","ModelName","PartnerAppResourceName","PartnerAppResourceService","PartnerAppResourceType","PartnerAppTier","PartnerAppType","PEFTType","Physical CPU","Physical GPU","PlatoClassificationType","PlatoInstanceName","PlatoInstanceType","Region Code","ScepterUsageType","serviceName","Storage Type","Technique","ThroughputCapacity","TokenType","Tracking Server Size","Unified Studio Compute","V CPU","Workforce Type"]
 
-    AWSMachineLearningSavingsPlans:
-      path: machinelearningsavingsplan
-      partition:
-      - { Name: region, Type: string }
-      fields:
-      - { Type: string, Name: "SKU" }
-      - { Type: string, Name: "RateCode" }
-      - { Type: string, Name: "Unit" }
-      - { Type: string, Name: "EffectiveDate" }
-      - { Type: string, Name: "DiscountedRate" }
-      - { Type: string, Name: "Currency" }
-      - { Type: string, Name: "DiscountedSKU" }
-      - { Type: string, Name: "DiscountedServiceCode" }
-      - { Type: string, Name: "DiscountedUsageType" }
-      - { Type: string, Name: "DiscountedOperation" }
-      - { Type: string, Name: "PurchaseOption" }
-      - { Type: string, Name: "LeaseContractLength" }
-      - { Type: string, Name: "LeaseContractLengthUnit" }
-      - { Type: string, Name: "ServiceCode" }
-      - { Type: string, Name: "UsageType" }
-      - { Type: string, Name: "Operation" }
-      - { Type: string, Name: "Description" }
-      - { Type: string, Name: "Instance Family" }
-      - { Type: string, Name: "Location" }
-      - { Type: string, Name: "Location Type" }
-      - { Type: string, Name: "Granularity" }
-      - { Type: string, Name: "Product Family" }
-      - { Type: string, Name: "DiscountedRegionCode" }
-      - { Type: string, Name: "DiscountedInstanceType" }
-      jsonPaths: ["SKU","RateCode","Unit","EffectiveDate","DiscountedRate","Currency","DiscountedSKU","DiscountedServiceCode","DiscountedUsageType","DiscountedOperation","PurchaseOption","LeaseContractLength","LeaseContractLengthUnit","ServiceCode","UsageType","Operation","Description","Instance Family","Location","Location Type","Granularity","Product Family","DiscountedRegionCode","DiscountedInstanceType"]
-
     AWSLambda:
       path: lambda
       partition:
@@ -963,6 +932,13 @@ Resources:
           REGIONS = [r.strip() for r in os.environ["REGIONS"].split(',') if r]
           TMP_FILE = "/tmp/data.json"
 
+          # Savings Plan pseudo-services resolve their index off a backing offer.
+          # Add a new SP service as a one-line entry here, not another branch.
+          SAVINGS_PLAN_BACKING = {
+              'AWSComputeSavingsPlan':  'AmazonEC2',
+              'AWSDatabaseSavingsPlan': 'AmazonRDS',
+          }
+
           def get_json(url):
               return json.loads(urllib3.PoolManager().request('GET', url).data)
 
@@ -1023,12 +999,8 @@ Resources:
               errors = ''
               logger.info(f'Getting regional pricing for {service}')
               try:
-                  if service == 'AWSComputeSavingsPlan':
-                      url = offers['AmazonEC2']['currentSavingsPlanIndexUrl']
-                  elif service == 'AWSDatabaseSavingsPlan':
-                      url = offers['AmazonRDS']['currentSavingsPlanIndexUrl']
-                  elif service == 'AWSMachineLearningSavingsPlans':
-                      url = offers['AmazonSageMaker']['currentSavingsPlanIndexUrl']
+                  if service in SAVINGS_PLAN_BACKING:
+                      url = offers[SAVINGS_PLAN_BACKING[service]]['currentSavingsPlanIndexUrl']
                   else:
                       url = offers[service]['currentRegionIndexUrl']
                   regions = get_json(BASE_URL + url)["regions"]
