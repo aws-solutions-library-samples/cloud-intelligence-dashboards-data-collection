@@ -5,7 +5,8 @@ Parameters:
 
   DataCollectionAccountId:
     Type: String
-    Default: ''
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: 'Must be a 12-digit AWS account ID'
     Description: 'AWS account ID to grant cross-account S3 access'
 
 
@@ -13,9 +14,13 @@ Resources:
   # --- TARGET PATH RESOURCES ---
   TargetDataBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_21
+            comment: "Data is regenerated daily for the previous 2 months; versioning would only retain deleted copies"
     Properties:
       BucketName: !Sub 'cid-${AWS::AccountId}-data-exports'
-      AccessControl: BucketOwnerFullControl
       OwnershipControls:
         Rules:
           - ObjectOwnership: BucketOwnerEnforced      

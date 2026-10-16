@@ -15,7 +15,8 @@ Parameters:
   
   TargetS3Bucket:
     Type: String
-    Default: ''
+    AllowedPattern: '^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$'
+    ConstraintDescription: 'Must be a valid S3 bucket name'
     Description: 'Target S3 bucket for extracted data'
   
   PayerAccountId:
@@ -367,6 +368,11 @@ Resources:
   # SNS Topic for alarm notifications
   AlarmSnsTopic:
     Type: AWS::SNS::Topic
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_26
+            comment: "CloudWatch alarms cannot publish to a topic encrypted with the AWS managed SNS key; topic carries only alarm state notifications"
     Properties:
       TopicName: !Sub '${AWS::StackName}-lambda-alarms'
 
@@ -402,9 +408,12 @@ Resources:
   # Dead Letter Queue for async/EventBridge invocation failures
   LambdaDLQ:
     Type: AWS::SQS::Queue
+    # Skipping the Checkov check "AWS SQS Queue not configured with server side encryption" as this is reporting a false positive. More on the issue to be fixed in here: https://github.com/bridgecrewio/checkov/issues/5869
+    # checkov:skip=CKV_AWS_27:Ensure all data stored in the SQS queue is encrypted
     Properties:
       QueueName: !Sub '${AWS::StackName}-dlq'
       MessageRetentionPeriod: 1209600  # 14 days
+      SqsManagedSseEnabled: true
 
   LambdaDLQPolicy:
     Type: AWS::SQS::QueuePolicy
