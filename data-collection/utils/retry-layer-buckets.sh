@@ -1,4 +1,11 @@
 #!/bin/bash
+# shellcheck disable=SC2086,SC2016
+# Word-splitting is intentional throughout this script: $CALL_AS expands to
+# zero or two CLI arguments (empty by default), and $pending/$still_pending
+# expand to a space-separated list of region tokens that the AWS CLI expects
+# as multiple --regions/--accounts arguments, not one quoted string. The
+# --query JMESPath expressions are single-quoted on purpose so the backticks
+# in them are treated literally instead of as command substitution.
 # retry-layer-buckets.sh — (re)create LayerBuckets stack instances, retrying while S3
 # releases the bucket names (after deleting misplaced buckets with the same names).
 #
@@ -81,7 +88,7 @@ while [[ -n "$pending" && $round -lt $MAX_ROUNDS ]]; do
     wait_for_ops
   fi
 
-  pending=$(echo $still_pending)
+  pending=$still_pending
   [[ -n "$pending" ]] && { echo "  sleeping ${SLEEP}s before next round..."; sleep $SLEEP; }
 done
 

@@ -172,6 +172,18 @@ us before — e.g. `event_metadata` in the Health module). Rules:
   pre-created table with the crawler config above. Note `map<string,string>`
   requires flat string→string data *and* a pre-created table — crawlers infer a
   JSON object as `struct`, so they will overwrite a `map` column otherwise.
+- **Crawler-free alternative: partition projection.** For date-partitioned data
+  written in Hive layout (`year=YYYY/month=MM/day=DD/`), pre-create the table
+  with `projection.enabled`, integer projections (`digits: '2'` for month/day),
+  and a `storage.location.template`; pass `Crawlers: '[]'` to the Step Function.
+  No crawler means no drift and no stale partitions. The date is the only
+  partition: account and region, when a module writes per-account or
+  per-region files, go in the file name —
+  `<payer_id>[_<account_id>][_<region>]_YYYY_MM_DD.json`, built by
+  `DcUtils.date_partitioned_key` — because CID queries filter on date. Columns follow the API
+  response shape, and the Lambda conforms every record to the table before
+  writing (`common.record_schema.RecordSchema`). Reference:
+  `data-collection/samples/hello-dc/module-hello-dc.yaml`.
 
 ---
 
@@ -218,6 +230,17 @@ Standard inline suppressions used in Lambda code:
 |-------------|-------|--------|
 | `#pylint: disable=W0613` | `lambda_handler(event, context)` | `context` is unused but required by Lambda |
 | `#pylint: disable=broad-exception-caught` | `except Exception as exc:` | Intentional — prevents Step Function failures |
+
+### 2.5 Common Lambda Layer
+
+- Source of truth: `data-collection/deploy/source/common/` (versioned by
+  `__version__` in `__init__.py`). `local-test/lambdas/common` is a symlink to it.
+- Build with `data-collection/utils/layer-utils/common-layer-build.sh` →
+  `data-collection/deploy/layers/common-layer.zip` (gitignored; uploaded by `upload.sh`).
+- Modules subclass `common.module.DataCollectionModule`, declare `MODULE` and
+  `COLLECTORS`, and override hooks rather than copying superclass code:
+  `session_for` (credentials), `output_key` (S3 layout), `conform` (record shape).
+- Starting point for a new module: `data-collection/samples/hello-dc/`.
 
 ---
 
