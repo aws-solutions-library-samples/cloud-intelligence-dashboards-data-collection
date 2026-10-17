@@ -335,7 +335,7 @@ Parameters:
     Default: 'no'
   IncludeRDSModule:
     Type: String
-    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts. Requires the Inventory, Reference, and Org Data modules - otherwise the RDS module is skipped.
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts. Requires the Inventory and Reference modules (enforced at deploy time).
     AllowedValues: ['yes', 'no']
     Default: 'no'
 Conditions:
@@ -396,11 +396,7 @@ Conditions:
   ProdCFNTemplateUsed: !Equals [ !Ref CFNSourceBucket,  'aws-managed-cost-intelligence-dashboards' ]
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
   DeployIncludeReferenceModule: !Equals [ !Ref IncludeReferenceModule, "yes"]
-  DeployRDSModule: !And
-    - !Condition DeployInventoryCollectorModule
-    - !Condition DeployIncludeReferenceModule
-    - !Condition DeployOrgDataModule
-    - !Equals [ !Ref IncludeRDSModule, "yes"]
+  DeployRDSModule: !Equals [ !Ref IncludeRDSModule, "yes"]
 
 Rules:
   # Guard: an enabled Kiro module must be given at least one source bucket.
@@ -413,6 +409,14 @@ Rules:
     Assertions:
       - Assert: !Not [ !Equals [ !Ref KiroSourceBuckets, "" ] ]
         AssertDescription: "IncludeKiroUserActivityModule is 'yes' but KiroSourceBuckets is empty. Provide at least one source bucket name (comma-separated)."
+
+  RDSModuleRequiresInventoryAndReference:
+    RuleCondition: !Equals [ !Ref IncludeRDSModule, "yes" ]
+    Assertions:
+      - Assert: !Equals [ !Ref IncludeInventoryCollectorModule, "yes" ]
+        AssertDescription: "IncludeRDSModule=yes requires IncludeInventoryCollectorModule=yes (the RDS dashboard reads inventory tables)."
+      - Assert: !Equals [ !Ref IncludeReferenceModule, "yes" ]
+        AssertDescription: "IncludeRDSModule=yes requires IncludeReferenceModule=yes (the RDS dashboard reads engine-version/EOS reference tables)."        
 
 Resources:
   S3Bucket:
