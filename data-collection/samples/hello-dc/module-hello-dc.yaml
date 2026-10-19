@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hello DC - sample CID data collection module built on the common Lambda layer
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to hold the module table
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that holds the collected data, e.g. cid-data-<data collection account id>
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the DestinationBucket
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing. Also the S3 data prefix and module name.
+    Default: hello-dc
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all resources created. Must match the data collection stack.
+    Default: CID-DC-
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  RegionsInScope:
+    Type: String
+    Description: Comma delimited list of regions to collect from. Leave empty for the stack region.
+    Default: ""
+  CodeBucket:
+    Type: String
+    Description: Source code bucket holding the data collection templates (the bucket used by data-collection/utils/upload.sh)
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+    Default: cfn/data-collection/v3.14.9/source/step-functions/main-state-machine.json
+  CommonLayerArn:
+    Type: String
+    Description: ARN of an existing CID common Lambda layer. Leave empty to create one from CommonLayerKey.
+    Default: ""
+  CommonLayerKey:
+    Type: String
+    Description: S3 key in CodeBucket of common-layer.zip, built by data-collection/utils/layer-utils/common-layer-build.sh
+    Default: cfn/data-collection/v3.14.9/layers/common-layer.zip
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution (<ResourcePrefix>StepFunctionExecutionRole)
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution (<ResourcePrefix>SchedulerExecutionRole)
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda (<ResourcePrefix>account-collector-Lambda)
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics (<ResourcePrefix>analytics-Lambda)
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for data buckets and/or Glue Catalog. Comma separated list, no spaces. Keep empty if data Buckets and Glue Catalog are not Encrypted with KMS. You can also set it to '*' to grant decrypt permission for all the keys."
+    Default: ""
+
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  NeedCommonLayer: !Equals [ !Ref CommonLayerArn, "" ]
+  RegionsInScopeIsEmpty: !Equals [ !Ref RegionsInScope, "" ]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  CommonLayer:
+    Type: AWS::Lambda::LayerVersion
+    Condition: NeedCommonLayer
+    Properties:
+      LayerName: !Sub "${ResourcePrefix}${CFDataName}-Common-Layer"
+      Description: "CID data collection common classes (data-collection/deploy/source/common)"
+      Content:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CommonLayerKey
+      CompatibleRuntimes:
+        - python3.13
+      CompatibleArchitectures:
+        - x86_64
+
+  # Collects in the data collection account with this role only, so no
+  # policy or trust change is needed in management or linked accounts.
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "RDSDBMajorEngineVersions" # same action module-reference.yaml uses
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "rds:DescribeDBMajorEngineVersions"
+                Resource: "*" ## Action does not support resource-level permissions
+        - PolicyName: "S3Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/${CFDataName}/*"
+                  - !Sub "${DestinationBucketARN}/logs/modules/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
+          - id: W12
+            reason: "rds:DescribeDBMajorEngineVersions does not support resource-level permissions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Code:
+        ZipFile: |
+          """ Hello DC: a sample CID data collection module built on the common layer.
+
+          Collects the Amazon RDS major engine version support lifecycle in each
+          region in scope, using only this Lambda's role in the data collection
+          account, and writes one file per payer per day:
+
+            <prefix>/<prefix>-sample-data/year=YYYY/month=MM/day=DD/<payer_id>_YYYY_MM_DD.json
+          """
+          import boto3
+
+          from common.context import Collector
+          from common.module import DataCollectionModule
+          from common.record_schema import RecordSchema
+          from common.utils import DcUtils
+
+          # Output columns in table order. Must match the SampleTable columns in this
+          # template. Types follow the API shape: compound values stay struct/array.
+          SAMPLE_SCHEMA = RecordSchema({
+              "Engine": "string",
+              "MajorEngineVersion": "string",
+              "SupportedEngineLifecycles": "array<struct<LifecycleSupportName:string,LifecycleSupportStartDate:timestamp,LifecycleSupportEndDate:timestamp>>",
+              "Region": "string",
+              "payer_id": "string",
+              "collection_time": "timestamp",
+          })
+
+
+          def collect_sample(ctx):
+              """Return every region's major engine versions, one record each."""
+              records = []
+              for region in ctx.exec_ctx.regions:
+                  # sweep() keeps one failing region from discarding the others
+                  records.extend(ctx.sweep(f"rds:{region}", lambda region=region: list(engine_versions(ctx, region))))
+              return records
+
+
+          def engine_versions(ctx, region):
+              """Yield each major engine version in one region, tagged with the region."""
+              paginator = ctx.client("rds", region=region).get_paginator("describe_db_major_engine_versions")
+              for page in paginator.paginate():
+                  for item in page["DBMajorEngineVersions"]:
+                      yield {**item, "Region": region}
+
+
+          class HelloDcModule(DataCollectionModule):
+              """Sample module with one cross-region collector."""
+
+              MODULE = "hello-dc"
+              COLLECTORS = (Collector("sample", collect_sample, scope=Collector.GLOBAL),)
+
+              def session_for(self, region):  # pylint: disable=unused-argument
+                  # This Lambda's own role in the data collection account; no AssumeRole
+                  return boto3.Session()
+
+              def output_key(self, name, region):
+                  # One cross-region file per payer, so neither account_id nor region
+                  # is needed in the file name (see DcUtils.date_partitioned_key)
+                  return DcUtils.date_partitioned_key(
+                      self.mod_ctx.prefix, name, self.exec_ctx.ingestion_time, self.exec_ctx.payer_id)
+
+              def conform(self, name, records):
+                  return SAMPLE_SCHEMA.conform_all(records)
+
+
+          def lambda_handler(event, context):
+              return HelloDcModule(event, context).run()
+      Handler: 'index.lambda_handler'
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt LambdaRole.Arn
+      Layers:
+        - !If [ NeedCommonLayer, !Ref CommonLayer, !Ref CommonLayerArn ]
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          REGIONS: !If [ RegionsInScopeIsEmpty, !Ref AWS::Region, !Join [ '', !Split [ ' ', !Ref RegionsInScope ] ] ]
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89 # Lambda functions should be deployed inside a VPC
+            reason: "No need for VPC in this case"
+          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  # Pre-created table with partition projection: Athena computes the
+  # year/month/day partitions from storage.location.template, so no crawler
+  # and no partition maintenance are needed.
+  SampleTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: hello_dc_sample_data
+        Description: RDS major engine version support lifecycle (Hello DC sample module)
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - { Name: year,  Type: string }
+          - { Name: month, Type: string }
+          - { Name: day,   Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: engine,                    Type: string }
+            - { Name: majorengineversion,        Type: string }
+            - { Name: supportedenginelifecycles, Type: "array<struct<lifecyclesupportname:string,lifecyclesupportstartdate:timestamp,lifecyclesupportenddate:timestamp>>" }
+            - { Name: region,                    Type: string }
+            - { Name: payer_id,                  Type: string }
+            - { Name: collection_time,           Type: timestamp }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sample-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              serialization.format: '1'
+        Parameters:
+          EXTERNAL: 'TRUE'
+          classification: json
+          compressionType: none
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2025,2099'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          storage.location.template: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-sample-data/year=${!year}/month=${!month}/day=${!day}/"
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: '[]' # partition projection, no crawler
+        CollectionType: "Payers"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
