@@ -109,7 +109,8 @@ aws stepfunctions start-execution \
 ```
 
 - `StepFunctionTemplate` and `CommonLayerKey` default to the `v3.14.9` paths that `upload.sh` writes. Override them if your version differs.
-- To share one layer across modules, pass its ARN in `CommonLayerArn`. The stack then skips creating its own.
+- To share one layer across modules, pass its ARN in `CommonLayerArn`. The stack then skips creating its own. When the data collection stack deploys a module that uses the layer, it creates `<ResourcePrefix>Common-Layer` and exports its ARN as `<data collection stack name>-CommonLayerArn`.
+- A module added to the main repo uses that shared layer instead of creating its own. See `.ai/specs/coding-standards.md` §2.5.
 
 ## Query
 

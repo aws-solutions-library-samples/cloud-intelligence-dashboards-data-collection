@@ -333,6 +333,7 @@ Resources:
               - "health:DescribeEventDetailsForOrganization"
               - "health:DescribeAffectedAccountsForOrganization"
               - "health:DescribeAffectedEntitiesForOrganization"
+              - "health:DescribeServiceLifecycle"
             Resource: "*"
       Roles:
         - Ref: LambdaRole
@@ -341,6 +342,10 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037 # cfn-lint's IAM action list predates health:DescribeServiceLifecycle
   LicenseManagerPolicy:
     Type: "AWS::IAM::Policy"
     Condition: EnableLicenseManagerModule

@@ -355,6 +355,8 @@ Conditions:
   DeployKiroUserActivityModule: !Equals [ !Ref IncludeKiroUserActivityModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
   DeployBoto3Layer: !Condition DeployHealthEventsModule
+  # Add each module that uses the common layer here (an !Or once there are two or more)
+  DeployCommonLayer: !Condition DeployHealthEventsModule
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -1104,6 +1106,24 @@ Resources:
       CompatibleArchitectures:
         - x86_64
 
+  CommonLayerVersion:
+    Type: AWS::Lambda::LayerVersion
+    Condition: DeployCommonLayer
+    Properties:
+      LayerName: !Sub "${ResourcePrefix}Common-Layer"
+      Description: "CID data collection common classes (data-collection/deploy/source/common)"
+      Content:
+        S3Bucket: !If [ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket]
+        S3Key: "cfn/data-collection/v3.14.10/layers/common-layer.zip"
+      CompatibleRuntimes:
+        - python3.10
+        - python3.11
+        - python3.12
+        - python3.13
+        - python3.14
+      CompatibleArchitectures:
+        - x86_64
+
   TrustedAdvisorModule:
     Type: AWS::CloudFormation::Stack
     Condition: DeployTAModule
@@ -1491,6 +1511,7 @@ Resources:
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         DetailStepFunctionTemplate: !FindInMap [StepFunctionCode, health-detail-state-machine, TemplatePath]
         Boto3LayerArn: !Ref Boto3LayerVersion
+        CommonLayerArn: !Ref CommonLayerVersion
 
   LicenseManagerModule:
     Type: AWS::CloudFormation::Stack
@@ -1752,3 +1773,9 @@ Outputs:
     Value: !Ref Boto3LayerVersion
     Export:
       Name: !Sub "${AWS::StackName}-Boto3LayerArn"
+  CommonLayerArn:
+    Condition: DeployCommonLayer
+    Description: "ARN of the CID common Lambda Layer"
+    Value: !Ref CommonLayerVersion
+    Export:
+      Name: !Sub "${AWS::StackName}-CommonLayerArn"
