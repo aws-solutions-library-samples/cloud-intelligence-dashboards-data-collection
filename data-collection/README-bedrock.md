@@ -245,15 +245,26 @@ LIMIT 50;
 - **Re-runs are safe.** The destination bucket is the import checkpoint, so each
   run only copies objects it has not already imported; transient failures
   self-heal on the next run.
-- **Rolling 30-day window.** Each scheduled run reconciles only the last 30 days,
-  so listing, memory, and runtime stay bounded as history grows. To import older
-  history (for example a first-time deployment), invoke the collection Lambda
-  manually with a wider window:
+- **Rolling 30-day window.** Each scheduled run reconciles only the last 30
+  days. Both the source and destination are listed folder-by-folder for the
+  window's day partitions only, so listing, memory, and run time scale with
+  (accounts x regions x window days) rather than with total history. To import
+  older history (for example a first-time deployment), invoke the collection
+  Lambda manually with a wider window.
+
+  Use `--invocation-type Event` so the call returns immediately instead of
+  waiting for the result. A long backfill can exceed the AWS CLI's 60-second
+  read timeout, and on timeout the CLI silently retries, starting a second
+  overlapping run. With `Event` the Lambda runs asynchronously and you check its
+  result in CloudWatch Logs:
 
   ```bash
   aws lambda invoke --function-name CID-DC-bedrock-Lambda \
+    --invocation-type Event \
     --payload '{"days": 365}' --cli-binary-format raw-in-base64-out \
     /dev/stdout
+  # then watch the result:
+  aws logs tail /aws/lambda/CID-DC-bedrock-Lambda --follow
   ```
 - **Failures are visible.** If any object fails to import, the Lambda raises after
   the run (surfacing on the `Errors` metric) instead of returning success, so

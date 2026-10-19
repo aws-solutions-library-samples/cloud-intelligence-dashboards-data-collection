@@ -204,9 +204,9 @@ Resources:
           SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
           # Normalise the configured prefix: empty means Bedrock delivers to the
           # bucket root (its default keyPrefix: ''). A non-empty prefix gets a
-          # single trailing slash. We never append 'AWSLogs/' to it - Bedrock's
-          # own layout already starts with AWSLogs/ right under the prefix, and
-          # the key filter below keys off '/BedrockModelInvocationLogs/'.
+          # single trailing slash. Bedrock's own layout places AWSLogs/ directly
+          # under this prefix, so the source walk lists '{prefix}AWSLogs/' and
+          # then descends by account and region.
           def _normalise_prefix(p):
               p = (p or '').strip()
               if p and not p.endswith('/'):
@@ -270,24 +270,6 @@ Resources:
                   return value
               return json.dumps(value)
 
-          def parse_source_key(key):
-              """From a raw Bedrock key return (account_id, region, year, month,
-              day, filename) using Bedrock's S3 delivery layout:
-                {prefix}AWSLogs/{account}/BedrockModelInvocationLogs/{region}/{yyyy}/{mm}/{dd}/{HH}/{file}.json.gz
-              Returns None if the key does not match that layout."""
-              parts = key.split('/')
-              try:
-                  a = parts.index('AWSLogs')
-                  account_id = parts[a + 1]
-                  b = parts.index('BedrockModelInvocationLogs')
-                  region = parts[b + 1]
-                  year, month, day = parts[b + 2], parts[b + 3], parts[b + 4]
-              except (ValueError, IndexError):
-                  return None
-              if not (len(year) == 4 and len(month) == 2 and len(day) == 2):
-                  return None
-              return account_id, region, year, month, day, parts[-1]
-
           def dest_key_for(account_id, region, year, month, day, filename):
               """Hive-partitioned destination key. The output is JSONL, so a
               .json.gz source becomes a .json object here."""
@@ -307,37 +289,66 @@ Resources:
                   out.append((f'{d.year:04d}', f'{d.month:02d}', f'{d.day:02d}'))
               return out
 
-          def list_imported_dest_keys(day_tuples):
-              """Set of destination keys already present WITHIN the window, used as
-              the import checkpoint so we only pull source files that are missing.
-              Scoped to the window so memory does not grow with total history."""
-              imported = set()
+          def _list_common_prefixes(bucket, prefix):
+              """List the immediate sub-'folders' under prefix using Delimiter='/'.
+              Returns the full CommonPrefix strings (each ends with '/'). This lets
+              us descend the key hierarchy one level at a time instead of listing
+              every object under a prefix."""
+              out = []
               paginator = s3.get_paginator('list_objects_v2')
-              # Partition layout is account_id=.../region=.../year=.../month=.../day=...
-              # so we cannot prefix-filter by day cheaply; instead keep only keys
-              # whose year=/month=/day= segments fall inside the window.
-              want = set(day_tuples)
-              for page in paginator.paginate(Bucket=DEST_BUCKET, Prefix=f'{DEST_PREFIX}/'):
+              for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter='/'):
+                  for cp in page.get('CommonPrefixes', []):
+                      out.append(cp['Prefix'])
+              return out
+
+          def _list_objects(bucket, prefix):
+              """List all object keys under prefix (no delimiter)."""
+              out = []
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                   for obj in page.get('Contents', []):
-                      k = obj['Key']
-                      ymd = _dest_key_ymd(k)
-                      if ymd is not None and ymd in want:
-                          imported.add(k)
+                      out.append(obj['Key'])
+              return out
+
+          def list_imported_dest_keys(day_tuples):
+              """Set of destination keys already imported WITHIN the window.
+              The destination is Hive-partitioned
+              (account_id=.../region=.../year=.../month=.../day=.../file), so we
+              build the exact day-partition prefixes from the window and list only
+              those - no full-history scan. Walk account and region with
+              Delimiter='/' (unknown at deploy time), then list the known
+              year=/month=/day= folders directly."""
+              imported = set()
+              want = set(day_tuples)
+              for acct_prefix in _list_common_prefixes(DEST_BUCKET, f'{DEST_PREFIX}/'):
+                  for region_prefix in _list_common_prefixes(DEST_BUCKET, acct_prefix):
+                      for (y, m, d) in want:
+                          day_prefix = f'{region_prefix}year={y}/month={m}/day={d}/'
+                          for key in _list_objects(DEST_BUCKET, day_prefix):
+                              imported.add(key)
               return imported
 
-          def _dest_key_ymd(key):
-              """Extract (year, month, day) from a Hive-partitioned destination key."""
-              y = m = d = None
-              for seg in key.split('/'):
-                  if seg.startswith('year='):
-                      y = seg[5:]
-                  elif seg.startswith('month='):
-                      m = seg[6:]
-                  elif seg.startswith('day='):
-                      d = seg[4:]
-              if y and m and d:
-                  return (y, m, d)
-              return None
+          def list_source_day_keys(source_bucket, day_tuples):
+              """List only the source .json.gz keys that fall inside the window,
+              by walking Bedrock's layout folder-by-folder instead of listing the
+              whole bucket:
+                {prefix}AWSLogs/{account}/BedrockModelInvocationLogs/{region}/{yyyy}/{mm}/{dd}/
+              Yields (account_id, region, year, month, day, key). Runtime scales
+              with (accounts x regions x window days), not with total history."""
+              want = set(day_tuples)
+              awslogs_root = f'{SOURCE_PREFIX}AWSLogs/'
+              for acct_prefix in _list_common_prefixes(source_bucket, awslogs_root):
+                  # acct_prefix = {prefix}AWSLogs/{account}/
+                  account_id = acct_prefix.rstrip('/').split('/')[-1]
+                  bmil_root = f'{acct_prefix}BedrockModelInvocationLogs/'
+                  for region_prefix in _list_common_prefixes(source_bucket, bmil_root):
+                      # region_prefix = {...}/BedrockModelInvocationLogs/{region}/
+                      region = region_prefix.rstrip('/').split('/')[-1]
+                      for (y, m, d) in want:
+                          day_prefix = f'{region_prefix}{y}/{m}/{d}/'
+                          for key in _list_objects(source_bucket, day_prefix):
+                              if key.endswith('.json.gz'):
+                                  yield account_id, region, y, m, d, key.split('/')[-1], key
 
           def batch_register_partitions(partition_keys, sd_template):
               """Register every (account_id, region, year, month, day) partition we
@@ -345,9 +356,15 @@ Resources:
               limit), ignoring AlreadyExists. Registering EVERY day processed - not
               only days with a newly written file - means a day cannot stay missing
               from Athena because its file happened to be imported on an earlier run
-              that failed between the PUT and the registration."""
+              that failed between the PUT and the registration.
+
+              Returns a list of error strings for partitions that failed to
+              register for a reason other than AlreadyExists, so the caller can
+              surface them (the next run retries, but counting them makes a
+              persistent problem visible)."""
+              errors = []
               if sd_template is None or not partition_keys:
-                  return
+                  return errors
               items = sorted(partition_keys)
               for i in range(0, len(items), 100):
                   batch = items[i:i + 100]
@@ -362,13 +379,25 @@ Resources:
                           'StorageDescriptor': sd,
                       })
                   try:
-                      glue.batch_create_partition(
+                      resp = glue.batch_create_partition(
                           DatabaseName=GLUE_DATABASE,
                           TableName=GLUE_TABLE,
                           PartitionInputList=entries,
                       )
+                      # BatchCreatePartition returns per-entry errors in the
+                      # response rather than raising. AlreadyExists is expected and
+                      # ignored; anything else is a real failure worth counting.
+                      for pe in resp.get('Errors', []):
+                          code = (pe.get('ErrorDetail') or {}).get('ErrorCode')
+                          if code == 'AlreadyExistsException':
+                              continue
+                          vals = '/'.join(pe.get('PartitionValues', []))
+                          errors.append(f'partition {vals}: {code}')
                   except glue.exceptions.AlreadyExistsException:
                       pass
+                  except Exception as e:  #pylint: disable=broad-exception-caught
+                      errors.append(f'batch_create_partition failed: {str(e)}')
+              return errors
 
           def transform_gz(body_bytes, collection_time):
               """Gunzip a Bedrock log object and return (jsonl_text, row_count).
@@ -397,11 +426,12 @@ Resources:
               return ('\n'.join(rows), len(rows))
 
           def lambda_handler(event, context):  #pylint: disable=W0613
-              # Rolling-window reconcile: each run compares what each source bucket
-              # holds against what has already been imported, but only for the last
-              # N days, and pulls the difference. The destination is the checkpoint,
-              # so transient failures self-heal on later runs. Bounding the window
-              # keeps listing, memory, and runtime flat as history grows.
+              # Rolling-window reconcile: each run reconciles only the last N days.
+              # Both the source and destination are listed folder-by-folder for the
+              # window's day partitions only (not the whole bucket), so listing,
+              # memory, and run time all scale with (accounts x regions x N days)
+              # rather than with total history. The destination is the checkpoint,
+              # so transient failures self-heal on later runs.
               #
               # Pass {"days": N} in the event to widen the window for a manual
               # backfill, for example {"days": 365} on first deployment.
@@ -414,15 +444,17 @@ Resources:
 
               collection_time = datetime.now(timezone.utc).isoformat()
               window = window_day_tuples(days)
-              window_set = set(window)
 
+              errors = []
               try:
                   sd_template = glue.get_table(
                       DatabaseName=GLUE_DATABASE, Name=GLUE_TABLE
                   )['Table']['StorageDescriptor']
               except Exception as e:  #pylint: disable=broad-exception-caught
                   sd_template = None
-                  print(f'Warning: could not read Glue table for partition registration: {e}')
+                  # Count this as an error: without the table we cannot register
+                  # partitions, so newly copied files would not be queryable.
+                  errors.append(f'get_table failed, partitions not registered: {str(e)}')
 
               imported = list_imported_dest_keys(window)
               total_copied = 0
@@ -431,57 +463,40 @@ Resources:
               # file was written, so BatchCreatePartition can register them all and
               # no day can stay permanently missing from Athena.
               partitions_seen = set()
-              errors = []
 
               for source_bucket in SOURCE_BUCKETS:
                   source_bucket = source_bucket.strip()
                   if not source_bucket:
                       continue
                   try:
-                      paginator = s3.get_paginator('list_objects_v2')
-                      for page in paginator.paginate(Bucket=source_bucket, Prefix=f'{SOURCE_PREFIX}AWSLogs/'):
-                          for obj in page.get('Contents', []):
-                              key = obj['Key']
-                              if not key.endswith('.json.gz'):
-                                  continue
-                              if '/BedrockModelInvocationLogs/' not in key:
-                                  continue
-                              parsed = parse_source_key(key)
-                              if not parsed:
-                                  continue
-                              account_id, region, year, month, day, filename = parsed
-                              if (year, month, day) not in window_set:
-                                  continue  # outside the reconcile window
-                              pkey = (account_id, region, year, month, day)
-                              partitions_seen.add(pkey)
-                              dest_key = dest_key_for(account_id, region, year, month, day, filename)
-                              if dest_key in imported:
-                                  continue  # already imported - checkpoint hit
-                              try:
-                                  resp = s3.get_object(Bucket=source_bucket, Key=key)
-                                  jsonl, rows = transform_gz(resp['Body'].read(), collection_time)
-                                  if rows > 0:
-                                      s3.put_object(
-                                          Bucket=DEST_BUCKET,
-                                          Key=dest_key,
-                                          Body=jsonl.encode('utf-8'),
-                                          ContentType='application/json',
-                                      )
-                                      imported.add(dest_key)
-                                      total_copied += 1
-                                      total_rows += rows
-                              except Exception as e:  #pylint: disable=broad-exception-caught
-                                  errors.append(f'{source_bucket}/{key}: {str(e)}')
+                      for account_id, region, year, month, day, filename, key in \
+                              list_source_day_keys(source_bucket, window):
+                          partitions_seen.add((account_id, region, year, month, day))
+                          dest_key = dest_key_for(account_id, region, year, month, day, filename)
+                          if dest_key in imported:
+                              continue  # already imported - checkpoint hit
+                          try:
+                              resp = s3.get_object(Bucket=source_bucket, Key=key)
+                              jsonl, rows = transform_gz(resp['Body'].read(), collection_time)
+                              if rows > 0:
+                                  s3.put_object(
+                                      Bucket=DEST_BUCKET,
+                                      Key=dest_key,
+                                      Body=jsonl.encode('utf-8'),
+                                      ContentType='application/json',
+                                  )
+                                  imported.add(dest_key)
+                                  total_copied += 1
+                                  total_rows += rows
+                          except Exception as e:  #pylint: disable=broad-exception-caught
+                              errors.append(f'{source_bucket}/{key}: {str(e)}')
                   except Exception as e:  #pylint: disable=broad-exception-caught
                       errors.append(f'Error listing {source_bucket}: {str(e)}')
 
               # Register every day we processed (idempotent), not only days that got
               # a new file this run - this closes the "partition registered only on
-              # first write" gap.
-              try:
-                  batch_register_partitions(partitions_seen, sd_template)
-              except Exception as e:  #pylint: disable=broad-exception-caught
-                  errors.append(f'Error registering partitions: {str(e)}')
+              # first write" gap. Non-AlreadyExists failures are counted as errors.
+              errors.extend(batch_register_partitions(partitions_seen, sd_template))
 
               result = {
                   'window_days': days,
