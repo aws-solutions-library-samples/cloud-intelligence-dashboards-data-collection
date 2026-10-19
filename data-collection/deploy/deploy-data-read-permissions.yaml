@@ -26,6 +26,7 @@ Metadata:
           - IncludeHealthEventsModule
           - IncludeInventoryCollectorModule
           - IncludeRDSUtilizationModule
+          - IncludeRDSModule
           - IncludeEUCUtilizationModule
           - IncludeRightsizingModule
           - IncludeTAModule
@@ -64,6 +65,8 @@ Metadata:
         default: "Include Inventory Collector Module"
       IncludeRDSUtilizationModule:
         default: "Include RDS Utilization Data Collection Module"
+      IncludeRDSModule:
+        default: "Include RDS Data Collection Module"
       IncludeEUCUtilizationModule:
         default: "Include WorkSpaces Utilization Data Collection Module"
       IncludeRightsizingModule:
@@ -150,6 +153,11 @@ Parameters:
   IncludeRDSUtilizationModule:
     Type: String
     Description: Collects RDS CloudWatch metrics from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
+  IncludeRDSModule:
+    Type: String
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
   IncludeEUCUtilizationModule:
@@ -242,6 +250,7 @@ Resources:
         IncludeInventoryCollectorModule: !Ref IncludeInventoryCollectorModule
         IncludeECSChargebackModule: !Ref IncludeECSChargebackModule
         IncludeRDSUtilizationModule: !Ref IncludeRDSUtilizationModule
+        IncludeRDSModule: !Ref IncludeRDSModule
         IncludeEUCUtilizationModule: !Ref IncludeEUCUtilizationModule
         IncludeBudgetsModule: !Ref IncludeBudgetsModule
         IncludeTransitGatewayModule: !Ref IncludeTransitGatewayModule
@@ -280,6 +289,8 @@ Resources:
           ParameterValue: !Ref IncludeECSChargebackModule
         - ParameterKey: IncludeRDSUtilizationModule
           ParameterValue: !Ref IncludeRDSUtilizationModule
+        - ParameterKey: IncludeRDSModule
+          ParameterValue: !Ref IncludeRDSModule
         - ParameterKey: IncludeEUCUtilizationModule
           ParameterValue: !Ref IncludeEUCUtilizationModule
         - ParameterKey: IncludeBudgetsModule
