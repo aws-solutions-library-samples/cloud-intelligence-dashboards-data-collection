@@ -121,12 +121,13 @@ celerybeat.pid
 
 # Environments
 .env
-.venv
+.venv*
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+.venv-build
 
 # Spyder project settings
 .spyderproject
@@ -192,7 +193,7 @@ sqlite_mcp_server.db
 .ai/*
 !.ai/specs/
 CLAUDE.md
-
+_wip/
 
 # Local testing suites
 local-test

@@ -1,5 +1,9 @@
 #!/bin/bash
-# shellcheck disable=SC2086
+# shellcheck disable=SC2086,SC2016,SC2005
+# SC2016: the --query JMESPath expression below is single-quoted on purpose
+# so its backticks stay literal instead of triggering command substitution.
+# SC2005: echo "$(red ...)" is needed because red()/green()/yellow() print
+# with printf and no trailing newline, so the outer echo supplies it.
 # Read-only health check for the LayerBuckets StackSet and the regional code buckets.
 #
 # For every stack instance it reports:

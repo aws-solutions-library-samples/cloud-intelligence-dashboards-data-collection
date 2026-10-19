@@ -18,6 +18,24 @@ collection topology), not by which dashboard consumes it.
 If the data can be produced by joining tables that already exist, it is **derived** — write a
 view. Collect raw data once; compute in Athena.
 
+### Before adding any collection, check what is already collected
+
+Duplicate collection is the most common mistake. **Before** writing a new Lambda, table, or
+API call, `grep` the existing `module-*.yaml` for the service/attribute and confirm no module
+already produces it. If it does, build a **view** over the existing table instead.
+
+Already-collected data worth knowing about (not exhaustive — always verify against the files):
+
+| You need… | It already exists in | Tables | Notes |
+|---|---|---|---|
+| **Pricing** for EC2 / RDS / ElastiCache / OpenSearch (`AmazonES`) / Lambda / WorkSpaces / Savings Plans, incl. instance-type metadata | `module-pricing` | `pricing_<svc>_data` (`pricing_rds_data`, `pricing_ec2_data`, `pricing_elasticache_data`, `pricing_opensearch_data`, …) | Sourced from the **bulk Price List offer files**, not `pricing:GetProducts`. Flattened columns include `Instance Type`, `Instance Type Family`, `Current Generation`, `vCPU`, `Memory`, `Database Engine`, `Deployment Option`, and — for RDS/EC2 — **`Physical Processor`** (authoritative Intel/AMD/Graviton). Do **not** add a second pricing collector; prefer these columns over regex/suffix heuristics on instance names. |
+| Instance-type hardware metadata (vCPU, memory, `ProcessorInfo.Manufacturer`, architectures) | `module-reference` | `ec2_instance_types` | Authoritative EC2 processor manufacturer. |
+| Engine / EOL / version catalogs (RDS, ElastiCache) | `module-reference` | `rds_db_engine_versions`, `elasticache_engine_versions`, … | |
+| Live customer resource inventory (`describe_*` / `list_*`) | `module-inventory` | per the `AwsObjects` fan-out | |
+
+A cross-service KPI/mapping (e.g. instance generation, processor, upgrade path) is **derived**:
+it should be an Athena view over the tables above, not a new Lambda or new pricing collection.
+
 ### 1.1 When a module may derive in-Lambda
 
 "Derived → view" is about **not standing up new collection** for something already joinable. It

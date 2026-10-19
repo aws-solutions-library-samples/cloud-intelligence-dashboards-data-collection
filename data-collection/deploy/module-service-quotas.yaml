@@ -74,6 +74,7 @@ Resources:
         Parameters:
           "use.null.for.invalid.data": "true"
           "classification": "json"
+          "compressionType": "none"
           "UPDATED_BY_CRAWLER": !Sub "${ResourcePrefix}${CFDataName}-Crawler"
         StorageDescriptor:
           Columns:
@@ -137,6 +138,7 @@ Resources:
         Parameters:
           "use.null.for.invalid.data": "true"
           "classification": "json"
+          "compressionType": "none"
           "UPDATED_BY_CRAWLER": !Sub "${ResourcePrefix}${CFDataName}-Crawler"
         StorageDescriptor:
           Columns:
