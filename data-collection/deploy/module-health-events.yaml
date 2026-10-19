@@ -692,7 +692,7 @@ Resources:
           class HealthServiceLifecycleModule(DataCollectionModule):
               """Health Events module, service lifecycle collector."""
 
-              MODULE = "health-events"
+              MODULE = "health-events-service-lifecycle"
               COLLECTORS = (Collector("service-lifecycle", collect_service_lifecycle, scope=Collector.GLOBAL),)
 
               def output_key(self, name, region):  # pylint: disable=unused-argument
@@ -791,7 +791,7 @@ Resources:
         Crawlers: '[]' # partition projection, no crawler
         CollectionType: "Payers"
         Params: ''
-        Module: !Ref CFDataName
+        Module: !Sub "${CFDataName}-service-lifecycle" # the state machine invokes <Prefix><Module>-Lambda
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
