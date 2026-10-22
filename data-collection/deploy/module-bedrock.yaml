@@ -1,0 +1,638 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Amazon Bedrock model invocation logs - Pull-based Data Collection v3.14.8
+Transform: 'AWS::LanguageExtensions'
+Metadata:
+  cfn_nag:
+    rules_to_suppress:
+      - id: W2001
+        reason: "Parameters DestinationBucketARN and LambdaAnalyticsARN are required by the deployment framework"
+  cfn-lint:
+    config:
+      ignore_checks:
+        - W2001
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to hold the Bedrock invocation logs table
+    Default: optimization_data
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket that holds collected data
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that holds collected data
+  CFDataName:
+    Type: String
+    Description: The name of what this CloudFormation stack is doing.
+    Default: bedrock
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created.
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+    Default: ""
+  Schedule:
+    Type: String
+    Description: "EventBridge schedule for data collection. Default runs daily."
+    Default: "rate(1 day)"
+  BedrockSourceBuckets:
+    Type: CommaDelimitedList
+    Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
+  BedrockLogPrefix:
+    Type: String
+    Description: "Optional S3 prefix under which Bedrock writes model-invocation logs in each source bucket. Leave empty (the default) when Bedrock delivers to the bucket root, which is Bedrock's default (keyPrefix: ''). If you set a non-empty keyPrefix in your Bedrock logging configuration, enter the same value here; a trailing slash is added automatically if missing."
+    Default: ""
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: "ARNs of KMS Keys for source data buckets. Comma separated list, no spaces. Keep empty if source buckets are not encrypted with KMS."
+    Default: ""
+Conditions:
+  NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  HasAnalyticsLambda: !Not [ !Equals [ !Ref LambdaAnalyticsARN, "" ] ]
+Outputs:
+  LambdaRoleArn:
+    Description: "ARN of the Lambda execution role - customers reference this in their Bedrock logs bucket policy"
+    Value: !GetAtt LambdaRole.Arn
+  LambdaRoleName:
+    Description: "Name of the Lambda execution role"
+    Value: !Ref LambdaRole
+  CollectorLambdaArn:
+    Description: "ARN of the collector Lambda function"
+    Value: !GetAtt LambdaFunction.Arn
+  TableName:
+    Description: "Athena table name for the Bedrock invocation logs data"
+    Value: !Sub "${DatabaseName}.bedrock_logs"
+  BucketPolicyExample:
+    Description: "Example bucket policy statements for customers to apply to their Bedrock logs bucket(s). GetObject is scoped to the Bedrock log prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy."
+    Value: !Sub |
+      [
+        {
+          "Sid": "AllowCIDBedrockDataCollectionRead",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:GetObject",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/${BedrockLogPrefix}*"
+        },
+        {
+          "Sid": "AllowCIDBedrockDataCollectionList",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "s3:ListBucket",
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME",
+          "Condition": {"StringLike": {"s3:prefix": "${BedrockLogPrefix}*"}}
+        }
+      ]
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "lambda.${AWS::URLSuffix}"
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - PolicyName: "S3WriteDestination"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/bedrock/*"
+              # ListBucket on the destination prefix so the collector can see
+              # which files have already been imported and only pull what is
+              # missing (checkpoint / backfill reconcile).
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Ref DestinationBucketARN
+                Condition:
+                  StringLike:
+                    "s3:prefix": "bedrock/*"
+        - PolicyName: "GlueRegisterPartitions"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Register each (account_id, region, year, month, day) partition the
+              # collector writes, and read the table to inherit its storage
+              # descriptor. No crawler and no partition projection are used, so
+              # SELECT * over the table works without a mandatory partition filter.
+              - Effect: "Allow"
+                Action:
+                  - "glue:GetTable"
+                  - "glue:GetPartition"
+                  - "glue:GetPartitions"
+                  - "glue:BatchCreatePartition"
+                  - "glue:CreatePartition"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${DatabaseName}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${DatabaseName}/bedrock_logs"
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:Decrypt"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Need explicit name so customers can reference it in their bucket policies"
+  'Fn::ForEach::BedrockSourceReadPolicies':
+    - Bucket
+    - !Ref BedrockSourceBuckets
+    - 'BedrockSourceReadPolicy&{Bucket}':
+        Type: AWS::IAM::RolePolicy
+        Properties:
+          RoleName: !Ref LambdaRole
+          PolicyName: !Sub "S3Read-${Bucket}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/${BedrockLogPrefix}*"
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: "Pulls Amazon Bedrock model-invocation logs from customer source buckets into the central data collection bucket"
+      Runtime: python3.13
+      Architectures: [arm64]
+      Code:
+        ZipFile: |
+          import os
+          import io
+          import gzip
+          import json
+          from datetime import datetime, timezone
+          import boto3
+
+          from datetime import timedelta
+
+          s3 = boto3.client('s3')
+          glue = boto3.client('glue')
+
+          DEST_BUCKET = os.environ['DEST_BUCKET']
+          SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
+          # Normalise the configured prefix: empty means Bedrock delivers to the
+          # bucket root (its default keyPrefix: ''). A non-empty prefix gets a
+          # single trailing slash. Bedrock's own layout places AWSLogs/ directly
+          # under this prefix, so the source walk lists '{prefix}AWSLogs/' and
+          # then descends by account and region.
+          def _normalise_prefix(p):
+              p = (p or '').strip()
+              if p and not p.endswith('/'):
+                  p = p + '/'
+              return p
+
+          SOURCE_PREFIX = _normalise_prefix(os.environ.get('SOURCE_PREFIX', ''))
+          DEST_PREFIX = 'bedrock/bedrock_logs'
+          GLUE_DATABASE = os.environ['GLUE_DATABASE']
+          GLUE_TABLE = os.environ['GLUE_TABLE']
+
+          # Default reconcile window. Each run only lists and reconciles the last
+          # DEFAULT_WINDOW_DAYS days so the work stays bounded as history grows.
+          # Override per invocation with {"days": N} in the event (manual backfill).
+          DEFAULT_WINDOW_DAYS = 30
+
+          # Output record schema (flattened to match the Glue table). Nested
+          # input/output are kept as structs so the invocations view can extract
+          # token counts and prompt/response bodies. account_id and region are NOT
+          # emitted as columns - they are Glue partition keys derived from the S3
+          # path, so keeping them out of the body avoids duplicating the value.
+          def flatten_record(raw, collection_time):
+              """Normalise one raw Bedrock model-invocation record to the table
+              schema (lowercase keys, nested input/output structs preserved)."""
+              identity = raw.get('identity') or {}
+              inp = raw.get('input') or {}
+              out = raw.get('output') or {}
+              return {
+                  'schematype': raw.get('schemaType'),
+                  'schemaversion': raw.get('schemaVersion'),
+                  'timestamp': raw.get('timestamp'),
+                  'requestid': raw.get('requestId'),
+                  'operation': raw.get('operation'),
+                  'modelid': raw.get('modelId'),
+                  # errorCode is present on failed invocations (empty/absent on
+                  # success); inferenceRegion records where the model actually ran,
+                  # which differs from the request region for cross-region profiles.
+                  'errorcode': raw.get('errorCode'),
+                  'inferenceregion': raw.get('inferenceRegion'),
+                  'requestmetadata': raw.get('requestMetadata') or {},
+                  'collection_time': collection_time,
+                  'input': {
+                      'inputbodyjson': _as_text(inp.get('inputBodyJson')),
+                      'inputcontenttype': inp.get('inputContentType'),
+                      'inputtokencount': inp.get('inputTokenCount'),
+                  },
+                  'output': {
+                      'outputbodyjson': _as_text(out.get('outputBodyJson')),
+                      'outputcontenttype': out.get('outputContentType'),
+                      'outputtokencount': out.get('outputTokenCount'),
+                  },
+                  'identity_arn': identity.get('arn'),
+              }
+
+          def _as_text(value):
+              """Bedrock may deliver body fields as JSON objects or strings; the
+              table stores them as a string column so the view can json_extract."""
+              if value is None:
+                  return None
+              if isinstance(value, str):
+                  return value
+              return json.dumps(value)
+
+          def dest_key_for(account_id, region, year, month, day, filename):
+              """Hive-partitioned destination key. The output is JSONL, so a
+              .json.gz source becomes a .json object here."""
+              out_name = filename[:-3] if filename.endswith('.gz') else filename
+              if not out_name.endswith('.json'):
+                  out_name = out_name + '.json'
+              return (f'{DEST_PREFIX}/account_id={account_id}/region={region}/'
+                      f'year={year}/month={month}/day={day}/{out_name}')
+
+          def window_day_tuples(days):
+              """(year, month, day) string tuples for the last `days` UTC days,
+              most recent first. Used to bound both listing and reconciliation."""
+              today = datetime.now(timezone.utc).date()
+              out = []
+              for i in range(days):
+                  d = today - timedelta(days=i)
+                  out.append((f'{d.year:04d}', f'{d.month:02d}', f'{d.day:02d}'))
+              return out
+
+          def _list_common_prefixes(bucket, prefix):
+              """List the immediate sub-'folders' under prefix using Delimiter='/'.
+              Returns the full CommonPrefix strings (each ends with '/'). This lets
+              us descend the key hierarchy one level at a time instead of listing
+              every object under a prefix."""
+              out = []
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter='/'):
+                  for cp in page.get('CommonPrefixes', []):
+                      out.append(cp['Prefix'])
+              return out
+
+          def _list_objects(bucket, prefix):
+              """List all object keys under prefix (no delimiter)."""
+              out = []
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                  for obj in page.get('Contents', []):
+                      out.append(obj['Key'])
+              return out
+
+          def list_imported_dest_keys(day_tuples):
+              """Set of destination keys already imported WITHIN the window.
+              The destination is Hive-partitioned
+              (account_id=.../region=.../year=.../month=.../day=.../file), so we
+              build the exact day-partition prefixes from the window and list only
+              those - no full-history scan. Walk account and region with
+              Delimiter='/' (unknown at deploy time), then list the known
+              year=/month=/day= folders directly."""
+              imported = set()
+              want = set(day_tuples)
+              for acct_prefix in _list_common_prefixes(DEST_BUCKET, f'{DEST_PREFIX}/'):
+                  for region_prefix in _list_common_prefixes(DEST_BUCKET, acct_prefix):
+                      for (y, m, d) in want:
+                          day_prefix = f'{region_prefix}year={y}/month={m}/day={d}/'
+                          for key in _list_objects(DEST_BUCKET, day_prefix):
+                              imported.add(key)
+              return imported
+
+          def list_source_day_keys(source_bucket, day_tuples):
+              """List only the source .json.gz keys that fall inside the window,
+              by walking Bedrock's layout folder-by-folder instead of listing the
+              whole bucket:
+                {prefix}AWSLogs/{account}/BedrockModelInvocationLogs/{region}/{yyyy}/{mm}/{dd}/
+              Yields (account_id, region, year, month, day, key). Runtime scales
+              with (accounts x regions x window days), not with total history."""
+              want = set(day_tuples)
+              awslogs_root = f'{SOURCE_PREFIX}AWSLogs/'
+              for acct_prefix in _list_common_prefixes(source_bucket, awslogs_root):
+                  # acct_prefix = {prefix}AWSLogs/{account}/
+                  account_id = acct_prefix.rstrip('/').split('/')[-1]
+                  bmil_root = f'{acct_prefix}BedrockModelInvocationLogs/'
+                  for region_prefix in _list_common_prefixes(source_bucket, bmil_root):
+                      # region_prefix = {...}/BedrockModelInvocationLogs/{region}/
+                      region = region_prefix.rstrip('/').split('/')[-1]
+                      for (y, m, d) in want:
+                          day_prefix = f'{region_prefix}{y}/{m}/{d}/'
+                          for key in _list_objects(source_bucket, day_prefix):
+                              if key.endswith('.json.gz'):
+                                  yield account_id, region, y, m, d, key.split('/')[-1], key
+
+          def batch_register_partitions(partition_keys, sd_template):
+              """Register every (account_id, region, year, month, day) partition we
+              processed this run, in batches of 100 (Glue's BatchCreatePartition
+              limit), ignoring AlreadyExists. Registering EVERY day processed - not
+              only days with a newly written file - means a day cannot stay missing
+              from Athena because its file happened to be imported on an earlier run
+              that failed between the PUT and the registration.
+
+              Returns a list of error strings for partitions that failed to
+              register for a reason other than AlreadyExists, so the caller can
+              surface them (the next run retries, but counting them makes a
+              persistent problem visible)."""
+              errors = []
+              if sd_template is None or not partition_keys:
+                  return errors
+              items = sorted(partition_keys)
+              for i in range(0, len(items), 100):
+                  batch = items[i:i + 100]
+                  entries = []
+                  for (account_id, region, year, month, day) in batch:
+                      location = (f's3://{DEST_BUCKET}/{DEST_PREFIX}/account_id={account_id}/'
+                                  f'region={region}/year={year}/month={month}/day={day}/')
+                      sd = dict(sd_template)
+                      sd['Location'] = location
+                      entries.append({
+                          'Values': [account_id, region, year, month, day],
+                          'StorageDescriptor': sd,
+                      })
+                  try:
+                      resp = glue.batch_create_partition(
+                          DatabaseName=GLUE_DATABASE,
+                          TableName=GLUE_TABLE,
+                          PartitionInputList=entries,
+                      )
+                      # BatchCreatePartition returns per-entry errors in the
+                      # response rather than raising. AlreadyExists is expected and
+                      # ignored; anything else is a real failure worth counting.
+                      for pe in resp.get('Errors', []):
+                          code = (pe.get('ErrorDetail') or {}).get('ErrorCode')
+                          if code == 'AlreadyExistsException':
+                              continue
+                          vals = '/'.join(pe.get('PartitionValues', []))
+                          errors.append(f'partition {vals}: {code}')
+                  except glue.exceptions.AlreadyExistsException:
+                      pass
+                  except Exception as e:  #pylint: disable=broad-exception-caught
+                      errors.append(f'batch_create_partition failed: {str(e)}')
+              return errors
+
+          def transform_gz(body_bytes, collection_time):
+              """Gunzip a Bedrock log object and return (jsonl_text, row_count).
+              Each source object may contain one JSON record or newline-delimited
+              records; both are handled."""
+              text = gzip.decompress(body_bytes).decode('utf-8')
+              rows = []
+              stripped = text.strip()
+              if not stripped:
+                  return '', 0
+              # Try whole-object JSON first (single record or a JSON array).
+              try:
+                  parsed = json.loads(stripped)
+                  records = parsed if isinstance(parsed, list) else [parsed]
+              except json.JSONDecodeError:
+                  # Fall back to newline-delimited JSON.
+                  records = []
+                  for line in stripped.splitlines():
+                      line = line.strip()
+                      if line:
+                          records.append(json.loads(line))
+              for raw in records:
+                  if not isinstance(raw, dict):
+                      continue
+                  rows.append(json.dumps(flatten_record(raw, collection_time)))
+              return ('\n'.join(rows), len(rows))
+
+          def lambda_handler(event, context):  #pylint: disable=W0613
+              # Rolling-window reconcile: each run reconciles only the last N days.
+              # Both the source and destination are listed folder-by-folder for the
+              # window's day partitions only (not the whole bucket), so listing,
+              # memory, and run time all scale with (accounts x regions x N days)
+              # rather than with total history. The destination is the checkpoint,
+              # so transient failures self-heal on later runs.
+              #
+              # Pass {"days": N} in the event to widen the window for a manual
+              # backfill, for example {"days": 365} on first deployment.
+              event = event or {}
+              try:
+                  days = int(event.get('days', DEFAULT_WINDOW_DAYS))
+              except (TypeError, ValueError):
+                  days = DEFAULT_WINDOW_DAYS
+              days = max(1, days)
+
+              collection_time = datetime.now(timezone.utc).isoformat()
+              window = window_day_tuples(days)
+
+              errors = []
+              try:
+                  sd_template = glue.get_table(
+                      DatabaseName=GLUE_DATABASE, Name=GLUE_TABLE
+                  )['Table']['StorageDescriptor']
+              except Exception as e:  #pylint: disable=broad-exception-caught
+                  sd_template = None
+                  # Count this as an error: without the table we cannot register
+                  # partitions, so newly copied files would not be queryable.
+                  errors.append(f'get_table failed, partitions not registered: {str(e)}')
+
+              imported = list_imported_dest_keys(window)
+              total_copied = 0
+              total_rows = 0
+              # EVERY (account,region,day) we see in-window, whether or not a new
+              # file was written, so BatchCreatePartition can register them all and
+              # no day can stay permanently missing from Athena.
+              partitions_seen = set()
+
+              for source_bucket in SOURCE_BUCKETS:
+                  source_bucket = source_bucket.strip()
+                  if not source_bucket:
+                      continue
+                  try:
+                      for account_id, region, year, month, day, filename, key in \
+                              list_source_day_keys(source_bucket, window):
+                          partitions_seen.add((account_id, region, year, month, day))
+                          dest_key = dest_key_for(account_id, region, year, month, day, filename)
+                          if dest_key in imported:
+                              continue  # already imported - checkpoint hit
+                          try:
+                              resp = s3.get_object(Bucket=source_bucket, Key=key)
+                              jsonl, rows = transform_gz(resp['Body'].read(), collection_time)
+                              if rows > 0:
+                                  s3.put_object(
+                                      Bucket=DEST_BUCKET,
+                                      Key=dest_key,
+                                      Body=jsonl.encode('utf-8'),
+                                      ContentType='application/json',
+                                  )
+                                  imported.add(dest_key)
+                                  total_copied += 1
+                                  total_rows += rows
+                          except Exception as e:  #pylint: disable=broad-exception-caught
+                              errors.append(f'{source_bucket}/{key}: {str(e)}')
+                  except Exception as e:  #pylint: disable=broad-exception-caught
+                      errors.append(f'Error listing {source_bucket}: {str(e)}')
+
+              # Register every day we processed (idempotent), not only days that got
+              # a new file this run - this closes the "partition registered only on
+              # first write" gap. Non-AlreadyExists failures are counted as errors.
+              errors.extend(batch_register_partitions(partitions_seen, sd_template))
+
+              result = {
+                  'window_days': days,
+                  'total_files_copied': total_copied,
+                  'total_rows_written': total_rows,
+                  'partitions_registered': len(partitions_seen),
+                  'error_count': len(errors),
+                  'errors': errors[:20],
+              }
+              print(json.dumps(result))
+
+              # Surface failures: a non-empty error list raises so the invocation is
+              # recorded as failed (Errors metric / dead-letter), instead of a silent
+              # 200 that hides gaps. Partitions and copied files are already durable.
+              if errors:
+                  raise RuntimeError(
+                      f'{len(errors)} error(s) during Bedrock collection; '
+                      f'first: {errors[0]}'
+                  )
+              return result
+      Handler: 'index.lambda_handler'
+      MemorySize: 512
+      Timeout: 600
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          DEST_BUCKET: !Ref DestinationBucket
+          SOURCE_BUCKETS: !Join [ ',', !Ref BedrockSourceBuckets ]
+          SOURCE_PREFIX: !Ref BedrockLogPrefix
+          GLUE_DATABASE: !Ref DatabaseName
+          GLUE_TABLE: bedrock_logs
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "No need for VPC - accessing S3 over public endpoints"
+          - id: W92
+            reason: "No need for reserved concurrency - runs once daily"
+  ModuleRefreshSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      Description: "Trigger for Bedrock invocation logs data collection"
+      ScheduleExpression: !Ref Schedule
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 30
+      Target:
+        Arn: !GetAtt LambdaFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+  LambdaSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt ModuleRefreshSchedule.Arn
+  # Explicit Glue Table partitioned by account_id, region, year, month, day.
+  #
+  # account_id and region are Hive PARTITION KEYS (not data columns) - their
+  # values come from the Bedrock S3 delivery path
+  # (AWSLogs/{account}/BedrockModelInvocationLogs/{region}/...). The collector
+  # Lambda writes Hive-style paths and registers each partition it writes via the
+  # Glue API (create_partition). Partition PROJECTION is intentionally NOT used:
+  # account_id is sparse and high-cardinality (not known at deploy time), and
+  # projection would force every Athena query to filter on a partition value,
+  # which breaks 'SELECT * FROM bedrock_logs' with no filter. Registering
+  # partitions keeps every account/region/date queryable with no crawler.
+  #
+  # The row body is JSON (one flattened record per line) read via the OpenX JSON
+  # SerDe, so the nested input/output structs are preserved for the invocations
+  # view to extract token counts and prompt/response bodies.
+  BedrockLogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: bedrock_logs
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+        PartitionKeys:
+          - Name: account_id
+            Type: string
+          - Name: region
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub "s3://${DestinationBucket}/bedrock/bedrock_logs/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              'mapping.inputbodyjson': 'inputbodyjson'
+              'mapping.outputbodyjson': 'outputbodyjson'
+          Columns:
+            - Name: schematype
+              Type: string
+            - Name: schemaversion
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: requestid
+              Type: string
+            - Name: operation
+              Type: string
+            - Name: modelid
+              Type: string
+            - Name: errorcode
+              Type: string
+            - Name: inferenceregion
+              Type: string
+            - Name: requestmetadata
+              Type: map<string,string>
+            - Name: collection_time
+              Type: string
+            - Name: input
+              Type: struct<inputbodyjson:string,inputcontenttype:string,inputtokencount:int>
+            - Name: output
+              Type: struct<outputbodyjson:string,outputcontenttype:string,outputtokencount:int>
+            - Name: identity_arn
+              Type: string
+  # The flattened bedrock_invocations_view is NOT created here. cid-cmd creates
+  # and maintains it as part of the dashboard deployment (it is listed in the
+  # dashboard's dependsOn.views), so defining it here as well would duplicate the
+  # view and risk drift between the two definitions.
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Condition: HasAnalyticsLambda
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
