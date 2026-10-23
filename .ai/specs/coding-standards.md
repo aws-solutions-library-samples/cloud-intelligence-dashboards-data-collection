@@ -237,6 +237,15 @@ Standard inline suppressions used in Lambda code:
   `__version__` in `__init__.py`). `local-test/lambdas/common` is a symlink to it.
 - Build with `data-collection/utils/layer-utils/common-layer-build.sh` →
   `data-collection/deploy/layers/common-layer.zip` (gitignored; uploaded by `upload.sh`).
+  `release.sh` and `test/run-test-from-scratch.sh` build it automatically.
+- One shared layer, created by `deploy-data-collection.yaml` as
+  `${ResourcePrefix}Common-Layer` (`CommonLayerVersion`, exported as
+  `<stack>-CommonLayerArn`), like the boto3 layer. To use it from a module:
+  add a `CommonLayerArn` parameter to the module template and attach it in
+  `Layers`; pass `CommonLayerArn: !Ref CommonLayerVersion` from the module's
+  nested stack; and add the module's `Deploy…Module` condition to
+  `DeployCommonLayer`. Do not create a per-module copy of the layer.
+  Reference consumer: `module-service-lifecycle.yaml`.
 - Modules subclass `common.module.DataCollectionModule`, declare `MODULE` and
   `COLLECTORS`, and override hooks rather than copying superclass code:
   `session_for` (credentials), `output_key` (S3 layout), `conform` (record shape).

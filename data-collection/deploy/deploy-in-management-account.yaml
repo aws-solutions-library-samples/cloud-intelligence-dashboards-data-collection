@@ -20,6 +20,7 @@ Metadata:
           - IncludeComputeOptimizerModule
           - IncludeCostAnomalyModule
           - IncludeHealthEventsModule
+          - IncludeServiceLifecycleModule
           - IncludeIdentityCenterModule
           - IncludeRightsizingModule
           - IncludeLicenseManagerModule
@@ -42,6 +43,8 @@ Metadata:
         default: "Include AWS Backup Collection Module"
       IncludeHealthEventsModule:
         default: "Include Health Events Module"
+      IncludeServiceLifecycleModule:
+        default: "Include Service Lifecycle Module"
       IncludeIdentityCenterModule:
         default: "Include Identity Center Data Collection Module"
       IncludeLicenseManagerModule:
@@ -87,6 +90,11 @@ Parameters:
     Description: Collects AWS Health Events from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeServiceLifecycleModule:
+    Type: String
+    Description: Collects AWS service lifecycle data (e.g. end of support and recommended versions) from your payer accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
   IncludeLicenseManagerModule:
     Type: String
     Description: Collects Marketplace Licensing Information from your accounts
@@ -114,6 +122,7 @@ Conditions:
   EnableRightsizingModule: !Equals [!Ref IncludeRightsizingModule, "yes"]
   EnableBackupModule: !Equals [!Ref IncludeBackupModule, "yes"]
   EnableHealthEventsModule: !Equals [!Ref IncludeHealthEventsModule, "yes"]
+  EnableServiceLifecycleModule: !Equals [!Ref IncludeServiceLifecycleModule, "yes"]
   EnableLicenseManagerModule: !Equals [!Ref IncludeLicenseManagerModule, "yes"]
   EnableServiceQuotasModule: !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   EnableIdentityCenterModule: !Equals [!Ref IncludeIdentityCenterModule, "yes"]
@@ -149,6 +158,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}cost-explorer-rightsizing-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}backup-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}health-events-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-lifecycle-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}license-manager-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}RLS-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}service-quotas-LambdaRole"
@@ -341,6 +351,29 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "Policy is used for scanning of a wide range of resources"
+  ServiceLifecyclePolicy:
+    Type: "AWS::IAM::Policy"
+    Condition: EnableServiceLifecycleModule
+    Properties:
+      PolicyName: ServiceLifecyclePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "health:DescribeServiceLifecycle"
+            Resource: "*"
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "health:DescribeServiceLifecycle does not support resource-level permissions"
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037 # cfn-lint's IAM action list predates health:DescribeServiceLifecycle
   LicenseManagerPolicy:
     Type: "AWS::IAM::Policy"
     Condition: EnableLicenseManagerModule
