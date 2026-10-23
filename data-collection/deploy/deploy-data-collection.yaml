@@ -28,6 +28,7 @@ Metadata:
           - IncludeSupportCasesModule
           - IncludeECSChargebackModule
           - IncludeHealthEventsModule
+          - IncludeServiceLifecycleModule
           - IncludeInventoryCollectorModule
           - IncludeOrgDataModule
           - IncludeRDSUtilizationModule
@@ -110,6 +111,8 @@ Metadata:
         default: 'Include ISV Feeds Module'
       IncludeHealthEventsModule:
         default: 'Include AWS Health Events Module'
+      IncludeServiceLifecycleModule:
+        default: 'Include AWS Service Lifecycle Module'
       IncludeLicenseManagerModule:
         default: 'Include Marketplace Licensing Collection'
       IncludeServiceQuotasModule:
@@ -178,7 +181,7 @@ Parameters:
     Default: "rate(14 days)"
   ScheduleFrequent:
     Type: String
-    Description: "EventBridge schedule to trigger data collection for Cost Anomalies, Budgets, Support Cases and Health Events modules (see docs for tailoring the schedule for each module). Recommended value: rate(1 day).  Increasing data collection frequency will trigger additional cost, avoid setting the data collection schedule to more than once per day."
+    Description: "EventBridge schedule to trigger data collection for Cost Anomalies, Budgets, Support Cases, Health Events and Service Lifecycle modules (see docs for tailoring the schedule for each module). Recommended value: rate(1 day).  Increasing data collection frequency will trigger additional cost, avoid setting the data collection schedule to more than once per day."
     Default: "rate(1 day)"
   RegionsInScope:
     Type: String
@@ -286,6 +289,11 @@ Parameters:
     Description: Collects AWS Health Events data
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeServiceLifecycleModule:
+    Type: String
+    Description: Collects AWS service lifecycle data (e.g. end of support and recommended versions for RDS, EKS, Lambda) from your payer accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
   IncludeLicenseManagerModule:
     Type: String
     Description: Collects Marketplace Licenses and Grants
@@ -347,6 +355,7 @@ Conditions:
   DeployAWSFeedsModule: !Equals [ !Ref IncludeAWSFeedsModule, "yes"]
   DeployISVFeedsModule: !Equals [ !Ref IncludeISVFeedsModule, "yes"]
   DeployHealthEventsModule: !Equals [ !Ref IncludeHealthEventsModule, "yes"]
+  DeployServiceLifecycleModule: !Equals [ !Ref IncludeServiceLifecycleModule, "yes"]
   DeployLicenseManagerModule: !Equals [ !Ref IncludeLicenseManagerModule, "yes"]
   DeployQuickSightModule: !Equals [ !Ref IncludeQuickSightModule, "yes"]
   DeployServiceQuotasModule: !Equals [ !Ref IncludeServiceQuotasModule, "yes"]
@@ -354,9 +363,11 @@ Conditions:
   DeployMarketplaceModule: !Equals [ !Ref IncludeMarketplaceModule, "yes"]
   DeployKiroUserActivityModule: !Equals [ !Ref IncludeKiroUserActivityModule, "yes"]
   DeployIdentityCenterModule: !Equals [ !Ref IncludeIdentityCenterModule, "yes"]
-  DeployBoto3Layer: !Condition DeployHealthEventsModule
+  DeployBoto3Layer: !Or
+    - !Condition DeployHealthEventsModule
+    - !Condition DeployServiceLifecycleModule
   # Add each module that uses the common layer here (an !Or once there are two or more)
-  DeployCommonLayer: !Condition DeployHealthEventsModule
+  DeployCommonLayer: !Condition DeployServiceLifecycleModule
   DeployPricingModule: !Or
     - !Condition DeployInventoryCollectorModule
     - !Condition DeployRDSUtilizationModule
@@ -384,6 +395,7 @@ Conditions:
       - !Condition DeployEUCUtilizationModule
       - !Condition DeployComputeOptimizerModule
       - !Condition DeployIdentityCenterModule
+    - !Condition DeployServiceLifecycleModule # Fn::Or takes at most 10 conditions per group
   RegionsInScopeIsEmpty: !Equals
     - !Join [ '', !Split [ ' ', !Ref RegionsInScope  ] ] # remove spaces
     - ""
@@ -1510,6 +1522,27 @@ Resources:
         StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         DetailStepFunctionTemplate: !FindInMap [StepFunctionCode, health-detail-state-machine, TemplatePath]
+        Boto3LayerArn: !Ref Boto3LayerVersion
+
+  ServiceLifecycleModule:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployServiceLifecycleModule
+    Properties:
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.10/module-service-lifecycle.yaml"
+      Parameters:
+        DatabaseName: !Ref DatabaseName
+        DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns
+        DestinationBucket: !Ref S3Bucket
+        DestinationBucketARN: !GetAtt S3Bucket.Arn
+        Schedule: !Ref ScheduleFrequent
+        ManagementRoleName: !Sub "${ResourcePrefix}${ManagementAccountRole}"
+        ResourcePrefix: !Ref ResourcePrefix
+        LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
+        AccountCollectorLambdaARN: !Sub "${AccountCollector.Outputs.LambdaFunctionARN}"
+        CodeBucket: !If [ ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket ]
+        StepFunctionTemplate: !FindInMap [StepFunctionCode, main-state-machine, TemplatePath]
+        StepFunctionExecutionRoleARN: !GetAtt StepFunctionExecutionRole.Arn
+        SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         Boto3LayerArn: !Ref Boto3LayerVersion
         CommonLayerArn: !Ref CommonLayerVersion
 

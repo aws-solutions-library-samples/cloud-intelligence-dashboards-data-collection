@@ -245,7 +245,7 @@ Standard inline suppressions used in Lambda code:
   `Layers`; pass `CommonLayerArn: !Ref CommonLayerVersion` from the module's
   nested stack; and add the module's `Deploy…Module` condition to
   `DeployCommonLayer`. Do not create a per-module copy of the layer.
-  Reference consumer: `ServiceLifecycleLambdaFunction` in `module-health-events.yaml`.
+  Reference consumer: `module-service-lifecycle.yaml`.
 - Modules subclass `common.module.DataCollectionModule`, declare `MODULE` and
   `COLLECTORS`, and override hooks rather than copying superclass code:
   `session_for` (credentials), `output_key` (S3 layout), `conform` (record shape).
