@@ -184,7 +184,7 @@ Parameters:
     Type: String
     Description: Collects AWS Health Events from your accounts
     AllowedValues: ['yes', 'no']
-    Default: 'no'
+    Default: 'yes'
   IncludeServiceLifecycleModule:
     Type: String
     Description: Collects AWS service lifecycle data (e.g. end of support and recommended versions) from your payer accounts
