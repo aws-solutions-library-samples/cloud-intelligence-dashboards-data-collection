@@ -244,28 +244,44 @@ LIMIT 50;
   queryable without any stack change or crawler run.
 - **Re-runs are safe.** The destination bucket is the import checkpoint, so each
   run only copies objects it has not already imported; transient failures
-  self-heal on the next run.
-- **Rolling 30-day window.** Each scheduled run reconciles only the last 30
-  days. Both the source and destination are listed folder-by-folder for the
-  window's day partitions only, so listing, memory, and run time scale with
-  (accounts x regions x window days) rather than with total history. To import
-  older history (for example a first-time deployment), invoke the collection
-  Lambda manually with a wider window.
+  self-heal on the next run. The collector copies up to eight objects in
+  parallel and registers each day's Athena partition as soon as that day is
+  processed, including a partially processed day.
+- **Backfills can require several invocations.** Scheduled runs reconcile the
+  last 30 days, but elapsed time depends on the number and size of source
+  objects rather than only the requested day count. The Lambda has a 10-minute
+  limit and begins a clean shutdown with approximately 60 seconds remaining.
+  A high-volume one-day window can therefore take most of an invocation, and a
+  30-day or historical backfill can require several invocations.
 
-  Use `--invocation-type Event` so the call returns immediately instead of
-  waiting for the result. A long backfill can exceed the AWS CLI's 60-second
-  read timeout, and on timeout the CLI silently retries, starting a second
-  overlapping run. With `Event` the Lambda runs asynchronously and you check its
-  result in CloudWatch Logs:
+  Invoke asynchronously so the AWS CLI does not wait for the Lambda result.
+  Start with a one-day verification:
 
   ```bash
   aws lambda invoke --function-name CID-DC-bedrock-Lambda \
+    --region <data-collection-region> \
     --invocation-type Event \
-    --payload '{"days": 365}' --cli-binary-format raw-in-base64-out \
+    --payload '{"days": 1}' --cli-binary-format raw-in-base64-out \
     /dev/stdout
-  # then watch the result:
-  aws logs tail /aws/lambda/CID-DC-bedrock-Lambda --follow
+  aws logs tail /aws/lambda/CID-DC-bedrock-Lambda \
+    --region <data-collection-region> --follow
   ```
+
+  To reconcile 30 days or import a wider history, change `days`:
+
+  ```bash
+  aws lambda invoke --function-name CID-DC-bedrock-Lambda \
+    --region <data-collection-region> \
+    --invocation-type Event \
+    --payload '{"days": 30}' --cli-binary-format raw-in-base64-out \
+    /dev/stdout
+  ```
+
+  The asynchronous response confirms only that Lambda accepted the request.
+  Wait for the final JSON result in CloudWatch Logs. If it contains
+  `"stopped_early": true`, repeat the same command after the current invocation
+  finishes. Already imported objects are skipped. Do not run overlapping
+  invocations.
 - **Failures are visible.** If any object fails to import, the Lambda raises after
   the run (surfacing on the `Errors` metric) instead of returning success, so
   gaps are not hidden.

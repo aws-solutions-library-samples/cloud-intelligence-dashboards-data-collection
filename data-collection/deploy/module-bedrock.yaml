@@ -192,6 +192,7 @@ Resources:
           import io
           import gzip
           import json
+          from concurrent.futures import ThreadPoolExecutor, as_completed
           from datetime import datetime, timezone
           import boto3
 
@@ -425,16 +426,38 @@ Resources:
                   rows.append(json.dumps(flatten_record(raw, collection_time)))
               return ('\n'.join(rows), len(rows))
 
-          def lambda_handler(event, context):  #pylint: disable=W0613
-              # Rolling-window reconcile: each run reconciles only the last N days.
-              # Both the source and destination are listed folder-by-folder for the
-              # window's day partitions only (not the whole bucket), so listing,
-              # memory, and run time all scale with (accounts x regions x N days)
-              # rather than with total history. The destination is the checkpoint,
-              # so transient failures self-heal on later runs.
-              #
-              # Pass {"days": N} in the event to widen the window for a manual
-              # backfill, for example {"days": 365} on first deployment.
+          def lambda_handler(event, context):
+              # Process newest days first and checkpoint in S3. Copy only a bounded
+              # worker wave at a time so the invocation can stop without leaving a
+              # large executor queue when the Lambda timeout approaches.
+              copy_workers = 8
+              stop_buffer_ms = 60_000
+
+              def remaining_time_ms():
+                  if context is None or not hasattr(
+                          context, 'get_remaining_time_in_millis'):
+                      return None
+                  return context.get_remaining_time_in_millis()
+
+              def should_stop():
+                  remaining = remaining_time_ms()
+                  return remaining is not None and remaining <= stop_buffer_ms
+
+              def copy_object(source_bucket, source_key, dest_key, collected_at):
+                  response = s3.get_object(Bucket=source_bucket, Key=source_key)
+                  jsonl, rows = transform_gz(
+                      response['Body'].read(), collected_at
+                  )
+                  if rows == 0:
+                      return None, 0
+                  s3.put_object(
+                      Bucket=DEST_BUCKET,
+                      Key=dest_key,
+                      Body=jsonl.encode('utf-8'),
+                      ContentType='application/json',
+                  )
+                  return dest_key, rows
+
               event = event or {}
               try:
                   days = int(event.get('days', DEFAULT_WINDOW_DAYS))
@@ -444,6 +467,9 @@ Resources:
 
               collection_time = datetime.now(timezone.utc).isoformat()
               window = window_day_tuples(days)
+              source_buckets = [
+                  bucket.strip() for bucket in SOURCE_BUCKETS if bucket.strip()
+              ]
 
               errors = []
               try:
@@ -452,65 +478,115 @@ Resources:
                   )['Table']['StorageDescriptor']
               except Exception as e:  #pylint: disable=broad-exception-caught
                   sd_template = None
-                  # Count this as an error: without the table we cannot register
-                  # partitions, so newly copied files would not be queryable.
-                  errors.append(f'get_table failed, partitions not registered: {str(e)}')
+                  errors.append(
+                      f'get_table failed, partitions not registered: {str(e)}'
+                  )
 
               imported = list_imported_dest_keys(window)
               total_copied = 0
               total_rows = 0
-              # EVERY (account,region,day) we see in-window, whether or not a new
-              # file was written, so BatchCreatePartition can register them all and
-              # no day can stay permanently missing from Athena.
-              partitions_seen = set()
+              partitions_registered = 0
+              days_completed = 0
+              stopped_early = False
 
-              for source_bucket in SOURCE_BUCKETS:
-                  source_bucket = source_bucket.strip()
-                  if not source_bucket:
-                      continue
-                  try:
-                      for account_id, region, year, month, day, filename, key in \
-                              list_source_day_keys(source_bucket, window):
-                          partitions_seen.add((account_id, region, year, month, day))
-                          dest_key = dest_key_for(account_id, region, year, month, day, filename)
-                          if dest_key in imported:
-                              continue  # already imported - checkpoint hit
+              with ThreadPoolExecutor(max_workers=copy_workers) as executor:
+                  for day_tuple in window:
+                      if should_stop():
+                          stopped_early = True
+                          break
+
+                      day_partitions = set()
+                      pending = []
+                      pending_dest_keys = set()
+
+                      for source_bucket in source_buckets:
+                          if should_stop():
+                              stopped_early = True
+                              break
                           try:
-                              resp = s3.get_object(Bucket=source_bucket, Key=key)
-                              jsonl, rows = transform_gz(resp['Body'].read(), collection_time)
-                              if rows > 0:
-                                  s3.put_object(
-                                      Bucket=DEST_BUCKET,
-                                      Key=dest_key,
-                                      Body=jsonl.encode('utf-8'),
-                                      ContentType='application/json',
+                              day_keys = list_source_day_keys(
+                                  source_bucket, [day_tuple]
+                              )
+                              for account_id, region, year, month, day, \
+                                      filename, key in day_keys:
+                                  day_partitions.add(
+                                      (account_id, region, year, month, day)
                                   )
-                                  imported.add(dest_key)
-                                  total_copied += 1
-                                  total_rows += rows
+                                  dest_key = dest_key_for(
+                                      account_id, region, year, month, day,
+                                      filename
+                                  )
+                                  if dest_key in imported or \
+                                          dest_key in pending_dest_keys:
+                                      continue
+                                  pending_dest_keys.add(dest_key)
+                                  pending.append(
+                                      (source_bucket, key, dest_key)
+                                  )
+                                  if should_stop():
+                                      stopped_early = True
+                                      break
                           except Exception as e:  #pylint: disable=broad-exception-caught
-                              errors.append(f'{source_bucket}/{key}: {str(e)}')
-                  except Exception as e:  #pylint: disable=broad-exception-caught
-                      errors.append(f'Error listing {source_bucket}: {str(e)}')
+                              errors.append(
+                                  f'Error listing {source_bucket}: {str(e)}'
+                              )
+                          if stopped_early:
+                              break
 
-              # Register every day we processed (idempotent), not only days that got
-              # a new file this run - this closes the "partition registered only on
-              # first write" gap. Non-AlreadyExists failures are counted as errors.
-              errors.extend(batch_register_partitions(partitions_seen, sd_template))
+                      if not stopped_early:
+                          for start in range(0, len(pending), copy_workers):
+                              if should_stop():
+                                  stopped_early = True
+                                  break
+                              wave = pending[start:start + copy_workers]
+                              futures = {
+                                  executor.submit(
+                                      copy_object, source_bucket, source_key,
+                                      dest_key, collection_time
+                                  ): (source_bucket, source_key)
+                                  for source_bucket, source_key, dest_key in wave
+                              }
+                              for future in as_completed(futures):
+                                  source_bucket, source_key = futures[future]
+                                  try:
+                                      dest_key, rows = future.result()
+                                      if dest_key is not None:
+                                          imported.add(dest_key)
+                                          total_copied += 1
+                                          total_rows += rows
+                                  except Exception as e:  #pylint: disable=broad-exception-caught
+                                      errors.append(
+                                          f'{source_bucket}/{source_key}: {str(e)}'
+                                      )
+
+                      # Make every encountered day queryable immediately. This also
+                      # repairs a partition whose objects were written by an earlier
+                      # invocation that stopped before Glue registration.
+                      errors.extend(batch_register_partitions(
+                          day_partitions, sd_template
+                      ))
+                      partitions_registered += len(day_partitions)
+
+                      if stopped_early:
+                          break
+                      days_completed += 1
 
               result = {
                   'window_days': days,
+                  'days_completed': days_completed,
+                  'stopped_early': stopped_early,
+                  'remaining_time_ms': remaining_time_ms(),
                   'total_files_copied': total_copied,
                   'total_rows_written': total_rows,
-                  'partitions_registered': len(partitions_seen),
+                  'partitions_registered': partitions_registered,
                   'error_count': len(errors),
                   'errors': errors[:20],
               }
               print(json.dumps(result))
 
-              # Surface failures: a non-empty error list raises so the invocation is
-              # recorded as failed (Errors metric / dead-letter), instead of a silent
-              # 200 that hides gaps. Partitions and copied files are already durable.
+              # Intentional early stops return successfully; repeating the same
+              # invocation resumes from destination keys. Real failures still raise
+              # after completed writes and day partitions are durable.
               if errors:
                   raise RuntimeError(
                       f'{len(errors)} error(s) during Bedrock collection; '
