@@ -665,6 +665,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -733,6 +734,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -777,6 +779,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -811,6 +814,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -851,6 +855,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -887,6 +892,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
