@@ -13,7 +13,7 @@ collection Lambda read access to your logs bucket with a bucket policy, and the
 module copies the logs into the central data-collection bucket on a schedule.
 
 **Schedule:** Daily
-**Collection scope:** The S3 bucket(s) you list in `BedrockSourceBuckets`
+**Collection scope:** The S3 location(s) you list in `BedrockSourceBuckets`
 **Output:** One Athena table (`bedrock_logs`) in the `optimization_data`
 database. The flattened `bedrock_invocations_view` is created by `cid-cmd`
 during dashboard deployment, not by this module.
@@ -30,10 +30,13 @@ side effect of a data-collection stack. So this module:
 - **Never mutates your accounts.** It only reads the S3 bucket(s) you point it at.
 - **Respects any logging config you already have.** You keep full control of what
   is logged, in which accounts and regions.
-- **Uses least-privilege reads.** The collection Lambda is granted `s3:GetObject`
-  and `s3:ListBucket` scoped to your Bedrock log prefix (`BedrockLogPrefix`). When
-  logs are delivered to the bucket root (the default), that scope is the whole
-  named source bucket; set a `keyPrefix` to narrow it.
+- **Reads only Bedrock invocation logs.** The collection Lambda's role has one
+  fixed-size read policy, so there is no limit on how many source locations you
+  list. It allows `s3:GetObject` only on Bedrock's delivery path
+  (`.../AWSLogs/{account}/BedrockModelInvocationLogs/...`, with or without a
+  key prefix) and `s3:ListBucket` only for the prefixes the collector walks.
+  Cross-account source buckets must also grant the role access in their bucket
+  policy, and `BedrockSourceBuckets` decides which locations are collected.
 
 This mirrors the pull-based pattern used by the Kiro User Activity module.
 
@@ -85,18 +88,21 @@ aws bedrock put-model-invocation-logging-configuration \
 Repeat for each account and region you want collected. The module reads whatever
 you have configured — it does not change these settings.
 
-`keyPrefix` is optional. Bedrock's default delivers logs to the bucket root, and
-the module's `BedrockLogPrefix` parameter defaults to empty to match. If you set
-a non-empty `keyPrefix` (for example `"model-invocation-logs/"`), set
-`BedrockLogPrefix` to the **same** value so the collector lists the right prefix.
+`keyPrefix` is optional. For root delivery, add only the bucket name to
+`BedrockSourceBuckets`. If you set a non-empty `keyPrefix`, append it to that
+bucket's entry after the first `/`. Do not include `s3://`, and do not end an
+entry with `/`.
 
 ### 2. Enable the module
 
-Set `IncludeBedrockModule=yes` on the Data Collection stack and provide the
-bucket name(s) in `BedrockSourceBuckets` (comma-separated), for example:
+Set `IncludeBedrockModule=yes` on the Data Collection stack and provide the S3
+source location(s) in `BedrockSourceBuckets` (comma-separated). A bare bucket
+means logs are under `AWSLogs/` at the root; `bucket/prefix` means logs are
+under `prefix/AWSLogs/`. For example, this collects one root-delivery bucket
+and one prefixed bucket:
 
 ```
-bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1
+bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1/model-invocation-logs
 ```
 
 If your source buckets are encrypted with a customer-managed KMS key, add the
@@ -105,13 +111,12 @@ key ARN(s) to `DataBucketsKmsKeysArns`.
 ### 3. Grant the collection Lambda read access to each source bucket
 
 After the stack deploys, the Bedrock module stack exposes a
-**`BucketPolicyExample`** output — a ready-to-use policy statement scoped to your
-log prefix and the collection Lambda role. Add it to each source bucket's policy,
-replacing `YOUR-BEDROCK-LOGS-BUCKET-NAME` with the real bucket name:
+**`BucketPolicyExample`** output. It is an illustrative policy for one source
+bucket with the deployed `LambdaRoleArn` already populated. Apply a separate
+statement pair to each source bucket and replace the bucket and prefix
+placeholders to match its `BedrockSourceBuckets` entry.
 
-For the default (root delivery, empty `BedrockLogPrefix`) the statements look
-like this — note the resource/prefix cover the whole bucket because there is no
-key prefix:
+For a bare bucket entry such as `my-bedrock-logs`, use:
 
 ```json
 [
@@ -120,23 +125,23 @@ key prefix:
     "Effect": "Allow",
     "Principal": { "AWS": "<BedrockModule LambdaRoleArn output>" },
     "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/*"
+    "Resource": "arn:aws:s3:::my-bedrock-logs/*"
   },
   {
     "Sid": "AllowCIDBedrockDataCollectionList",
     "Effect": "Allow",
     "Principal": { "AWS": "<BedrockModule LambdaRoleArn output>" },
     "Action": "s3:ListBucket",
-    "Resource": "arn:aws:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME",
-    "Condition": { "StringLike": { "s3:prefix": "*" } }
+    "Resource": "arn:aws:s3:::my-bedrock-logs",
+    "Condition": { "StringLike": { "s3:prefix": "AWSLogs/*" } }
   }
 ]
 ```
 
-If you set a non-empty `keyPrefix`/`BedrockLogPrefix`, the resource and `s3:prefix`
-narrow to that prefix instead. Use the exact `LambdaRoleArn` and prefix from the
-stack's `BucketPolicyExample` output rather than hand-editing, so the principal
-and prefix match what was deployed.
+For `my-bedrock-logs/model-invocation-logs`, change the object resource to
+`arn:aws:s3:::my-bedrock-logs/model-invocation-logs/*` and the `s3:prefix`
+condition to `model-invocation-logs/AWSLogs/*`. Always use the exact
+`LambdaRoleArn` emitted by your stack; do not use a wildcard principal.
 
 ---
 

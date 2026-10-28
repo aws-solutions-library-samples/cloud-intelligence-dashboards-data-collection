@@ -150,8 +150,24 @@ def find_collector_stack(session, name_prefix):
     raise ValueError(f"No stack found with name starting '{name_prefix}'")
 
 
+def parse_source_locations(value, legacy_prefix=""):
+    """Parse comma-separated bucket or bucket/prefix source locations."""
+    fallback_prefix = legacy_prefix.strip("/")
+    locations = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        bucket, separator, prefix = item.partition("/")
+        if not separator:
+            prefix = fallback_prefix
+        prefix = prefix.strip("/")
+        locations.append((bucket, f"{prefix}/" if prefix else ""))
+    return locations
+
+
 def discover_pipeline(session, collector_stack_prefix):
-    """Resolve collector Lambda name, source buckets, destination bucket,
+    """Resolve collector Lambda name, source locations, destination bucket,
     database and table from the deployed Bedrock module stack + Lambda config."""
     cfn = session.client("cloudformation")
     lam = session.client("lambda")
@@ -173,22 +189,22 @@ def discover_pipeline(session, collector_stack_prefix):
     return {
         "stack_name": stack_name,
         "lambda_name": lambda_name,
-        "source_buckets": [b.strip() for b in env.get("SOURCE_BUCKETS", "").split(",") if b.strip()],
-        "source_prefix": env.get("SOURCE_PREFIX", "model-invocation-logs/"),
+        "source_locations": parse_source_locations(
+            env.get("SOURCE_BUCKETS", ""), env.get("SOURCE_PREFIX", "")
+        ),
         "dest_bucket": env.get("DEST_BUCKET", ""),
         "database": database,
         "table": table,
     }
 
 
-def list_source_logs(session, buckets, source_prefix, day_path):
-    """Return the set of .json.gz keys for the given day across all source
-    buckets (as (bucket, key) tuples)."""
+def list_source_logs(session, source_locations, day_path):
+    """Return .json.gz keys for one day across all source locations."""
     s3 = session.client("s3")
     found = set()
-    for bucket in buckets:
+    for bucket, prefix in source_locations:
         paginator = s3.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=bucket, Prefix=f"{source_prefix}AWSLogs/"):
+        for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}AWSLogs/"):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 if key.endswith(".json.gz") and day_path in key:
@@ -196,14 +212,12 @@ def list_source_logs(session, buckets, source_prefix, day_path):
     return found
 
 
-def wait_for_new_source_log(session, buckets, source_prefix, day_path, baseline,
+def wait_for_new_source_log(session, source_locations, day_path, baseline,
                             timeout_s=420, poll_s=20):
-    """Wait until a .json.gz for today's date appears that was not in the
-    baseline set (i.e. delivered by the invocations we just sent). Returns the
-    set of new keys, or an empty set on timeout."""
+    """Wait for a newly delivered .json.gz source object."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        current = list_source_logs(session, buckets, source_prefix, day_path)
+        current = list_source_logs(session, source_locations, day_path)
         new = current - baseline
         if new:
             for bucket, key in sorted(new):
@@ -291,11 +305,10 @@ def main():
     baseline = set()
     if args.collect:
         pipeline = discover_pipeline(session, args.collector_stack_name)
-        if not pipeline["source_buckets"]:
+        if not pipeline["source_locations"]:
             print("ERROR: the collector has no SOURCE_BUCKETS configured.", file=sys.stderr)
             return 1
-        baseline = list_source_logs(session, pipeline["source_buckets"],
-                                    pipeline["source_prefix"], today)
+        baseline = list_source_logs(session, pipeline["source_locations"], today)
 
     client = session.client("bedrock-runtime")
     # Alternate between the two APIs so the logs contain BOTH schemas:
@@ -320,14 +333,18 @@ def main():
     print("\n=== Collecting and verifying pipeline ===")
     print(f"  stack:         {pipeline['stack_name']}")
     print(f"  collector:     {pipeline['lambda_name']}")
-    print(f"  source bucket: {', '.join(pipeline['source_buckets'])}")
+    source_labels = [
+        bucket + (f"/{prefix.rstrip('/')}" if prefix else "")
+        for bucket, prefix in pipeline["source_locations"]
+    ]
+    print(f"  source(s):     {', '.join(source_labels)}")
     print(f"  destination:   {pipeline['dest_bucket']}")
     print(f"  table:         {pipeline['database']}.{pipeline['table']}")
 
     print(f"\nWaiting for Bedrock to deliver the new invocation log(s) for today "
           f"({today}) to S3 (up to {args.timeout}s)...")
-    if not wait_for_new_source_log(session, pipeline["source_buckets"], pipeline["source_prefix"],
-                                   today, baseline, timeout_s=args.timeout):
+    if not wait_for_new_source_log(session, pipeline["source_locations"], today,
+                                   baseline, timeout_s=args.timeout):
         print("ERROR: no new source log delivered within the timeout. Bedrock S3 "
               "log delivery can lag several minutes; try increasing --timeout.", file=sys.stderr)
         return 1

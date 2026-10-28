@@ -33,9 +33,9 @@ REGIONS = "us-east-1,eu-west-1"
 # per-account naming convention; override with KIRO_SOURCE_BUCKETS to point at
 # a specific bucket without committing an account id to source control.
 KIRO_SOURCE_BUCKETS = os.environ.get('KIRO_SOURCE_BUCKETS', f'cid-dc-kiro-activity-{account_id}')
-# Bedrock source bucket holding the test model-invocation logs. Defaults to the
-# per-account naming convention; override with BEDROCK_SOURCE_BUCKETS to point at
-# a specific bucket without committing an account id to source control.
+# Bedrock source locations used by the integration test. Each comma-separated
+# value is bucket-name for root delivery or bucket-name/prefix for prefixed
+# delivery. Override without committing an account ID to source control.
 BEDROCK_SOURCE_BUCKETS = os.environ.get('BEDROCK_SOURCE_BUCKETS', f'bedrock-logs-{account_id}-{region}')
 TMP_BUCKET_PREFIX =  f'cid-{account_id}-test'
 TMP_BUCKET = f'{TMP_BUCKET_PREFIX}-{region}'
@@ -527,53 +527,292 @@ def trigger_kiro_collection(account_id):
 
 
 def trigger_bedrock_collection(account_id):
-    """Seed a Bedrock model-invocation log at today's partition and run the collector.
+    """Seed 100 realistic Bedrock invocations and run the collector."""
+    source_location = BEDROCK_SOURCE_BUCKETS.split(',')[0].strip()
+    source_bucket, _, source_prefix = source_location.partition('/')
+    source_prefix = source_prefix.rstrip('/')
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_seconds = max((now - day_start).total_seconds(), 100)
 
-    The Bedrock collector is a scheduled Lambda (not part of the state-machine
-    collection triggered by trigger_update). It reads .json.gz objects from the
-    source bucket, so we seed a synthetic gzipped invocation record for today and
-    invoke the Lambda synchronously to populate the bedrock_logs table.
-    """
-    source_bucket = BEDROCK_SOURCE_BUCKETS.split(',')[0].strip()
-    now = time.gmtime()
-    key = (
-        f"model-invocation-logs/AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/"
-        f"{now.tm_year}/{now.tm_mon:02d}/{now.tm_mday:02d}/00/"
-        f"{now.tm_year}{now.tm_mon:02d}{now.tm_mday:02d}T000000000Z_test.json.gz"
-    )
-    record = {
-        "schemaType": "ModelInvocationLog",
-        "schemaVersion": "1.0",
-        "timestamp": f"{now.tm_year}-{now.tm_mon:02d}-{now.tm_mday:02d}T00:00:00Z",
-        "accountId": account_id,
-        "region": region,
-        "requestId": "test-request-0001",
-        "operation": "InvokeModel",
-        "modelId": "amazon.nova-micro-v1:0",
-        "identity": {"arn": f"arn:aws:sts::{account_id}:assumed-role/test-role/test-session"},
-        "requestMetadata": {},
-        "input": {
-            "inputBodyJson": {"messages": [{"role": "user", "content": [{"text": "test"}]}]},
-            "inputContentType": "application/json",
-            "inputTokenCount": 3,
+    workloads = [
+        {
+            'user': 'user-001', 'role': 'frontend-engineer', 'department': 'engineering',
+            'application': 'claude-code', 'use_case': 'coding_assistant',
+            'context': 'customer-portal',
+            'models': ('anthropic.claude-3-5-sonnet-20241022-v2:0', 'amazon.nova-pro-v1:0'),
         },
-        "output": {
-            "outputBodyJson": {"output": {"message": {"content": [{"text": "hi"}]}},
-                               "usage": {"inputTokens": 3, "outputTokens": 5, "totalTokens": 8}},
-            "outputContentType": "application/json",
-            "outputTokenCount": 5,
+        {
+            'user': 'user-002', 'role': 'backend-engineer', 'department': 'engineering',
+            'application': 'claude-code', 'use_case': 'coding_assistant',
+            'context': 'orders-api',
+            'models': ('anthropic.claude-3-5-sonnet-20241022-v2:0', 'anthropic.claude-3-haiku-20240307-v1:0'),
         },
+        {
+            'user': 'user-003', 'role': 'data-engineer', 'department': 'analytics',
+            'application': 'developer-assistant', 'use_case': 'coding_assistant',
+            'context': 'daily-etl-pipeline',
+            'models': ('amazon.nova-pro-v1:0', 'anthropic.claude-3-5-sonnet-20241022-v2:0'),
+        },
+        {
+            'user': 'user-004', 'role': 'security-engineer', 'department': 'security',
+            'application': 'code-review-assistant', 'use_case': 'coding_assistant',
+            'context': 'identity-service',
+            'models': ('anthropic.claude-3-5-sonnet-20241022-v2:0', 'amazon.nova-pro-v1:0'),
+        },
+        {
+            'user': 'user-005', 'role': 'support-agent', 'department': 'customer-support',
+            'application': 'retail-chatbot', 'use_case': 'customer_support_chatbot',
+            'context': 'online-store',
+            'models': ('amazon.nova-lite-v1:0', 'amazon.nova-micro-v1:0'),
+        },
+        {
+            'user': 'user-006', 'role': 'support-agent', 'department': 'customer-support',
+            'application': 'travel-chatbot', 'use_case': 'customer_support_chatbot',
+            'context': 'travel-booking',
+            'models': ('anthropic.claude-3-haiku-20240307-v1:0', 'amazon.nova-lite-v1:0'),
+        },
+        {
+            'user': 'user-007', 'role': 'solutions-architect', 'department': 'field-operations',
+            'application': 'enterprise-search', 'use_case': 'enterprise_knowledge',
+            'context': 'architecture-knowledge-base',
+            'models': ('amazon.nova-pro-v1:0', 'anthropic.claude-3-5-sonnet-20241022-v2:0'),
+        },
+        {
+            'user': 'user-008', 'role': 'financial-analyst', 'department': 'finance',
+            'application': 'analytics-copilot', 'use_case': 'data_analysis',
+            'context': 'monthly-cloud-spend',
+            'models': ('anthropic.claude-3-5-sonnet-20241022-v2:0', 'amazon.nova-pro-v1:0'),
+        },
+        {
+            'user': 'user-009', 'role': 'marketing-manager', 'department': 'marketing',
+            'application': 'content-studio', 'use_case': 'content_generation',
+            'context': 'product-launch-campaign',
+            'models': ('amazon.nova-lite-v1:0', 'anthropic.claude-3-haiku-20240307-v1:0'),
+        },
+        {
+            'user': 'user-010', 'role': 'operations-manager', 'department': 'operations',
+            'application': 'document-automation', 'use_case': 'document_processing',
+            'context': 'vendor-contracts',
+            'models': ('amazon.nova-pro-v1:0', 'anthropic.claude-3-5-sonnet-20241022-v2:0'),
+        },
+    ]
+    prompts = {
+        'coding_assistant': [
+            'Inspect the failing tests in {context}, identify the root cause, and implement the smallest safe fix.',
+            'Review the current changes in {context} for correctness, security issues, and missing edge cases.',
+            'Refactor the authentication flow in {context} to remove duplication without changing behavior.',
+            'Trace the request path through {context} and explain why the API returns a 500 response.',
+            'Add pagination to the list endpoint in {context} while preserving existing client compatibility.',
+            'Optimize the slow database query in {context} and explain the expected performance improvement.',
+            'Generate unit tests for the retry logic in {context}, including timeout and throttling cases.',
+            'Upgrade the deprecated dependency in {context} and update code affected by breaking changes.',
+            'Document the local setup and deployment workflow for a new contributor to {context}.',
+            'Summarize this pull request for {context} and call out any operational risks before release.',
+        ],
+        'customer_support_chatbot': [
+            'I was charged twice for my last {context} purchase. How can I request a refund?',
+            'My {context} order says delivered, but I have not received it. What should I do?',
+            'How do I change the email address associated with my {context} account?',
+            'Can I cancel my {context} reservation without paying a cancellation fee?',
+            'The discount code is not working during {context} checkout. Can you help?',
+            'I forgot my password and the {context} reset email has not arrived.',
+            'Where can I download an invoice for my recent {context} transaction?',
+            'The mobile app crashes whenever I open my {context} booking details.',
+            'Can you explain why the total price for {context} changed at checkout?',
+            'I need to speak with a person about an urgent issue with {context}.',
+        ],
+        'enterprise_knowledge': [
+            'Find the approved reference architecture for {context} and summarize its required controls.',
+            'What is the escalation process documented in {context} for a critical production incident?',
+            'Compare the two database migration approaches described in {context}.',
+            'Summarize the onboarding checklist in {context} for a new service team.',
+            'Which data retention requirements in {context} apply to customer event records?',
+            'Locate the runbook in {context} for rotating an expired service certificate.',
+            'What availability target and recovery objectives are defined in {context}?',
+            'List the owners and review dates for the standards stored in {context}.',
+            'Explain the exception process in {context} when a required control cannot be met.',
+            'Create a concise FAQ from the most frequently accessed articles in {context}.',
+        ],
+        'data_analysis': [
+            'Analyze {context} and identify the five services with the largest month-over-month increase.',
+            'Explain the main drivers behind this week\'s variance in {context}.',
+            'Create an executive summary of savings opportunities found in {context}.',
+            'Detect unusual daily spikes in {context} and suggest likely causes to investigate.',
+            'Group {context} by team and compare actual spend with each team\'s budget.',
+            'Forecast the next three months using the seasonality visible in {context}.',
+            'Identify resources in {context} with steady spend but very low utilization.',
+            'Calculate unit cost per customer transaction from {context}.',
+            'Summarize how commitment discounts changed the effective cost in {context}.',
+            'Turn the key findings from {context} into three recommendations for leadership.',
+        ],
+        'content_generation': [
+            'Draft a customer announcement for {context} with a clear value proposition and call to action.',
+            'Create five concise social posts promoting {context} for technical audiences.',
+            'Rewrite the {context} landing-page copy in a direct, helpful tone.',
+            'Generate an email subject line and preview text for each stage of {context}.',
+            'Turn the product brief for {context} into a 60-second video script.',
+            'Create an FAQ that addresses likely customer concerns about {context}.',
+            'Suggest ten search-friendly article titles related to {context}.',
+            'Adapt the {context} announcement for customers, partners, and internal teams.',
+            'Review the draft copy for {context} and remove unsupported claims.',
+            'Summarize the results of {context} in a short update for senior leadership.',
+        ],
+        'document_processing': [
+            'Extract renewal dates, notice periods, and payment terms from {context}.',
+            'Compare the liability clauses across the latest documents in {context}.',
+            'Summarize the obligations assigned to our company in {context}.',
+            'Flag missing signatures, exhibits, and required fields in {context}.',
+            'Classify each document in {context} by agreement type and business owner.',
+            'Identify clauses in {context} that differ from our approved standard language.',
+            'Create a table of vendor names, contract values, and expiration dates from {context}.',
+            'Find every reference to automatic renewal in {context} and quote the relevant terms.',
+            'Draft a plain-language summary of the most recent agreement in {context}.',
+            'List the follow-up actions required before the documents in {context} can be approved.',
+        ],
     }
+    response_text = {
+        'coding_assistant': 'I traced the relevant files, identified the failure path, and prepared a focused change with validation steps.',
+        'customer_support_chatbot': 'I can help with that request. Here are the relevant account steps and the available support options.',
+        'enterprise_knowledge': 'I found the relevant internal guidance and summarized the requirements, owners, and next actions.',
+        'data_analysis': 'The analysis shows the primary drivers, notable anomalies, and the highest-impact actions to investigate.',
+        'content_generation': 'I created a concise draft tailored to the requested audience, tone, and campaign objective.',
+        'document_processing': 'I extracted the requested terms and organized the findings with source references for review.',
+    }
+    base_tokens = {
+        'coding_assistant': (1800, 420),
+        'customer_support_chatbot': (180, 120),
+        'enterprise_knowledge': (950, 280),
+        'data_analysis': (1250, 360),
+        'content_generation': (320, 300),
+        'document_processing': (1600, 340),
+    }
+
+    records = []
+    for user_number, workload in enumerate(workloads):
+        use_case = workload['use_case']
+        for prompt_number, prompt_template in enumerate(prompts[use_case]):
+            record_number = user_number * 10 + prompt_number
+            prompt = prompt_template.format(context=workload['context'])
+            response = response_text[use_case]
+            model_id = workload['models'][prompt_number % len(workload['models'])]
+            operation = 'Converse' if record_number % 2 == 0 else 'InvokeModel'
+            input_base, output_base = base_tokens[use_case]
+            input_tokens = input_base + (prompt_number * 97) + (len(prompt.split()) * 2)
+            output_tokens = output_base + ((record_number * 37) % 240)
+            cache_read_tokens = int(input_tokens * 0.65) if prompt_number > 0 else 0
+            cache_write_tokens = int(input_tokens * 0.75) if prompt_number == 0 else 0
+
+            if operation == 'Converse':
+                input_body = {'messages': [{'role': 'user', 'content': [{'text': prompt}]}]}
+                usage = {
+                    'inputTokens': input_tokens,
+                    'outputTokens': output_tokens,
+                    'totalTokens': input_tokens + output_tokens,
+                }
+                if use_case in ('coding_assistant', 'document_processing'):
+                    usage.update({
+                        'cacheReadInputTokens': cache_read_tokens,
+                        'cacheWriteInputTokens': cache_write_tokens,
+                    })
+                output_body = {
+                    'output': {'message': {'role': 'assistant', 'content': [{'text': response}]}},
+                    'usage': usage,
+                    'stopReason': 'end_turn',
+                }
+            elif model_id.startswith('anthropic.'):
+                input_body = {
+                    'anthropic_version': 'bedrock-2023-05-31',
+                    'max_tokens': 1024,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                }
+                usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens}
+                if use_case in ('coding_assistant', 'document_processing'):
+                    usage.update({
+                        'cache_read_input_tokens': cache_read_tokens,
+                        'cache_creation_input_tokens': cache_write_tokens,
+                    })
+                output_body = {
+                    'content': [{'type': 'text', 'text': response}],
+                    'usage': usage,
+                    'stop_reason': 'end_turn',
+                }
+            else:
+                input_body = {
+                    'messages': [{'role': 'user', 'content': [{'text': prompt}]}],
+                    'inferenceConfig': {'max_new_tokens': 1024},
+                }
+                output_body = {
+                    'output': {'message': {'role': 'assistant', 'content': [{'text': response}]}},
+                    'usage': {
+                        'inputTokens': input_tokens,
+                        'outputTokens': output_tokens,
+                        'totalTokens': input_tokens + output_tokens,
+                    },
+                    'stopReason': 'end_turn',
+                }
+
+            invocation_time = day_start + timedelta(
+                seconds=elapsed_seconds * (record_number + 1) / 101
+            )
+            records.append({
+                'schemaType': 'ModelInvocationLog',
+                'schemaVersion': '1.0',
+                'timestamp': invocation_time.isoformat(),
+                'accountId': account_id,
+                'region': region,
+                'requestId': f'cid-synthetic-{now:%Y%m%d}-{record_number + 1:03d}',
+                'operation': operation,
+                'modelId': model_id,
+                'identity': {
+                    'arn': f"arn:aws:sts::{account_id}:assumed-role/{workload['role']}/{workload['user']}"
+                },
+                'requestMetadata': {
+                    'application': workload['application'],
+                    'department': workload['department'],
+                    'use_case': use_case,
+                    'user_role': workload['role'],
+                    'synthetic': 'true',
+                },
+                'input': {
+                    'inputBodyJson': input_body,
+                    'inputContentType': 'application/json',
+                    'inputTokenCount': input_tokens,
+                },
+                'output': {
+                    'outputBodyJson': output_body,
+                    'outputContentType': 'application/json',
+                    'outputTokenCount': output_tokens,
+                },
+            })
+
+    assert len(records) == 100
+    key_prefix = f'{source_prefix}/' if source_prefix else ''
+    key = (
+        f'{key_prefix}AWSLogs/{account_id}/BedrockModelInvocationLogs/{region}/'
+        f'{now:%Y/%m/%d/%H}/{now:%Y%m%dT%H%M%S000Z}_synthetic-usage.json.gz'
+    )
     gz = io.BytesIO()
-    with gzip.GzipFile(fileobj=gz, mode='wb') as f:
-        f.write(json.dumps(record).encode('utf-8'))
-    boto3.client('s3').put_object(Bucket=source_bucket, Key=key, Body=gz.getvalue(), ContentType='application/gzip')
+    with gzip.GzipFile(fileobj=gz, mode='wb') as compressed:
+        compressed.write(json.dumps(records).encode('utf-8'))
+    boto3.client('s3').put_object(
+        Bucket=source_bucket,
+        Key=key,
+        Body=gz.getvalue(),
+        ContentType='application/gzip',
+    )
     response = boto3.client('lambda').invoke(
         FunctionName=f'{PREFIX}bedrock-Lambda',
         InvocationType='RequestResponse',
     )
     payload = json.loads(response['Payload'].read())
-    logger.info(f'Bedrock collector response: {payload}')
+    logger.info(
+        'Seeded %d Bedrock invocations across %d users and %d models. Collector response: %s',
+        len(records),
+        len(workloads),
+        len({record['modelId'] for record in records}),
+        payload,
+    )
 
 
 def prepare_stacks(cloudformation, account_id, org_unit_id, s3, s3client, bucket):

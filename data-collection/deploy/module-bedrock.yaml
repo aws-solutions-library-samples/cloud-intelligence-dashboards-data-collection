@@ -39,11 +39,9 @@ Parameters:
     Default: "rate(1 day)"
   BedrockSourceBuckets:
     Type: CommaDelimitedList
-    Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
-  BedrockLogPrefix:
-    Type: String
-    Description: "Optional S3 prefix under which Bedrock writes model-invocation logs in each source bucket. Leave empty (the default) when Bedrock delivers to the bucket root, which is Bedrock's default (keyPrefix: ''). If you set a non-empty keyPrefix in your Bedrock logging configuration, enter the same value here; a trailing slash is added automatically if missing."
-    Default: ""
+    Description: "Comma-separated S3 source locations. Use bucket-name for logs under AWSLogs/ at the bucket root, or bucket-name/prefix for logs under prefix/AWSLogs/. Do not include s3:// or a trailing slash. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1/model-invocation-logs"
+    AllowedPattern: '^[^/,\s]+(?:/[^/,\s]+(?:/[^/,\s]+)*)?$'
+    ConstraintDescription: "Each value must be bucket-name or bucket-name/prefix with no spaces, commas, empty path segments, or trailing slash."
   SchedulerExecutionRoleARN:
     Type: String
     Description: Common role for module Scheduler execution
@@ -68,7 +66,7 @@ Outputs:
     Description: "Athena table name for the Bedrock invocation logs data"
     Value: !Sub "${DatabaseName}.bedrock_logs"
   BucketPolicyExample:
-    Description: "Example bucket policy statements for customers to apply to their Bedrock logs bucket(s). GetObject is scoped to the Bedrock log prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy."
+    Description: "Illustrative bucket policy statements for one source bucket. Replace the bucket and optional-prefix placeholders for each BedrockSourceBuckets entry; the Lambda role ARN is populated for you."
     Value: !Sub |
       [
         {
@@ -76,7 +74,7 @@ Outputs:
           "Effect": "Allow",
           "Principal": {"AWS": "${LambdaRole.Arn}"},
           "Action": "s3:GetObject",
-          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/${BedrockLogPrefix}*"
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/YOUR-OPTIONAL-PREFIX/*"
         },
         {
           "Sid": "AllowCIDBedrockDataCollectionList",
@@ -84,7 +82,7 @@ Outputs:
           "Principal": {"AWS": "${LambdaRole.Arn}"},
           "Action": "s3:ListBucket",
           "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME",
-          "Condition": {"StringLike": {"s3:prefix": "${BedrockLogPrefix}*"}}
+          "Condition": {"StringLike": {"s3:prefix": "YOUR-OPTIONAL-PREFIX/AWSLogs/*"}}
         }
       ]
 Resources:
@@ -123,6 +121,39 @@ Resources:
                 Condition:
                   StringLike:
                     "s3:prefix": "bedrock/*"
+        # Read Bedrock model-invocation logs from the source locations. This is
+        # one fixed-size policy rather than one per BedrockSourceBuckets entry,
+        # so the number of source locations is not capped by IAM's
+        # managed-policies-per-role or inline-policy-size quotas.
+        #
+        # Scope is the Bedrock delivery path, not a bucket list: object reads
+        # are limited to .../AWSLogs/{account}/BedrockModelInvocationLogs/...
+        # (the leading * covers both bucket/ and bucket/prefix/), and listing is
+        # limited to the exact prefixes the collector walks. Cross-account
+        # source buckets still need their own bucket policy granting this role,
+        # and BedrockSourceBuckets still decides which locations are collected.
+        - PolicyName: "S3ReadBedrockSourceLogs"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadBedrockInvocationLogObjects
+                Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*/AWSLogs/*/BedrockModelInvocationLogs/*"
+              - Sid: ListBedrockInvocationLogPrefixes
+                Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::*"
+                Condition:
+                  StringLike:
+                    "s3:prefix":
+                      - "AWSLogs/"
+                      - "*/AWSLogs/"
+                      - "*AWSLogs/*/BedrockModelInvocationLogs/*"
         - PolicyName: "GlueRegisterPartitions"
           PolicyDocument:
             Version: "2012-10-17"
@@ -158,27 +189,6 @@ Resources:
         rules_to_suppress:
           - id: W28
             reason: "Need explicit name so customers can reference it in their bucket policies"
-  'Fn::ForEach::BedrockSourceReadPolicies':
-    - Bucket
-    - !Ref BedrockSourceBuckets
-    - 'BedrockSourceReadPolicy&{Bucket}':
-        Type: AWS::IAM::RolePolicy
-        Properties:
-          RoleName: !Ref LambdaRole
-          PolicyName: !Sub "S3Read-${Bucket}"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: "Allow"
-                Action:
-                  - "s3:ListBucket"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}"
-              - Effect: "Allow"
-                Action:
-                  - "s3:GetObject"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::${Bucket}/${BedrockLogPrefix}*"
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -202,19 +212,22 @@ Resources:
           glue = boto3.client('glue')
 
           DEST_BUCKET = os.environ['DEST_BUCKET']
-          SOURCE_BUCKETS = os.environ['SOURCE_BUCKETS'].split(',')
-          # Normalise the configured prefix: empty means Bedrock delivers to the
-          # bucket root (its default keyPrefix: ''). A non-empty prefix gets a
-          # single trailing slash. Bedrock's own layout places AWSLogs/ directly
-          # under this prefix, so the source walk lists '{prefix}AWSLogs/' and
-          # then descends by account and region.
-          def _normalise_prefix(p):
-              p = (p or '').strip()
-              if p and not p.endswith('/'):
-                  p = p + '/'
-              return p
 
-          SOURCE_PREFIX = _normalise_prefix(os.environ.get('SOURCE_PREFIX', ''))
+          def parse_source_location(value):
+              """Return (bucket, prefix/) from bucket or bucket/prefix."""
+              location = value.strip()
+              bucket, separator, prefix = location.partition('/')
+              if (not bucket or any(char.isspace() for char in location)
+                      or (separator and (not prefix or prefix.startswith('/')
+                                         or prefix.endswith('/') or '//' in prefix))):
+                  raise ValueError(f'Invalid Bedrock source location: {value}')
+              return bucket, f'{prefix}/' if prefix else ''
+
+          SOURCE_LOCATIONS = [
+              parse_source_location(value)
+              for value in os.environ['SOURCE_BUCKETS'].split(',')
+              if value.strip()
+          ]
           DEST_PREFIX = 'bedrock/bedrock_logs'
           GLUE_DATABASE = os.environ['GLUE_DATABASE']
           GLUE_TABLE = os.environ['GLUE_TABLE']
@@ -329,7 +342,7 @@ Resources:
                               imported.add(key)
               return imported
 
-          def list_source_day_keys(source_bucket, day_tuples):
+          def list_source_day_keys(source_bucket, source_prefix, day_tuples):
               """List only the source .json.gz keys that fall inside the window,
               by walking Bedrock's layout folder-by-folder instead of listing the
               whole bucket:
@@ -337,7 +350,7 @@ Resources:
               Yields (account_id, region, year, month, day, key). Runtime scales
               with (accounts x regions x window days), not with total history."""
               want = set(day_tuples)
-              awslogs_root = f'{SOURCE_PREFIX}AWSLogs/'
+              awslogs_root = f'{source_prefix}AWSLogs/'
               for acct_prefix in _list_common_prefixes(source_bucket, awslogs_root):
                   # acct_prefix = {prefix}AWSLogs/{account}/
                   account_id = acct_prefix.rstrip('/').split('/')[-1]
@@ -467,9 +480,6 @@ Resources:
 
               collection_time = datetime.now(timezone.utc).isoformat()
               window = window_day_tuples(days)
-              source_buckets = [
-                  bucket.strip() for bucket in SOURCE_BUCKETS if bucket.strip()
-              ]
 
               errors = []
               try:
@@ -499,13 +509,13 @@ Resources:
                       pending = []
                       pending_dest_keys = set()
 
-                      for source_bucket in source_buckets:
+                      for source_bucket, source_prefix in SOURCE_LOCATIONS:
                           if should_stop():
                               stopped_early = True
                               break
                           try:
                               day_keys = list_source_day_keys(
-                                  source_bucket, [day_tuple]
+                                  source_bucket, source_prefix, [day_tuple]
                               )
                               for account_id, region, year, month, day, \
                                       filename, key in day_keys:
@@ -601,7 +611,6 @@ Resources:
         Variables:
           DEST_BUCKET: !Ref DestinationBucket
           SOURCE_BUCKETS: !Join [ ',', !Ref BedrockSourceBuckets ]
-          SOURCE_PREFIX: !Ref BedrockLogPrefix
           GLUE_DATABASE: !Ref DatabaseName
           GLUE_TABLE: bedrock_logs
     Metadata:

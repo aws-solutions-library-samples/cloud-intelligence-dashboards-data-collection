@@ -58,7 +58,6 @@ Metadata:
           default: 'Amazon Bedrock Module Configuration'
         Parameters:
           - BedrockSourceBuckets
-          - BedrockLogPrefix
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -135,9 +134,7 @@ Metadata:
       IncludeBedrockModule:
         default: 'Include Amazon Bedrock Data Collection Module'
       BedrockSourceBuckets:
-        default: 'Bedrock Source Bucket Names (comma-separated)'
-      BedrockLogPrefix:
-        default: 'Bedrock Log Prefix (optional; leave empty for root delivery)'
+        default: 'Bedrock Source Locations (comma-separated)'
 
 Mappings:
   RegionMap:
@@ -339,11 +336,7 @@ Parameters:
     Default: 'no'
   BedrockSourceBuckets:
     Type: String
-    Description: "Comma-separated list of S3 bucket names where Amazon Bedrock writes model-invocation logs. Required if IncludeBedrockModule is yes. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1"
-    Default: ""
-  BedrockLogPrefix:
-    Type: String
-    Description: "Optional S3 prefix under which Bedrock writes model-invocation logs. Leave empty (the default) when Bedrock delivers to the bucket root (its default). If you set a non-empty keyPrefix in your Bedrock logging configuration, enter the same value here."
+    Description: "Comma-separated S3 source locations. Use bucket-name for logs under AWSLogs/ at the bucket root, or bucket-name/prefix for logs under prefix/AWSLogs/. Required if IncludeBedrockModule is yes. Do not include s3:// or a trailing slash. Example: bedrock-logs-111111111111-us-east-1,bedrock-logs-222222222222-us-east-1/model-invocation-logs"
     Default: ""
   IncludeIdentityCenterModule:
     Type: String
@@ -426,16 +419,14 @@ Rules:
     Assertions:
       - Assert: !Not [ !Equals [ !Ref KiroSourceBuckets, "" ] ]
         AssertDescription: "IncludeKiroUserActivityModule is 'yes' but KiroSourceBuckets is empty. Provide at least one source bucket name (comma-separated)."
-  # Guard: an enabled Bedrock module must be given at least one source bucket.
-  # Without this, BedrockSourceBuckets="" flows into the module's
-  # CommaDelimitedList as [""], and its Fn::ForEach would emit a bucket-read
-  # policy with an empty ARN (arn:aws:s3:::) and an empty logical-ID suffix.
-  # Reject at stack-create time instead so no malformed IAM policy is created.
+  # An enabled Bedrock module must have at least one source location.
+  # The nested module validates each comma-delimited entry as bucket-name or
+  # bucket-name/prefix before constructing its S3 permissions.
   BedrockSourceBucketsRequiredWhenModuleEnabled:
     RuleCondition: !Equals [ !Ref IncludeBedrockModule, "yes" ]
     Assertions:
       - Assert: !Not [ !Equals [ !Ref BedrockSourceBuckets, "" ] ]
-        AssertDescription: "IncludeBedrockModule is 'yes' but BedrockSourceBuckets is empty. Provide at least one source bucket name (comma-separated)."
+        AssertDescription: "IncludeBedrockModule is 'yes' but BedrockSourceBuckets is empty. Provide at least one source location (bucket-name or bucket-name/prefix)."
 
 Resources:
   S3Bucket:
@@ -1675,7 +1666,6 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         BedrockSourceBuckets: !Ref BedrockSourceBuckets
-        BedrockLogPrefix: !Ref BedrockLogPrefix
 
   IdentityCenterModule:
     Type: AWS::CloudFormation::Stack
