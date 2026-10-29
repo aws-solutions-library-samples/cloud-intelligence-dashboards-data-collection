@@ -77,7 +77,6 @@ Parameters:
   StepFunctionExecutionRoleARN:
     Type: String
     Description: 'ARN of the Step Function execution role'
-    Default: ''
   DataBucketsKmsKeysArns:
     Type: String
     Description: 'KMS key ARNs for data buckets'
@@ -85,7 +84,6 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: 'ARN of the EventBridge Scheduler execution role'
-    Default: ''
   LambdaManageGlueTableARN:
     Type: String
     Description: 'ARN of the Lambda that manages Glue tables'
