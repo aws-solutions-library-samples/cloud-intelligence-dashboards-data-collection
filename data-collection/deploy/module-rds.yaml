@@ -58,7 +58,6 @@ Parameters:
   LambdaAnalyticsARN:
     Type: String
     Description: 'ARN of the CID Lambda Analytics function'
-    Default: ''
   AccountCollectorLambdaARN:
     Type: String
     Description: 'ARN of the CID Account Collector Lambda'
@@ -73,11 +72,9 @@ Parameters:
   CodeBucket:
     Type: String
     Description: 'S3 bucket for Lambda code'
-    Default: ''
   StepFunctionExecutionRoleARN:
     Type: String
     Description: 'ARN of the Step Function execution role'
-    Default: ''
   DataBucketsKmsKeysArns:
     Type: String
     Description: 'KMS key ARNs for data buckets'
@@ -85,16 +82,13 @@ Parameters:
   SchedulerExecutionRoleARN:
     Type: String
     Description: 'ARN of the EventBridge Scheduler execution role'
-    Default: ''
   LambdaManageGlueTableARN:
     Type: String
     Description: 'ARN of the Lambda that manages Glue tables'
-    Default: ''
 
   # Module-specific parameters
   RegionsInScope:
     Type: String
-    Default: ''
     Description: 'Comma-separated list of AWS regions to collect RDS data from. If empty, uses current region.'
 
   Schedule:
@@ -104,7 +98,6 @@ Parameters:
 
   ResourcePrefix:
     Type: String
-    Default: 'CID-DC-'
     Description: 'CID Data Collection resource prefix (passed by parent stack)'
 
   CFDataName:
