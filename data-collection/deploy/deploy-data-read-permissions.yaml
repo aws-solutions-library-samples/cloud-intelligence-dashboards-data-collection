@@ -24,6 +24,7 @@ Metadata:
           - IncludeSupportCasesModule
           - IncludeECSChargebackModule
           - IncludeHealthEventsModule
+          - IncludeServiceLifecycleModule
           - IncludeInventoryCollectorModule
           - IncludeRDSUtilizationModule
           - IncludeRDSModule
@@ -79,6 +80,8 @@ Metadata:
         default: "Include AWS Backup Collection Module"
       IncludeHealthEventsModule:
         default: "Include AWS Health Events Module"
+      IncludeServiceLifecycleModule:
+        default: "Include AWS Service Lifecycle Module"
       IncludeLicenseManagerModule:
         default: "Include Marketplace Licensing Module"
       IncludeServiceQuotasModule:
@@ -190,6 +193,11 @@ Parameters:
     Description: Collects AWS Health Events from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeServiceLifecycleModule:
+    Type: String
+    Description: Collects AWS service lifecycle data (e.g. end of support and recommended versions) from your payer accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
   IncludeLicenseManagerModule:
     Type: String
     Description: Collects Marketplace Licensing information
@@ -232,6 +240,7 @@ Resources:
         IncludeRightsizingModule: !Ref IncludeRightsizingModule
         IncludeBackupModule: !Ref IncludeBackupModule
         IncludeHealthEventsModule: !Ref IncludeHealthEventsModule
+        IncludeServiceLifecycleModule: !Ref IncludeServiceLifecycleModule
         IncludeLicenseManagerModule: !Ref IncludeLicenseManagerModule
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeIdentityCenterModule: !Ref IncludeIdentityCenterModule
