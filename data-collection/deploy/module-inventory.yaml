@@ -873,6 +873,7 @@ Mappings:
             SerdeInfo:
               Parameters:
                 paths: AmiLaunchIndex,Architecture,BlockDeviceMappings,CapacityReservationSpecification,ClientToken,CpuOptions,CurrentInstanceBootMode,EbsOptimized,EnaSupport,EnclaveOptions,HibernationOptions,Hypervisor,IamInstanceProfile,ImageId,InstanceId,InstanceType,LaunchTime,MaintenanceOptions,MetadataOptions,Monitoring,NetworkInterfaces,Placement,PlatformDetails,PrivateDnsName,PrivateDnsNameOptions,PrivateIpAddress,ProductCodes,PublicDnsName,PublicIpAddress,RootDeviceName,RootDeviceType,SecurityGroups,SourceDestCheck,State,StateTransitionReason,SubnetId,Tags,UsageOperation,UsageOperationUpdateTime,VirtualizationType,VpcId,accountid,collection_date,region
+              SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
           TableType: EXTERNAL_TABLE
 
     VpcInstances:
