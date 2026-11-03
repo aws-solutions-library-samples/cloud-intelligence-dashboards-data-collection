@@ -148,7 +148,7 @@ Parameters:
   # Optional: If provided, data will be replicated from the local bucket to this secondary bucket.
   SecondaryDestinationBucket:
     Type: String
-    Description: "A Bucket name for optional supplementary data replication. If not empty, the export data will be replicated to this bucket. Keep it empty if unsure."
+    Description: "A Bucket name for optional supplementary data replication. If not empty, the exports are delivered to the local bucket and replicated to both the destination bucket and this bucket. Keep it empty if unsure."
     Default: ''
   AddScheduleForBlockingWrite:
     Type: String
@@ -204,7 +204,7 @@ Conditions:
       - Fn::Or:
         - !Condition LegacyLocalBucket
         - !Condition NonEmptySecondaryDestinationBucket
-  DeploySecondaryReplication: # Replication to SecondaryDestinationBucket
+  DeploySecondaryReplication: # With SecondaryDestinationBucket, exports go to SourceS3 and S3 replication copies them to the destination and the secondary bucket
     Fn::And:
       - !Condition IsSourceAccount
       - !Condition DeployDataExport
@@ -370,43 +370,37 @@ Resources:
                     - EmptySourceAccountIds
                     - !Ref AWS::AccountId
                     - !Split [',', !Ref SourceAccountIds]
-          - !If
-            # Legacy replication policy statements retained for backward compatibility.
-            # During the transition from S3 replication to direct Data Export delivery (S3BucketOwner),
-            # source stacks may still replicate data to this bucket until they are updated.
-            # These statements are included only when LegacyLocalBucket=yes (existing deployments)
-            # and will be removed once customers set LegacyLocalBucket=no after completing migration.
-            - LegacyLocalBucket
-            - Sid: AllowReplicationWrite
-              Effect: Allow
-              Principal:
-                AWS:
-                  Fn::If:
-                    - EmptySourceAccountIds
-                    - !Ref AWS::AccountId
-                    - !Split [',', !Ref SourceAccountIds]
-              Action:
-                - s3:ReplicateDelete
-                - s3:ReplicateObject
-              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
-            - !Ref AWS::NoValue
-          - !If
-            - LegacyLocalBucket
-            - Sid: AllowReplicationRead
-              Effect: Allow
-              Principal:
-                AWS:
-                  Fn::If:
-                    - EmptySourceAccountIds
-                    - !Ref AWS::AccountId
-                    - !Split [',', !Ref SourceAccountIds]
-              Action:
-                - s3:ListBucket
-                - s3:ListBucketVersions
-                - s3:GetBucketVersioning
-                - s3:PutBucketVersioning
-              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
-            - !Ref AWS::NoValue
+          # Accept S3 replication from the source accounts. Source stacks with a SecondaryDestinationBucket
+          # deliver exports to their local bucket and replicate them here and to the secondary bucket
+          # (this bucket can be the secondary of another organization). Stacks updated from versions
+          # before 0.11.0 may also still replicate here. The principals are the same accounts that can
+          # already write directly via Data Exports.
+          - Sid: AllowReplicationWrite
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::If:
+                  - EmptySourceAccountIds
+                  - !Ref AWS::AccountId
+                  - !Split [',', !Ref SourceAccountIds]
+            Action:
+              - s3:ReplicateDelete
+              - s3:ReplicateObject
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
+          - Sid: AllowReplicationRead
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::If:
+                  - EmptySourceAccountIds
+                  - !Ref AWS::AccountId
+                  - !Split [',', !Ref SourceAccountIds]
+            Action:
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
 
   # Legacy local bucket retained for backward compatibility during stack updates.
   # Existing stacks had this bucket with DeletionPolicy: Delete. Keeping it here with
@@ -437,12 +431,53 @@ Resources:
         # Versioning is required for S3 replication to SecondaryDestinationBucket
         Status: !If [NonEmptySecondaryDestinationBucket, Enabled, Suspended]
       ReplicationConfiguration:
-        # Replication to SecondaryDestinationBucket only. Replication to the destination bucket
-        # is no longer needed since Data Exports now writes directly via S3BucketOwner.
+        # With SecondaryDestinationBucket, exports are delivered to this bucket (a Data Export has a single
+        # destination) and replicated to both the destination bucket and the secondary bucket.
+        # Without it, exports are written directly to the destination bucket via S3BucketOwner.
         Fn::If:
           - NonEmptySecondaryDestinationBucket
           - Role: !GetAtt ReplicationRole.Arn
             Rules:
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
+                  StorageClass: STANDARD
+                Id: ReplicateCUR2Data
+                Filter:
+                  Prefix: !Sub "cur2/${AWS::AccountId}/${ResourcePrefix}-cur2/data/"
+                Status: !If [ManageCUR2, Enabled, Disabled]
+                Priority: 1
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
+                  StorageClass: STANDARD
+                Id: ReplicateFOCUSData
+                Filter:
+                  Prefix: !Sub "focus/${AWS::AccountId}/${ResourcePrefix}-focus/data/"
+                Status: !If [ManageFOCUS, Enabled, Disabled]
+                Priority: 2
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
+                  StorageClass: STANDARD
+                Id: ReplicateCOHData
+                Filter:
+                  Prefix: !Sub "coh/${AWS::AccountId}/${ResourcePrefix}-coh/data/"
+                Status: !If [ManageCOH, Enabled, Disabled]
+                Priority: 3
+                DeleteMarkerReplication:
+                  Status: Enabled
+              - Destination:
+                  Bucket: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports"
+                  StorageClass: STANDARD
+                Id: ReplicateCarbonData
+                Filter:
+                  Prefix: !Sub "carbon/${AWS::AccountId}/${ResourcePrefix}-carbon/data/"
+                Status: !If [ManageCarbon, Enabled, Disabled]
+                Priority: 4
+                DeleteMarkerReplication:
+                  Status: Enabled
               - Destination:
                   Bucket: !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}"
                   StorageClass: STANDARD
@@ -509,7 +544,55 @@ Resources:
           ignore_checks:
             - W3045 # Need to use AccessControl
 
-  # IAM role for S3 replication to SecondaryDestinationBucket.
+  # Lets Data Exports write to the local bucket. Only needed when exports are delivered locally
+  # (SecondaryDestinationBucket is provided).
+  SourceS3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Condition: DeploySecondaryReplication
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Bucket: !Ref SourceS3
+      PolicyDocument:
+        Id: AllowBillingReadAndWrite
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowTLS12Only
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
+            Condition:
+              NumericLessThan:
+                s3:TlsVersion: 1.2
+          - Sid: AllowOnlyHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: AllowBillingReadAndWrite
+            Effect: Allow
+            Principal:
+              Service: bcm-data-exports.amazonaws.com
+            Action:
+              - s3:GetBucketAcl
+              - s3:GetBucketPolicy
+              - s3:PutObject
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}'
+              - !Sub 'arn:${AWS::Partition}:s3:::${SourceS3}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # IAM role for S3 replication from the local bucket to the destination bucket and SecondaryDestinationBucket.
   # Only created when SecondaryDestinationBucket is provided.
   ReplicationRole:
     Condition: DeploySecondaryReplication
@@ -545,6 +628,7 @@ Resources:
                   - s3:ReplicateDelete
                   - s3:ReplicateTags
                 Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-${DestinationAccountId}-data-exports/*/${AWS::AccountId}/*"
                   - !Sub "arn:${AWS::Partition}:s3:::${SecondaryDestinationBucket}/*/${AWS::AccountId}/*"
 
   BucketWriteBlockerLambdaRole:
@@ -669,7 +753,7 @@ Resources:
       # Implicit dependency: in same-account deployments (IsDestinationAccount=true), reference the
       # bucket policy so CFN waits for it before creating the export. Data Exports validate S3 write
       # permissions at creation time, so the bucket policy must exist first.
-      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, '']]
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -688,8 +772,8 @@ Resources:
         Description: "CUR 2.0 export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "cur2/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -707,6 +791,7 @@ Resources:
     Condition: DeployCUR2ViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
+      BucketPolicyWait: !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, !Ref AWS::NoValue]
       Export:
         DataQuery:
           QueryStatement: !If
@@ -723,8 +808,8 @@ Resources:
         Description: "CUR 2.0 export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "cur2/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -743,7 +828,7 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployFOCUSViaCFN
     Metadata:
-      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, '']]
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -755,8 +840,8 @@ Resources:
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "focus/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -774,6 +859,7 @@ Resources:
     Condition: DeployFOCUSViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
+      BucketPolicyWait: !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, !Ref AWS::NoValue]
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, FOCUS, DefaultQuery]
@@ -783,8 +869,8 @@ Resources:
         Description: "FOCUS export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "focus/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -805,7 +891,7 @@ Resources:
     DependsOn:
       - CreateServiceLinkedRoleCustomResource
     Metadata:
-      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, '']]
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -818,8 +904,8 @@ Resources:
         Description: "Cost Optimization Hub Recommendations export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "coh/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -839,6 +925,7 @@ Resources:
     Condition: DeployCOHViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
+      BucketPolicyWait: !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, !Ref AWS::NoValue]
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, COH, DefaultQuery]
@@ -849,8 +936,8 @@ Resources:
         Description: "Cost Optimization Hub Recommendations export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "coh/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -1032,7 +1119,7 @@ Resources:
     Type: AWS::BCMDataExports::Export
     Condition: DeployCarbonViaCFN
     Metadata:
-      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, '']
+      BucketPolicyDependency: !If [IsDestinationAccount, !Ref DestinationS3BucketPolicy, !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, '']]
       cfn-lint: { config: { ignore_checks: [E3002] } } # S3BucketOwner is a new property not yet in cfn-lint schema
     Properties:
       Export:
@@ -1041,8 +1128,8 @@ Resources:
         Description: "Carbon emissions export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "carbon/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
@@ -1060,14 +1147,15 @@ Resources:
     Condition: DeployCarbonViaLambda
     Properties:
       ServiceToken: !GetAtt CidDataExportCreatorLambda.Arn
+      BucketPolicyWait: !If [DeploySecondaryReplication, !Ref SourceS3BucketPolicy, !Ref AWS::NoValue]
       Export:
         DataQuery:
           QueryStatement: !FindInMap [DataExports, Carbon, DefaultQuery]
         Description: "Carbon emissions export for aggregation in CID"
         DestinationConfigurations:
           S3Destination:
-            S3Bucket: !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"
-            S3BucketOwner: !Ref DestinationAccountId
+            S3Bucket: !If [DeploySecondaryReplication, !Ref SourceS3, !Sub "${ResourcePrefix}-${DestinationAccountId}-data-exports"]
+            S3BucketOwner: !If [DeploySecondaryReplication, !Ref AWS::NoValue, !Ref DestinationAccountId]
             S3Prefix: !Sub "carbon/${AWS::AccountId}"
             S3Region: !Ref AWS::Region
             S3OutputConfigurations:
