@@ -31,6 +31,7 @@ Metadata:
           - FOCUSTimeGranularity
           - LegacyLocalBucket
           - SecondaryDestinationBucket
+          - AcceptReplicationFromSources
 
     ParameterLabels:
       ManageCOH:
@@ -61,6 +62,8 @@ Metadata:
         default: "Legacy Local Bucket (set to 'no' for new deployments)"
       SecondaryDestinationBucket:
         default: "Secondary Destination Bucket Name. Keep it Empty."
+      AcceptReplicationFromSources:
+        default: "Accept S3 replication from Source Accounts. Keep 'no'."
 
 
 Parameters:
@@ -150,6 +153,11 @@ Parameters:
     Type: String
     Description: "A Bucket name for optional supplementary data replication. If not empty, the exports are delivered to the local bucket and replicated to both the destination bucket and this bucket. Keep it empty if unsure."
     Default: ''
+  AcceptReplicationFromSources:
+    Type: String
+    Description: "Destination account only. Set 'yes' only if a Source stack uses SecondaryDestinationBucket and replicates to this bucket (this destination or the secondary one). Not needed with LegacyLocalBucket=yes. Keep 'no' if unsure."
+    Default: "no"
+    AllowedValues: ["yes", "no"]
   AddScheduleForBlockingWrite:
     Type: String
     Description: 'Set yes to schedule Disabling/Enabling schedule to stop Data Export writes for a short period of time to secure QuickSight Dataset refresh.'
@@ -189,6 +197,7 @@ Conditions:
   ManageCarbon: !Equals [!Ref ManageCarbon, "yes"]
   EnableSCAD: !Equals [!Ref EnableSCAD, 'yes']
   LegacyLocalBucket: !Equals [!Ref LegacyLocalBucket, 'yes']
+  AcceptReplication: !Or [!Condition LegacyLocalBucket, !Equals [!Ref AcceptReplicationFromSources, 'yes']]
   NonEmptySecondaryDestinationBucket: !Not [ !Equals [ !Ref SecondaryDestinationBucket, ''] ]
   EnableIAMPrincipalData: !Equals [!Ref EnableIAMPrincipalData, 'yes']
   DeployDataExport:
@@ -370,37 +379,42 @@ Resources:
                     - EmptySourceAccountIds
                     - !Ref AWS::AccountId
                     - !Split [',', !Ref SourceAccountIds]
-          # Accept S3 replication from the source accounts. Source stacks with a SecondaryDestinationBucket
-          # deliver exports to their local bucket and replicate them here and to the secondary bucket
-          # (this bucket can be the secondary of another organization). Stacks updated from versions
-          # before 0.11.0 may also still replicate here. The principals are the same accounts that can
-          # already write directly via Data Exports.
-          - Sid: AllowReplicationWrite
-            Effect: Allow
-            Principal:
-              AWS:
-                Fn::If:
-                  - EmptySourceAccountIds
-                  - !Ref AWS::AccountId
-                  - !Split [',', !Ref SourceAccountIds]
-            Action:
-              - s3:ReplicateDelete
-              - s3:ReplicateObject
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
-          - Sid: AllowReplicationRead
-            Effect: Allow
-            Principal:
-              AWS:
-                Fn::If:
-                  - EmptySourceAccountIds
-                  - !Ref AWS::AccountId
-                  - !Split [',', !Ref SourceAccountIds]
-            Action:
-              - s3:ListBucket
-              - s3:ListBucketVersions
-              - s3:GetBucketVersioning
-              - s3:PutBucketVersioning
-            Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
+          - !If
+            # S3 replication from the source accounts, included with LegacyLocalBucket=yes or AcceptReplicationFromSources=yes.
+            # Needed while source stacks updated from versions before 0.11.0 still replicate here, and for Source stacks
+            # with SecondaryDestinationBucket, which deliver to their local bucket and replicate to this bucket.
+            # Do not remove together with LegacyLocalBucket: SecondaryDestinationBucket relies on these statements.
+            - AcceptReplication
+            - Sid: AllowReplicationWrite
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ReplicateDelete
+                - s3:ReplicateObject
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}/*'
+            - !Ref AWS::NoValue
+          - !If
+            - AcceptReplication
+            - Sid: AllowReplicationRead
+              Effect: Allow
+              Principal:
+                AWS:
+                  Fn::If:
+                    - EmptySourceAccountIds
+                    - !Ref AWS::AccountId
+                    - !Split [',', !Ref SourceAccountIds]
+              Action:
+                - s3:ListBucket
+                - s3:ListBucketVersions
+                - s3:GetBucketVersioning
+                - s3:PutBucketVersioning
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${DestinationS3}'
+            - !Ref AWS::NoValue
 
   # Legacy local bucket retained for backward compatibility during stack updates.
   # Existing stacks had this bucket with DeletionPolicy: Delete. Keeping it here with
