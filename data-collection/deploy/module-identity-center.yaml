@@ -218,7 +218,6 @@ Resources:
                       return 0
 
                   for user in users:
-                      user['payer_id'] = payer_id
                       user['collection_timestamp'] = collection_timestamp
 
                   json_lines = "\n".join(json.dumps(user, cls=DateTimeEncoder) for user in users)
@@ -249,7 +248,6 @@ Resources:
                       return []
 
                   for group in groups:
-                      group['payer_id'] = payer_id
                       group['collection_timestamp'] = collection_timestamp
 
                   json_lines = "\n".join(json.dumps(group, cls=DateTimeEncoder) for group in groups)
@@ -280,7 +278,6 @@ Resources:
                           for membership in memberships:
                               membership['GroupId'] = group_id
                               membership['GroupDisplayName'] = group_display_name
-                              membership['payer_id'] = payer_id
                               membership['collection_timestamp'] = collection_timestamp
                           all_memberships.extend(memberships)
                   except Exception as exc:
@@ -327,7 +324,6 @@ Resources:
                       )
                       ps = response.get('PermissionSet', {})
                       ps['sso_instance_arn'] = instance_arn
-                      ps['payer_id'] = payer_id
                       ps['collection_timestamp'] = collection_timestamp
                       permission_sets.append(ps)
                   except Exception as exc:
@@ -377,7 +373,6 @@ Resources:
                           ):
                               for assignment in page.get('AccountAssignments', []):
                                   assignment['sso_instance_arn'] = instance_arn
-                                  assignment['payer_id'] = payer_id
                                   assignment['collection_timestamp'] = collection_timestamp
                                   all_assignments.append(assignment)
                       except Exception as exc:
@@ -426,7 +421,6 @@ Resources:
                               assignment['ApplicationArn'] = app_arn
                               assignment['ApplicationName'] = app_name
                               assignment['sso_instance_arn'] = instance_arn
-                              assignment['payer_id'] = payer_id
                               assignment['collection_timestamp'] = collection_timestamp
                               all_assignments.append(assignment)
                   except Exception as exc:
@@ -665,6 +659,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -718,7 +713,7 @@ Resources:
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
-              paths: "Addresses,CreatedAt,CreatedBy,DisplayName,Emails,ExternalIds,IdentityStoreId,Locale,Name,NickName,PhoneNumbers,PreferredLanguage,ProfileUrl,Timezone,Title,UpdatedAt,UpdatedBy,UserId,UserName,UserStatus,UserType,collection_timestamp,payer_id"
+              paths: "Addresses,CreatedAt,CreatedBy,DisplayName,Emails,ExternalIds,IdentityStoreId,Locale,Name,NickName,PhoneNumbers,PreferredLanguage,ProfileUrl,Timezone,Title,UpdatedAt,UpdatedBy,UserId,UserName,UserStatus,UserType,collection_timestamp"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -733,6 +728,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -762,7 +758,7 @@ Resources:
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
-              paths: "CreatedAt,CreatedBy,Description,DisplayName,ExternalIds,GroupId,IdentityStoreId,UpdatedAt,UpdatedBy,collection_timestamp,payer_id"
+              paths: "CreatedAt,CreatedBy,Description,DisplayName,ExternalIds,GroupId,IdentityStoreId,UpdatedAt,UpdatedBy,collection_timestamp"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -777,6 +773,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -811,6 +808,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -836,7 +834,7 @@ Resources:
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
-              paths: "CreatedDate,Description,Name,PermissionSetArn,RelayState,SessionDuration,collection_timestamp,payer_id,sso_instance_arn"
+              paths: "CreatedDate,Description,Name,PermissionSetArn,RelayState,SessionDuration,collection_timestamp,sso_instance_arn"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -851,6 +849,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
@@ -872,7 +871,7 @@ Resources:
           SerdeInfo:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
-              paths: "AccountId,PermissionSetArn,PrincipalId,PrincipalType,collection_timestamp,payer_id,sso_instance_arn"
+              paths: "AccountId,PermissionSetArn,PrincipalId,PrincipalType,collection_timestamp,sso_instance_arn"
         PartitionKeys:
           - Name: payer_id
             Type: string
@@ -887,6 +886,7 @@ Resources:
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: json
+          compressionType: none
           UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
         StorageDescriptor:
           Columns:
