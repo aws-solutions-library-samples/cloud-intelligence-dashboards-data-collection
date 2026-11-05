@@ -16,6 +16,12 @@ if ! "$SCRIPT_DIR/layer-utils/boto3-layer-build.sh"; then
   [[ "$choice" != [yY] ]] && { echo "Aborted."; exit 1; }
 fi
 
+# Build common Lambda layer
+if ! "$SCRIPT_DIR/layer-utils/common-layer-build.sh"; then
+  read -p "Common layer build failed. Continue anyway? (y/N): " choice
+  [[ "$choice" != [yY] ]] && { echo "Aborted."; exit 1; }
+fi
+
 echo "sync to central bucket"
 aws s3 sync $code_path/       s3://$CENTRAL_BUCKET/cfn/data-collection/
 aws s3 sync $code_path/       s3://$CENTRAL_BUCKET/cfn/data-collection/$version/

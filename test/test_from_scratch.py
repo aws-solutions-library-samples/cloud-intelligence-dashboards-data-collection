@@ -200,6 +200,10 @@ def test_health_events_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."health_events_detail_data" LIMIT 10;')
     assert len(data) > 0, 'health_events_detail_data is empty'
 
+def test_service_lifecycle_catalog_data(athena):
+    data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."service_lifecycle_catalog_data" LIMIT 10;')
+    assert len(data) > 0, 'service_lifecycle_catalog_data is empty'
+
 def test_license_manager_grants(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."license_manager_grants" LIMIT 10;')
     assert len(data) > 0, 'license_manager_grants is empty'

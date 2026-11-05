@@ -192,6 +192,7 @@ sqlite_mcp_server.db
 
 .ai/*
 !.ai/specs/
+CLAUDE.md
 _wip/
 
 # Local testing suites
