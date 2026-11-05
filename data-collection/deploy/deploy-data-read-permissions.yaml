@@ -1,6 +1,6 @@
-# https://github.com/awslabs/cid-data-collection-framework/blob/main/data-collection/v3.14.10/deploy/deploy-data-read-permissions.yaml
+# https://github.com/awslabs/cid-data-collection-framework/blob/main/data-collection/v3.14.11/deploy/deploy-data-read-permissions.yaml
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CID Data Collection - All-in-One for Management Account v3.14.10 - AWS Solution SO9011
+Description: CID Data Collection - All-in-One for Management Account v3.14.11 - AWS Solution SO9011
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -27,6 +27,7 @@ Metadata:
           - IncludeServiceLifecycleModule
           - IncludeInventoryCollectorModule
           - IncludeRDSUtilizationModule
+          - IncludeRDSModule
           - IncludeEUCUtilizationModule
           - IncludeRightsizingModule
           - IncludeTAModule
@@ -65,6 +66,8 @@ Metadata:
         default: "Include Inventory Collector Module"
       IncludeRDSUtilizationModule:
         default: "Include RDS Utilization Data Collection Module"
+      IncludeRDSModule:
+        default: "Include RDS Data Collection Module"
       IncludeEUCUtilizationModule:
         default: "Include WorkSpaces Utilization Data Collection Module"
       IncludeRightsizingModule:
@@ -155,6 +158,11 @@ Parameters:
     Description: Collects RDS CloudWatch metrics from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeRDSModule:
+    Type: String
+    Description: Collects RDS operational details (e.g. pending maintenance) from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
   IncludeEUCUtilizationModule:
     Type: String
     Description: Collects WorkSpaces CloudWatch metrics from your accounts
@@ -222,7 +230,7 @@ Resources:
   DataCollectorMgmtAccountReadStack:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.10/deploy-in-management-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.11/deploy-in-management-account.yaml"
       Parameters:
         DataCollectionAccountID: !Ref DataCollectionAccountID
         ManagementAccountRole: !Ref ManagementAccountRole
@@ -241,7 +249,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployModuleReadInMgmt
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.10/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.11/deploy-in-linked-account.yaml"
       Parameters:
         DataCollectionAccountID: !Ref DataCollectionAccountID
         MultiAccountRoleName: !Ref MultiAccountRoleName
@@ -251,6 +259,7 @@ Resources:
         IncludeInventoryCollectorModule: !Ref IncludeInventoryCollectorModule
         IncludeECSChargebackModule: !Ref IncludeECSChargebackModule
         IncludeRDSUtilizationModule: !Ref IncludeRDSUtilizationModule
+        IncludeRDSModule: !Ref IncludeRDSModule
         IncludeEUCUtilizationModule: !Ref IncludeEUCUtilizationModule
         IncludeBudgetsModule: !Ref IncludeBudgetsModule
         IncludeTransitGatewayModule: !Ref IncludeTransitGatewayModule
@@ -261,7 +270,7 @@ Resources:
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
     Properties:
-      Description: "StackSet in charge of deploying read roles across organization accounts v3.14.10"
+      Description: "StackSet in charge of deploying read roles across organization accounts v3.14.11"
       PermissionModel: SERVICE_MANAGED
       AutoDeployment:
         Enabled: true
@@ -289,6 +298,8 @@ Resources:
           ParameterValue: !Ref IncludeECSChargebackModule
         - ParameterKey: IncludeRDSUtilizationModule
           ParameterValue: !Ref IncludeRDSUtilizationModule
+        - ParameterKey: IncludeRDSModule
+          ParameterValue: !Ref IncludeRDSModule
         - ParameterKey: IncludeEUCUtilizationModule
           ParameterValue: !Ref IncludeEUCUtilizationModule
         - ParameterKey: IncludeBudgetsModule
@@ -310,4 +321,4 @@ Resources:
         - CAPABILITY_IAM
         - CAPABILITY_NAMED_IAM
       StackSetName: !Sub "StackSet-${AWS::AccountId}-OptimizationDataRole"
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.10/deploy-in-linked-account.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.11/deploy-in-linked-account.yaml"

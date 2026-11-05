@@ -185,6 +185,73 @@ us before — e.g. `event_metadata` in the Health module). Rules:
   writing (`common.record_schema.RecordSchema`). Reference:
   `data-collection/samples/hello-dc/module-hello-dc.yaml`.
 
+### 1.9 Template Versions in Nested-Stack URLs
+
+Every nested-stack `TemplateURL` in `deploy-data-collection.yaml` (and the
+version strings in the other `deploy-*.yaml` files) uses the version in
+`data-collection/utils/version.json`, e.g.
+`.../cfn/data-collection/v<version>/module-<name>.yaml`. `upload.sh` publishes
+templates only to that path, so a stale version makes the stack update fail with
+`NoSuchKey` and roll back.
+
+- **Re-check after every merge from `main`.** A release bump on `main` rewrites
+  all existing URLs, but the line your branch adds keeps its old version, and git
+  merges it without a conflict. After merging `main`, all `TemplateURL`s must
+  show the same version:
+  ```bash
+  grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+/' data-collection/deploy/deploy-data-collection.yaml | sort | uniq -c
+  ```
+- **Don't bump `version.json` in a feature PR.** Releases are separate PRs made
+  with `data-collection/utils/bump-release.py`, which rewrites `v<old>` to
+  `v<new>` across the `deploy-*.yaml` files, `main-state-machine.json`, and
+  `version.json`. Keep version strings in those files only; module templates
+  shouldn't contain the version.
+
+### 1.10 Dependencies Between Modules
+
+When a module depends on another module, for example by invoking another
+module's Lambda or relying on permissions granted by another module's policy,
+enforce it explicitly. A condition such as
+`DeployXModule: !And [..., !Condition DeployYModule]` silently skips the module,
+so the customer sets `IncludeXModule=yes` and nothing is deployed. Use a
+`Rules:` assertion in `deploy-data-collection.yaml` instead, which fails the
+deployment with a clear message:
+
+```yaml
+Rules:
+  RDSModuleRequiresInventoryAndReference:
+    RuleCondition: !Equals [!Ref IncludeRDSModule, "yes"]
+    Assertions:
+      - Assert: !Equals [!Ref IncludeInventoryCollectorModule, "yes"]
+        AssertDescription: "IncludeRDSModule=yes requires IncludeInventoryCollectorModule=yes"
+```
+
+- State the requirement in the `Include<Name>Module` parameter description as
+  well ("Requires the Inventory and Reference modules").
+- Require only modules the collection or its primary dashboard can't work
+  without. Don't require the Org Data module for account names: dashboards get
+  them from the `account_map` view, which `cid-cmd` can build without Org Data.
+- Check dependencies when enabling resources that were previously disabled (for
+  example, a schedule changing from `DISABLED` to `ENABLED`). A disabled
+  schedule hides a missing dependency; an enabled one fails on every run.
+
+### 1.11 Changing Existing Tables Safely (Upgrades)
+
+Customers upgrade in place, so schema and crawler changes run against existing
+partitions:
+
+- **Changing a column's type** (for example `array<…>` to `string`) makes
+  Athena fail with `HIVE_PARTITION_SCHEMA_MISMATCH` until the crawler re-crawls
+  the old partitions. With the standard config (`InheritFromTable`), one crawl
+  fixes it, so queries break only until the next scheduled collection. Call this
+  out in the release notes; dashboards that refresh SPICE in that window fail
+  their refresh once.
+- **Changing a crawler's `Configuration`** fails the stack update with
+  `Cannot update Crawler while running` if that crawler is running, and the
+  stack rolls back. Avoid touching crawlers you don't need to change, and
+  mention it in the release notes for changes that touch many crawlers.
+- Test the upgrade path, not only a fresh install (§6.6).
+
 ---
 
 ## 2. Inline Lambda Functions (Python)
@@ -367,6 +434,27 @@ KIRO_SOURCE_BUCKETS = os.environ.get('KIRO_SOURCE_BUCKETS', f'cid-dc-kiro-activi
 
 Document any such environment variable in `data-collection/CONTRIBUTING.md`.
 
+### 6.5 Assertions must be able to fail
+
+Assert that each new table returns rows (`len(data) > 0`). An assertion such as
+`len(data) >= 0` always passes and only proves the query compiled. If a table
+can legitimately be empty (for example, pending maintenance actions), say so in
+the test name or docstring and assert something that can fail, such as that the
+table exists with the expected columns.
+
+### 6.6 Test the upgrade path for changes to existing modules
+
+`run-test-from-scratch.sh` covers a fresh install. When a change modifies
+existing tables, crawlers, or wiring, also test an in-place upgrade:
+
+1. Deploy from `main` and let collection run, so the tables have partitions.
+2. Update the same stacks with the branch templates (`upload.sh`, then
+   `update-stack` with `UsePreviousValue` for existing parameters). Don't use
+   the from-scratch harness for this step, because `prepare_stacks` empties the
+   data bucket.
+3. Check that the stack update completes, then query the changed tables before
+   and after the next crawl.
+
 ---
 
 ## 7. Review Checklist for Module Changes
@@ -398,4 +486,13 @@ the section with detail):
       through every consumer in `deploy-data-read-permissions.yaml` (org StackSet
       **and** the management-account nested stack).
 - [ ] **Tests** — the module is enabled in the from-scratch suite with a table
-      assertion (§6).
+      assertion that can fail (§6, §6.5).
+- [ ] **Template version** — the new `TemplateURL` uses the version in
+      `version.json` (re-check after every merge from `main`); `version.json`
+      itself is not bumped (§1.9).
+- [ ] **Module dependencies** — dependencies on other modules are enforced with
+      a `Rules:` assertion and stated in the parameter description, not by a
+      condition that silently skips the module (§1.10).
+- [ ] **Upgrade safety** — changes to existing column types or crawler
+      configuration are called out in the release notes, and the in-place
+      upgrade was tested (§1.11, §6.6).
