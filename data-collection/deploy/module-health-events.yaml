@@ -175,7 +175,12 @@ Resources:
 
           # Added to limit the the total resources returned, which can prevent some throttling and time out
           MAX_LIST_SIZE = int(os.environ.get('MAX_LIST_SIZE', 0))
-          EVENTS_PER_BATCH = int(os.environ.get('EVENTS_PER_BATCH', 100))
+          # One organization event can carry well over 100,000 affected entities. At
+          # 100 entities per Health API page that event alone consumes most of the
+          # 900s Lambda limit, so each invocation must handle a single event.
+          # Sharing a batch with other events makes the invocation time out, which
+          # fails the Map state and skips the crawler.
+          EVENTS_PER_BATCH = int(os.environ.get('EVENTS_PER_BATCH', 1))
 
           config = Config(retries={"max_attempts": MAX_RETRIES, "mode": "adaptive"})
 
@@ -513,6 +518,9 @@ Resources:
       Handler: "index.lambda_handler"
       MemorySize: 2688
       Timeout: 900
+      # A single event with 100k+ affected entities serializes to several hundred MB.
+      EphemeralStorage:
+        Size: 2048
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
@@ -521,6 +529,9 @@ Resources:
           ROLE_NAME: !Ref ManagementRoleName
           #REGIONS: -- defining regions can miss events within the region list so default to global
           LOOKBACK: 730 # 2 years
+          # Passed to the detail state machine as events_per_batch. Keep at 1:
+          # batching events together exceeds the 900s Lambda timeout. See index.py.
+          EVENTS_PER_BATCH: '1'
           DETAIL_SM_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ResourcePrefix}${CFDataName}-detail-StateMachine'
     Metadata:
       cfn_nag:
@@ -617,7 +628,9 @@ Resources:
         DeployRegion: !Ref AWS::Region
         Account: !Ref AWS::AccountId
         Prefix: !Ref ResourcePrefix
-        ItemsPerBatch: 50
+        # Not referenced by health-detail-state-machine.json. The applied batch
+        # size is events_per_batch on the execution input, taken from EVENTS_PER_BATCH.
+        ItemsPerBatch: 1
         MaxConcurrentBatches: 1
         Partition: !Ref AWS::Partition
         Bucket: !Ref DestinationBucket
