@@ -30,13 +30,12 @@ side effect of a data-collection stack. So this module:
 - **Never mutates your accounts.** It only reads the S3 bucket(s) you point it at.
 - **Respects any logging config you already have.** You keep full control of what
   is logged, in which accounts and regions.
-- **Reads only Bedrock invocation logs.** The collection Lambda's role has one
-  fixed-size read policy, so there is no limit on how many source locations you
-  list. It allows `s3:GetObject` only on Bedrock's delivery path
-  (`.../AWSLogs/{account}/BedrockModelInvocationLogs/...`, with or without a
-  key prefix) and `s3:ListBucket` only for the prefixes the collector walks.
-  Cross-account source buckets must also grant the role access in their bucket
-  policy, and `BedrockSourceBuckets` decides which locations are collected.
+- **Reads only the locations you list.** The collection Lambda's role gets one
+  inline policy per `BedrockSourceBuckets` entry: `s3:ListBucket` on that bucket
+  and `s3:GetObject` only under `bucket/AWSLogs/*` (or
+  `bucket/prefix/AWSLogs/*`). It has no read access to buckets or prefixes you
+  have not listed. The role's combined inline policy size allows about 35 source
+  locations.
 
 This mirrors the pull-based pattern used by the Kiro User Activity module.
 
@@ -125,7 +124,7 @@ For a bare bucket entry such as `my-bedrock-logs`, use:
     "Effect": "Allow",
     "Principal": { "AWS": "<BedrockModule LambdaRoleArn output>" },
     "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::my-bedrock-logs/*"
+    "Resource": "arn:aws:s3:::my-bedrock-logs/AWSLogs/*"
   },
   {
     "Sid": "AllowCIDBedrockDataCollectionList",
@@ -139,7 +138,7 @@ For a bare bucket entry such as `my-bedrock-logs`, use:
 ```
 
 For `my-bedrock-logs/model-invocation-logs`, change the object resource to
-`arn:aws:s3:::my-bedrock-logs/model-invocation-logs/*` and the `s3:prefix`
+`arn:aws:s3:::my-bedrock-logs/model-invocation-logs/AWSLogs/*` and the `s3:prefix`
 condition to `model-invocation-logs/AWSLogs/*`. Always use the exact
 `LambdaRoleArn` emitted by your stack; do not use a wildcard principal.
 

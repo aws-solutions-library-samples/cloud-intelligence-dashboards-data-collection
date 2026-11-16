@@ -74,7 +74,7 @@ Outputs:
           "Effect": "Allow",
           "Principal": {"AWS": "${LambdaRole.Arn}"},
           "Action": "s3:GetObject",
-          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/YOUR-OPTIONAL-PREFIX/*"
+          "Resource": "arn:${AWS::Partition}:s3:::YOUR-BEDROCK-LOGS-BUCKET-NAME/YOUR-OPTIONAL-PREFIX/AWSLogs/*"
         },
         {
           "Sid": "AllowCIDBedrockDataCollectionList",
@@ -121,39 +121,6 @@ Resources:
                 Condition:
                   StringLike:
                     "s3:prefix": "bedrock/*"
-        # Read Bedrock model-invocation logs from the source locations. This is
-        # one fixed-size policy rather than one per BedrockSourceBuckets entry,
-        # so the number of source locations is not capped by IAM's
-        # managed-policies-per-role or inline-policy-size quotas.
-        #
-        # Scope is the Bedrock delivery path, not a bucket list: object reads
-        # are limited to .../AWSLogs/{account}/BedrockModelInvocationLogs/...
-        # (the leading * covers both bucket/ and bucket/prefix/), and listing is
-        # limited to the exact prefixes the collector walks. Cross-account
-        # source buckets still need their own bucket policy granting this role,
-        # and BedrockSourceBuckets still decides which locations are collected.
-        - PolicyName: "S3ReadBedrockSourceLogs"
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: ReadBedrockInvocationLogObjects
-                Effect: "Allow"
-                Action:
-                  - "s3:GetObject"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::*/AWSLogs/*/BedrockModelInvocationLogs/*"
-              - Sid: ListBedrockInvocationLogPrefixes
-                Effect: "Allow"
-                Action:
-                  - "s3:ListBucket"
-                Resource:
-                  - !Sub "arn:${AWS::Partition}:s3:::*"
-                Condition:
-                  StringLike:
-                    "s3:prefix":
-                      - "AWSLogs/"
-                      - "*/AWSLogs/"
-                      - "*AWSLogs/*/BedrockModelInvocationLogs/*"
         - PolicyName: "GlueRegisterPartitions"
           PolicyDocument:
             Version: "2012-10-17"
@@ -189,6 +156,40 @@ Resources:
         rules_to_suppress:
           - id: W28
             reason: "Need explicit name so customers can reference it in their bucket policies"
+  # One inline policy per BedrockSourceBuckets entry (the same pattern as the
+  # Kiro module), scoped to exactly that location: s3:ListBucket on the bucket
+  # and s3:GetObject only under {bucket}[/{prefix}]/AWSLogs/. Inline policies
+  # have no per-role count quota; the role's combined inline policy size
+  # (10,240 characters) allows about 35 source locations.
+  #
+  # Logical IDs drop non-alphanumeric characters, so two entries that differ
+  # only in '-', '.' or '/' (for example bucket-ab and bucket-a/b) collide and
+  # the stack fails to deploy rather than granting anything unexpected.
+  'Fn::ForEach::BedrockSourceReadPolicies':
+    - SourceLocation
+    - !Ref BedrockSourceBuckets
+    - 'BedrockSourceReadPolicy&{SourceLocation}':
+        Type: AWS::IAM::RolePolicy
+        Properties:
+          RoleName: !Ref LambdaRole
+          # IAM policy names cannot contain '/', so bucket/prefix becomes
+          # S3Read-bucket-prefix.
+          PolicyName: !Join ['-', !Split ['/', !Sub 'S3Read-${SourceLocation}']]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub
+                    - "arn:${AWS::Partition}:s3:::${Bucket}"
+                    - Bucket: !Select [0, !Split ['/', !Ref SourceLocation]]
+              - Effect: "Allow"
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${SourceLocation}/AWSLogs/*"
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
