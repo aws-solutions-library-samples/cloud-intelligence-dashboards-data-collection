@@ -132,6 +132,25 @@ def test_transit_gateway_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."transit_gateway_data" LIMIT 10;')
     assert len(data) > 0, 'transit_gateway_data is empty'
 
+def test_devops_agent_tables_exist_with_expected_columns(athena):
+    """ The devops_agent tables can legitimately be empty: rows only appear when the test account uses
+    AWS DevOps Agent (Agent Spaces with recent tasks). Assert the module created each table with its key columns.
+    """
+    expected = {
+        'devops_agent_tasks_data': {'account_id', 'agent_space_id', 'task_id', 'task_type', 'status', 'reference_system', 'linked_recommendations', 'execution_id', 'created_at'},
+        'devops_agent_journal_records_data': {'account_id', 'task_id', 'execution_id', 'record_id', 'record_type', 'created_at', 'finding_type', 'resolution', 'text'},
+        'devops_agent_tool_usage_data': {'account_id', 'task_id', 'record_id', 'tool_name', 'tool_use_id', 'status', 'aws_service', 'error_class', 'logs_bytes_scanned'},
+        'devops_agent_account_usage_data': {'account_id', 'region', 'usage_period_start', 'investigation_hours', 'on_demand_hours'},
+    }
+    for table, columns in expected.items():
+        data = athena_query(
+            athena=athena,
+            sql_query=f"SELECT column_name FROM information_schema.columns WHERE table_schema = 'optimization_data' AND table_name = '{table}';",
+        )
+        found = {row['column_name'] for row in data}
+        missing = columns - found
+        assert not missing, f'{table} is missing columns {sorted(missing)}'
+
 
 def test_opensearch_domains_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."inventory_opensearch_domains_data" LIMIT 10;')
