@@ -217,6 +217,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeResilienceHubModule',      'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeMarketplaceModule',        'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeDevOpsAgentModule',        'ParameterValue': "yes"},
        ]
     )
 
@@ -259,6 +260,7 @@ def initial_deploy_stacks(cloudformation, account_id, org_unit_id, bucket):
             {'ParameterKey': 'IncludeReferenceModule',          'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeIdentityCenterModule',     'ParameterValue': "yes"},
             {'ParameterKey': 'IncludeRDSModule',          'ParameterValue': "yes"},
+            {'ParameterKey': 'IncludeDevOpsAgentModule',        'ParameterValue': "yes"},
         ]
     )
 

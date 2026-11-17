@@ -1,0 +1,1092 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves AWS DevOps Agent operational and configuration data across the AWS organization
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Collection Settings'
+        Parameters:
+          - RegionsInScope
+          - Schedule
+          - TaskLookbackDays
+          - JournalLookbackDays
+      - Label:
+          default: 'Advanced (only change if non-default CID deployment)'
+        Parameters:
+          - ResourcePrefix
+          - CFDataName
+      - Label:
+          default: 'CID Parent Stack Parameters (auto-populated when deployed as nested stack)'
+        Parameters:
+          - GlueRoleARN
+          - DestinationBucket
+          - DestinationBucketARN
+          - DatabaseName
+          - LambdaAnalyticsARN
+          - AccountCollectorLambdaARN
+          - MultiAccountRoleName
+          - StepFunctionTemplate
+          - CodeBucket
+          - StepFunctionExecutionRoleARN
+          - DataBucketsKmsKeysArns
+          - SchedulerExecutionRoleARN
+          - LambdaManageGlueTableARN
+          - Boto3LayerArn
+    ParameterLabels:
+      RegionsInScope:
+        default: 'AWS Regions to collect DevOps Agent data from'
+      Schedule:
+        default: 'Collection schedule'
+      TaskLookbackDays:
+        default: 'Task lookback window (days)'
+      JournalLookbackDays:
+        default: 'Journal lookback window (days)'
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: KMS Key ARNs used for encrypting data in S3 buckets (comma separated)
+    Default: ''
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold data information
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: devops-agent
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
+  Boto3LayerArn:
+    Type: String
+    Description: "ARN of the Boto3 Lambda Layer (leave empty if the runtime's boto3 already includes the devops-agent service)"
+    Default: ''
+  RegionsInScope:
+    Type: String
+    Description: "Comma-separated list of AWS regions where Agent Spaces exist (DevOps Agent is regional). Ex: us-east-1,us-west-2,eu-west-1"
+    Default: us-east-1
+  TaskLookbackDays:
+    Type: Number
+    Description: Collect backlog tasks created within this many days. Re-collecting lets status changes be captured; views keep the latest snapshot per task.
+    Default: 14
+    MinValue: 1
+    MaxValue: 90
+  JournalLookbackDays:
+    Type: Number
+    Description: Fetch journal records for executions that are still running or were updated within this many days. Must be at least the collection interval.
+    Default: 3
+    MinValue: 1
+    MaxValue: 90
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
+  UseBoto3Layer: !Not [!Equals [!Ref Boto3LayerArn, '']]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "AssumeMultiAccountRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: "S3Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Layers: !If
+        - UseBoto3Layer
+        - [!Ref Boto3LayerArn]
+        - !Ref AWS::NoValue
+      Code:
+        ZipFile: |
+          """ CID Data Collection - AWS DevOps Agent module Lambda.
+
+          Collects, per linked account and region:
+            agent-spaces     one row per Agent Space
+            tasks            one row per backlog task (investigation, evaluation, system learning, custom, ...)
+                             joined with its primary execution (agent type, status, timing)
+            journal-records  one row per journal record of recently active executions
+                             (raw content kept as a JSON string + promoted columns)
+            tool-usage       one row per tool invocation found in journal records
+            account-usage    one row per account and region: monthly DevOps Agent hours by category
+
+          Invoked by the CID main state machine with {"account": "<json>", "params": ...}.
+          """
+          import os
+          import json
+          import logging
+          from collections import Counter
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from datetime import datetime, timezone, timedelta
+
+          import boto3
+          from botocore.client import Config
+
+          PREFIX = os.environ["PREFIX"]
+          BUCKET = os.environ["BUCKET_NAME"]
+          ROLE_NAME = os.environ["ROLENAME"]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "us-east-1").split(",") if r.strip()]
+          TASK_LOOKBACK_DAYS = int(os.environ.get("TASK_LOOKBACK_DAYS", "14"))
+          JOURNAL_LOOKBACK_DAYS = int(os.environ.get("JOURNAL_LOOKBACK_DAYS", "3"))
+          MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
+          TIME_RESERVE_MS = int(os.environ.get("TIME_RESERVE_MS", "90000"))  # stop collecting when less remains
+          TEXT_PREVIEW_LEN = 1000
+          TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED", "CANCELLED", "TIMED_OUT", "STOPPED"}
+          DATASETS = ["agent-spaces", "tasks", "journal-records", "tool-usage", "account-usage"]
+
+          config = Config(retries={"max_attempts": 6, "mode": "standard"})
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+
+          def lambda_handler(event, context):
+              if "account" not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              if "devops-agent" not in boto3.session.Session().get_available_services():
+                  raise RuntimeError("boto3 in this runtime has no 'devops-agent' service model. Attach the CID Boto3 layer.")
+
+              account = json.loads(event["account"])
+              account_id = account["account_id"]
+              account_name = account.get("account_name", "")
+              payer_id = account["payer_id"]
+              collection_time = datetime.now(timezone.utc)
+              ctx = {
+                  "account_id": account_id,
+                  "account_name": account_name,
+                  "payer_id": payer_id,
+                  "collection_time": collection_time.isoformat(),
+                  "task_created_after": (collection_time - timedelta(days=TASK_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "journal_cutoff": collection_time - timedelta(days=JOURNAL_LOOKBACK_DAYS),
+                  "deadline": time_left_fn(context),
+              }
+              files = {ds: open(f"/tmp/{ds}.json", "w", encoding="utf-8") for ds in DATASETS}  # pylint: disable=consider-using-with
+              counts = Counter()
+              try:
+                  for region in REGIONS:
+                      if ctx["deadline"]() < TIME_RESERVE_MS:
+                          logger.warning(f"[{account_id}] out of time before region {region}; it will be collected next run")
+                          counts["regions_deferred"] += 1
+                          continue
+                      try:
+                          client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
+                          collect_region(client, region, ctx, files, counts)
+                      except Exception as exc:  # pylint: disable=broad-exception-caught
+                          logger.warning(f"[{account_id}/{region}] skipped: {type(exc).__name__}: {exc}")
+                          counts["region_errors"] += 1
+              finally:
+                  for f in files.values():
+                      f.close()
+              for ds in DATASETS:
+                  upload_to_s3(account_id, payer_id, ds, f"/tmp/{ds}.json", collection_time)
+              logger.info(f"[{account_id}] done: {dict(counts)}")
+              return {"statusCode": 200, "body": dict(counts)}
+
+
+          def collect_region(client, region, ctx, files, counts):
+              base = {
+                  "account_id": ctx["account_id"],
+                  "account_name": ctx["account_name"],
+                  "region": region,
+                  "collection_time": ctx["collection_time"],
+              }
+              collect_account_usage(client, base, files, counts)
+              spaces = collect_agent_spaces(client, base, files, counts)
+              work = list_recent_tasks(client, base, spaces, ctx, counts)
+              if work:
+                  collect_tasks(client, base, work, ctx, files, counts)
+
+
+          def collect_account_usage(client, base, files, counts):
+              """ Monthly usage hours; account + region scoped, independent of agent spaces. """
+              tag = f"[{base['account_id']}/{base['region']}]"
+              try:
+                  usage = client.get_account_usage()
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.warning(f"{tag} get_account_usage failed: {type(exc).__name__}: {exc}")
+                  return
+              row = dict(base)
+              row.update({
+                  "usage_period_start": iso(usage.get("usagePeriodStartTime")),
+                  "usage_period_end": iso(usage.get("usagePeriodEndTime")),
+              })
+              for api_key, col in (
+                  ("monthlyAccountInvestigationHours", "investigation"),
+                  ("monthlyAccountEvaluationHours", "evaluation"),
+                  ("monthlyAccountSystemLearningHours", "system_learning"),
+                  ("monthlyAccountOnDemandHours", "on_demand"),
+                  ("monthlyAccountGraderHours", "grader"),
+              ):
+                  metric = usage.get(api_key) or {}
+                  row[f"{col}_hours"] = to_float(metric.get("usage")) or 0.0
+                  row[f"{col}_hours_limit"] = to_float(metric.get("limit")) if metric.get("limit") is not None else -1.0
+              write(files["account-usage"], row)
+              counts["account_usage"] += 1
+
+
+          def collect_agent_spaces(client, base, files, counts):
+              spaces = paginate(client, "list_agent_spaces", "agentSpaces", maxResults=100)
+              logger.info(f"[{base['account_id']}/{base['region']}] {len(spaces)} agent space(s)")
+              for space in spaces:
+                  row = dict(base)
+                  row.update({
+                      "agent_space_id": space.get("agentSpaceId"),
+                      "agent_space_name": space.get("name"),
+                      "description": space.get("description"),
+                      "locale": space.get("locale"),
+                      "kms_key_arn": space.get("kmsKeyArn"),
+                      "preferences": json.dumps(space.get("preferences") or {}, default=str),
+                      "created_at": iso(space.get("createdAt")),
+                      "updated_at": iso(space.get("updatedAt")),
+                  })
+                  write(files["agent-spaces"], row)
+                  counts["agent_spaces"] += 1
+              return spaces
+
+
+          def list_recent_tasks(client, base, spaces, ctx, counts):
+              """ Tasks created within the lookback window, across all spaces. Returns [(space_ctx, task)]. """
+              work = []
+              for space in spaces:
+                  sid = space.get("agentSpaceId")
+                  tag = f"[{base['account_id']}/{base['region']}/{sid}]"
+                  space_ctx = dict(base)
+                  space_ctx.update({"agent_space_id": sid, "agent_space_name": space.get("name")})
+                  try:
+                      tasks = paginate(
+                          client, "list_backlog_tasks", "tasks",
+                          agentSpaceId=sid, limit=100, filter={"createdAfter": ctx["task_created_after"]},
+                      )
+                  except Exception as exc:  # pylint: disable=broad-exception-caught
+                      logger.warning(f"{tag} list_backlog_tasks failed: {type(exc).__name__}: {exc}")
+                      counts["task_list_errors"] += 1
+                      continue
+                  logger.info(f"{tag} {len(tasks)} task(s) created since {ctx['task_created_after']}")
+                  work.extend((space_ctx, task) for task in tasks)
+              return work
+
+
+          def collect_tasks(client, base, work, ctx, files, counts):
+              """ Executions + journal, one unit of work per task, in parallel. Stops early when the Lambda runs out of time. """
+              tag = f"[{base['account_id']}/{base['region']}]"
+              with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                  futures = {pool.submit(collect_task, client, space_ctx, task, ctx, counts): task["taskId"] for space_ctx, task in work}
+                  try:
+                      for future in as_completed(futures):
+                          if ctx["deadline"]() < TIME_RESERVE_MS:
+                              pending = sum(1 for f in futures if not f.done())
+                              logger.warning(f"{tag} out of time; deferring {pending} task(s) to next run")
+                              counts["tasks_deferred"] += pending
+                              break
+                          try:
+                              task_row_, journal_rows, tool_rows = future.result()
+                          except Exception as exc:  # pylint: disable=broad-exception-caught
+                              logger.warning(f"{tag} task {futures[future]} failed: {type(exc).__name__}: {exc}")
+                              counts["task_errors"] += 1
+                              continue
+                          write(files["tasks"], task_row_)
+                          counts["tasks"] += 1
+                          for row in journal_rows:
+                              write(files["journal-records"], row)
+                          for row in tool_rows:
+                              write(files["tool-usage"], row)
+                          counts["journal_records"] += len(journal_rows)
+                          counts["tool_usage"] += len(tool_rows)
+                  finally:
+                      pool.shutdown(wait=False, cancel_futures=True)
+
+
+          def collect_task(client, space_ctx, task, ctx, counts):
+              """ One task: list its executions, build the task row, fetch journals when recently active. """
+              sid = space_ctx["agent_space_id"]
+              executions = []
+              try:
+                  executions = paginate(client, "list_executions", "executions", agentSpaceId=sid, taskId=task["taskId"])
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.warning(f"[{sid}] list_executions({task['taskId']}) failed: {type(exc).__name__}: {exc}")
+                  counts["execution_list_errors"] += 1
+              primary = next((e for e in executions if e.get("executionId") == task.get("executionId")), None)
+              if primary is None and executions:
+                  primary = executions[0]
+              if primary is None and task.get("executionId"):
+                  primary = {"executionId": task["executionId"]}
+
+              journal_rows, tool_rows = [], []
+              if needs_journal(task, primary, ctx["journal_cutoff"]):
+                  seen = set()
+                  for execution in (executions or ([primary] if primary else [])):
+                      eid = execution.get("executionId")
+                      if not eid or eid in seen:
+                          continue
+                      seen.add(eid)
+                      try:
+                          records = paginate(
+                              client, "list_journal_records", "records",
+                              agentSpaceId=sid, executionId=eid, limit=100, order="ASC",
+                          )
+                      except Exception as exc:  # pylint: disable=broad-exception-caught
+                          logger.warning(f"[{sid}] list_journal_records({task['taskId']}/{eid}) failed: {type(exc).__name__}: {exc}")
+                          counts["journal_errors"] += 1
+                          continue
+                      result_status = tool_result_statuses(records)
+                      for record in records:
+                          row, tools = journal_row(space_ctx, task, execution, record, result_status)
+                          journal_rows.append(row)
+                          tool_rows.extend(tools)
+              return task_row(space_ctx, task, primary), journal_rows, tool_rows
+
+
+          def needs_journal(task, primary, cutoff):
+              """ Fetch the journal for executions that are still running or changed recently.
+              Finished executions older than the journal lookback were already captured by a previous run.
+              """
+              status = (task.get("status") or "").upper()
+              exec_status = ((primary or {}).get("executionStatus") or "").upper()
+              if status and status not in TERMINAL_STATUSES:
+                  return True
+              if exec_status and exec_status not in TERMINAL_STATUSES:
+                  return True
+              updated = latest_dt(task.get("updatedAt"), (primary or {}).get("updatedAt"), task.get("createdAt"))
+              return updated is None or updated >= cutoff
+
+
+          def task_row(space_ctx, task, primary):
+              primary = primary or {}
+              ref = task.get("reference") or {}
+              created = to_dt(task.get("createdAt"))
+              exec_created = to_dt(primary.get("createdAt"))
+              exec_updated = to_dt(primary.get("updatedAt"))
+              duration = None
+              if exec_created and exec_updated and (primary.get("executionStatus") or "").upper() in TERMINAL_STATUSES:
+                  duration = round((exec_updated - exec_created).total_seconds(), 3)
+              row = dict(space_ctx)
+              row.update({
+                  "task_id": task.get("taskId"),
+                  "task_type": task.get("taskType"),
+                  "title": task.get("title"),
+                  "description": (task.get("description") or "")[:4000],
+                  "status": task.get("status"),
+                  "status_reason": task.get("statusReason"),
+                  "priority": task.get("priority"),
+                  "primary_task_id": task.get("primaryTaskId"),
+                  "has_linked_tasks": bool(task.get("hasLinkedTasks")),
+                  "version": task.get("version"),
+                  "reference_system": ref.get("system"),
+                  "reference_id": ref.get("referenceId"),
+                  "reference_url": ref.get("referenceUrl"),
+                  "reference_title": ref.get("title"),
+                  "association_id": ref.get("associationId"),
+                  "metadata": json.dumps(task.get("metadata") or {}, default=str),
+                  "support_metadata": json.dumps(task.get("supportMetadata") or {}, default=str),
+                  "created_at": iso(created),
+                  "updated_at": iso(task.get("updatedAt")),
+                  "execution_id": primary.get("executionId") or task.get("executionId"),
+                  "agent_type": primary.get("agentType"),
+                  "agent_sub_task": primary.get("agentSubTask"),
+                  "execution_status": primary.get("executionStatus"),
+                  "parent_execution_id": primary.get("parentExecutionId"),
+                  "execution_created_at": iso(exec_created),
+                  "execution_updated_at": iso(exec_updated),
+                  "execution_duration_seconds": duration,
+              })
+              return row
+
+
+          def tool_result_statuses(records):
+              """ Map toolUseId -> status across all records of one execution.
+              A tool_use lives in an assistant message; its tool_result arrives in the following user message.
+              """
+              statuses = {}
+              for record in records:
+                  content = parse_json(record.get("content"))
+                  if not isinstance(content, dict):
+                      continue
+                  message = content.get("message") if isinstance(content.get("message"), dict) else content
+                  for block in message.get("content") or []:
+                      if not isinstance(block, dict):
+                          continue
+                      if isinstance(block.get("toolResult"), dict):
+                          statuses[block["toolResult"].get("toolUseId")] = block["toolResult"].get("status")
+                      elif block.get("type") == "tool_result":
+                          statuses[block.get("id") or block.get("tool_use_id")] = block.get("status")
+              return statuses
+
+
+          def journal_row(space_ctx, task, execution, record, result_status):
+              """ Flatten one journal record. Returns (record_row, [tool_usage_rows]).
+              `content` is free-form JSON that differs per record_type; it is kept verbatim as a string and
+              a few fields are promoted to columns for the known record types.
+              """
+              raw = record.get("content")
+              content_str = raw if isinstance(raw, str) else json.dumps(raw, default=str)
+              content = parse_json(raw)
+              record_type = record.get("recordType") or ""
+              user_ref = record.get("userReference") or {}
+
+              common = dict(space_ctx)
+              common.update({
+                  "task_id": task.get("taskId"),
+                  "task_type": task.get("taskType"),
+                  "execution_id": record.get("executionId") or execution.get("executionId"),
+                  "agent_type": execution.get("agentType"),
+                  "agent_sub_task": execution.get("agentSubTask"),
+                  "record_id": record.get("recordId"),
+                  "record_type": record_type,
+                  "created_at": iso(record.get("createdAt")),
+              })
+              row = dict(common)
+              row.update({
+                  "user_id": user_ref.get("userId"),
+                  "user_type": user_ref.get("userType"),
+                  "message_role": None,
+                  "agent_name": None,
+                  "text_preview": None,
+                  "tool_use_count": 0,
+                  "tool_error_count": 0,
+                  "tool_names": [],
+                  "input_tokens": None,
+                  "output_tokens": None,
+                  "total_tokens": None,
+                  "cache_read_input_tokens": None,
+                  "cache_write_input_tokens": None,
+                  "duration_seconds": None,
+                  "context_window_utilization": None,
+                  "content_size_bytes": len(content_str.encode("utf-8")),
+                  "content": content_str,
+              })
+
+              tools = []
+              if isinstance(content, dict):
+                  message = as_message(content)
+                  if message is not None:
+                      tools = promote_message(row, message, result_status)
+                  elif record_type == "usage_metrics":
+                      tools = promote_usage_metrics(row, content)
+                  elif record_type == "utilization":
+                      promote_utilization(row, content)
+                  else:
+                      row["text_preview"] = summary_text(content)[:TEXT_PREVIEW_LEN] or None
+              elif isinstance(content, str):
+                  row["text_preview"] = content[:TEXT_PREVIEW_LEN] or None
+
+              tool_rows = []
+              for tool in tools:
+                  tool_row = dict(common)
+                  tool_row.update({"source": record_type, **tool})
+                  tool_rows.append(tool_row)
+              return row, tool_rows
+
+
+          def as_message(content):
+              """ Return the chat message dict for `message` / `agent_message` records, else None. """
+              if isinstance(content.get("message"), dict) and "role" in content["message"]:
+                  return content["message"]
+              if "role" in content and isinstance(content.get("content"), list):
+                  return content
+              return None
+
+
+          def promote_message(row, message, result_status):
+              role = message.get("role")
+              texts, tool_uses = extract_blocks(message.get("content"))
+              tools = [
+                  {"tool_name": t["name"], "tool_use_id": t.get("id"), "tool_use_count": 1,
+                   "status": result_status.get(t.get("id")), "message_role": role}
+                  for t in tool_uses
+              ]
+              row["message_role"] = role
+              row["text_preview"] = "\n".join(texts)[:TEXT_PREVIEW_LEN] or None
+              set_tool_columns(row, tools)
+              return tools
+
+
+          def promote_usage_metrics(row, content):
+              meta = content.get("metadata") or {}
+              metrics = meta.get("metrics") or {}
+              row["agent_name"] = meta.get("agent_name")
+              row["duration_seconds"] = to_float(meta.get("duration") or metrics.get("total_duration"))
+              row["text_preview"] = (content.get("message") or "")[:TEXT_PREVIEW_LEN] or None
+              row["input_tokens"] = to_int(metrics.get("inputTokens"))
+              row["output_tokens"] = to_int(metrics.get("outputTokens"))
+              row["total_tokens"] = to_int(metrics.get("totalTokens"))
+              row["cache_read_input_tokens"] = to_int(metrics.get("cacheReadInputTokens"))
+              row["cache_write_input_tokens"] = to_int(metrics.get("cacheWriteInputTokens"))
+              tools = []
+              for name, info in (metrics.get("tool_usage") or {}).items() if isinstance(metrics.get("tool_usage"), dict) else []:
+                  info = info or {}
+                  stats = info.get("execution_stats") or {}
+                  tools.append({
+                      "tool_name": name,
+                      "tool_use_id": (info.get("tool_info") or {}).get("tool_use_id"),
+                      "tool_use_count": to_int(stats.get("call_count")) or 1,
+                      "status": "error" if to_int(stats.get("error_count")) else "success",
+                      "message_role": None,
+                  })
+              set_tool_columns(row, tools)
+              return tools
+
+
+          def promote_utilization(row, content):
+              """ Cumulative per-turn snapshot; its tool counts duplicate the message-level tool calls, so only names are kept. """
+              data = content.get("data") or {}
+              row["context_window_utilization"] = to_float((data.get("context_window") or {}).get("utilization"))
+              row["tool_names"] = sorted({t.get("name") for t in data.get("tools") or [] if isinstance(t, dict) and t.get("name")})
+
+
+          def set_tool_columns(row, tools):
+              row["tool_use_count"] = sum(t["tool_use_count"] for t in tools)
+              row["tool_error_count"] = sum(1 for t in tools if t["status"] == "error")
+              row["tool_names"] = sorted({t["tool_name"] for t in tools})
+
+
+          def extract_blocks(blocks):
+              """ Walk message content blocks (Bedrock converse style or Anthropic style). Returns (texts, tool_uses). """
+              texts, tools = [], []
+              for block in blocks or []:
+                  if not isinstance(block, dict):
+                      continue
+                  if isinstance(block.get("text"), str):
+                      texts.append(block["text"])
+                  if isinstance(block.get("toolUse"), dict):
+                      tool = block["toolUse"]
+                      tools.append({"name": tool.get("name") or "unknown", "id": tool.get("toolUseId")})
+                  elif block.get("type") == "tool_use":
+                      tools.append({"name": block.get("tool_name") or block.get("name") or "unknown", "id": block.get("id")})
+              return texts, tools
+
+
+          def summary_text(content):
+              for key in ("text", "message", "summary", "evaluation_summary", "investigation_summary", "title"):
+                  value = content.get(key)
+                  if isinstance(value, str) and value:
+                      return value
+              report = content.get("report")
+              if isinstance(report, dict):
+                  for key in ("summary", "verdict", "decisionReasoning"):
+                      if isinstance(report.get(key), str) and report[key]:
+                          return report[key]
+              return json.dumps(content, default=str)
+
+
+          # ---------- helpers ----------
+
+          def paginate(client, method, key, **kwargs):
+              items, token = [], None
+              while True:
+                  if token:
+                      kwargs["nextToken"] = token
+                  response = getattr(client, method)(**kwargs)
+                  items.extend(response.get(key) or [])
+                  token = response.get("nextToken")
+                  if not token:
+                      return items
+
+
+          def time_left_fn(context):
+              if context is not None and hasattr(context, "get_remaining_time_in_millis"):
+                  return context.get_remaining_time_in_millis
+              return lambda: 10 ** 9
+
+
+          def assume_role(account_id, service, region, role):
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              assumed = boto3.client("sts", region_name=region).assume_role(
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{role}",
+                  RoleSessionName="data_collection",
+              )
+              creds = assumed["Credentials"]
+              return boto3.client(
+                  service, region_name=region,
+                  aws_access_key_id=creds["AccessKeyId"],
+                  aws_secret_access_key=creds["SecretAccessKey"],
+                  aws_session_token=creds["SessionToken"],
+                  config=config,
+              )
+
+
+          def upload_to_s3(account_id, payer_id, dataset, tmp_file, collection_time):
+              if not os.path.exists(tmp_file) or os.path.getsize(tmp_file) == 0:
+                  logger.info(f"[{account_id}] no {dataset} data")
+                  if os.path.exists(tmp_file):
+                      os.unlink(tmp_file)
+                  return
+              key = collection_time.strftime(
+                  f"{PREFIX}/{PREFIX}-{dataset}-data/payer_id={payer_id}/year=%Y/month=%m/{PREFIX}-{dataset}-{account_id}-%Y%m%d-%H%M%S.json"
+              )
+              try:
+                  boto3.client("s3").upload_file(tmp_file, BUCKET, key)
+                  logger.info(f"[{account_id}] {dataset} -> s3://{BUCKET}/{key}")
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.error(f"[{account_id}] upload of {dataset} failed: {type(exc).__name__}: {exc}")
+              finally:
+                  if os.path.exists(tmp_file):
+                      os.unlink(tmp_file)
+
+
+          def write(handle, row):
+              handle.write(json.dumps(row, default=str) + "\n")
+
+
+          def parse_json(value):
+              if isinstance(value, str):
+                  try:
+                      return json.loads(value)
+                  except ValueError:
+                      return value
+              return value
+
+
+          def to_dt(value):
+              if value is None or value == "":
+                  return None
+              if isinstance(value, datetime):
+                  return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+              try:
+                  return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+              except ValueError:
+                  return None
+
+
+          def latest_dt(*values):
+              dts = [d for d in (to_dt(v) for v in values) if d is not None]
+              return max(dts) if dts else None
+
+
+          def iso(value):
+              dt = to_dt(value)
+              return dt.astimezone(timezone.utc).isoformat() if dt else None
+
+
+          def to_int(value):
+              try:
+                  return int(value) if value is not None else None
+              except (TypeError, ValueError):
+                  return None
+
+
+          def to_float(value):
+              try:
+                  return float(value) if value is not None else None
+              except (TypeError, ValueError):
+                  return None
+      Handler: 'index.lambda_handler'
+      MemorySize: 2048
+      Timeout: 900
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          ROLENAME: !Ref MultiAccountRoleName
+          REGIONS: !Ref RegionsInScope
+          TASK_LOOKBACK_DAYS: !Ref TaskLookbackDays
+          JOURNAL_LOOKBACK_DAYS: !Ref JournalLookbackDays
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89 # Lambda functions should be deployed inside a VPC
+            reason: "No need for VPC in this case"
+          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-agent-spaces-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tasks-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-journal-records-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tool-usage-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-usage-data/"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 5,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  AgentSpacesTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_agent_spaces_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: description, Type: string }
+            - { Name: locale, Type: string }
+            - { Name: kms_key_arn, Type: string }
+            - { Name: preferences, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: updated_at, Type: string }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-agent-spaces-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  TasksTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_tasks_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: title, Type: string }
+            - { Name: description, Type: string }
+            - { Name: status, Type: string }
+            - { Name: status_reason, Type: string }
+            - { Name: priority, Type: string }
+            - { Name: primary_task_id, Type: string }
+            - { Name: has_linked_tasks, Type: boolean }
+            - { Name: version, Type: int }
+            - { Name: reference_system, Type: string }
+            - { Name: reference_id, Type: string }
+            - { Name: reference_url, Type: string }
+            - { Name: reference_title, Type: string }
+            - { Name: association_id, Type: string }
+            - { Name: metadata, Type: string }
+            - { Name: support_metadata, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: updated_at, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: agent_sub_task, Type: string }
+            - { Name: execution_status, Type: string }
+            - { Name: parent_execution_id, Type: string }
+            - { Name: execution_created_at, Type: string }
+            - { Name: execution_updated_at, Type: string }
+            - { Name: execution_duration_seconds, Type: double }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tasks-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  JournalRecordsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_journal_records_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: agent_sub_task, Type: string }
+            - { Name: record_id, Type: string }
+            - { Name: record_type, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: user_id, Type: string }
+            - { Name: user_type, Type: string }
+            - { Name: message_role, Type: string }
+            - { Name: agent_name, Type: string }
+            - { Name: text_preview, Type: string }
+            - { Name: tool_use_count, Type: int }
+            - { Name: tool_error_count, Type: int }
+            - { Name: tool_names, Type: array<string> }
+            - { Name: input_tokens, Type: bigint }
+            - { Name: output_tokens, Type: bigint }
+            - { Name: total_tokens, Type: bigint }
+            - { Name: cache_read_input_tokens, Type: bigint }
+            - { Name: cache_write_input_tokens, Type: bigint }
+            - { Name: duration_seconds, Type: double }
+            - { Name: context_window_utilization, Type: double }
+            - { Name: content_size_bytes, Type: bigint }
+            - { Name: content, Type: string }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-journal-records-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ToolUsageTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_tool_usage_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: agent_sub_task, Type: string }
+            - { Name: record_id, Type: string }
+            - { Name: record_type, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: source, Type: string }
+            - { Name: tool_name, Type: string }
+            - { Name: tool_use_id, Type: string }
+            - { Name: tool_use_count, Type: int }
+            - { Name: status, Type: string }
+            - { Name: message_role, Type: string }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tool-usage-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  AccountUsageTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_account_usage_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: usage_period_start, Type: string }
+            - { Name: usage_period_end, Type: string }
+            - { Name: investigation_hours, Type: double }
+            - { Name: investigation_hours_limit, Type: double }
+            - { Name: evaluation_hours, Type: double }
+            - { Name: evaluation_hours_limit, Type: double }
+            - { Name: system_learning_hours, Type: double }
+            - { Name: system_learning_hours_limit, Type: double }
+            - { Name: on_demand_hours, Type: double }
+            - { Name: on_demand_hours_limit, Type: double }
+            - { Name: grader_hours, Type: double }
+            - { Name: grader_hours_limit, Type: double }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-usage-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub '{"module_lambda":"${LambdaFunction.Arn}","crawlers": ["${ResourcePrefix}${CFDataName}-Crawler"]}'
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName

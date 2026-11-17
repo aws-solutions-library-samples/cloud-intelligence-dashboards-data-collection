@@ -36,6 +36,7 @@ Metadata:
           - IncludeResilienceHubModule
           - IncludeIdentityCenterModule
           - IncludeMarketplaceModule
+          - IncludeDevOpsAgentModule
     ParameterLabels:
       ManagementAccountRole:
         default: "Management account role"
@@ -67,6 +68,8 @@ Metadata:
         default: "Include RDS Utilization Data Collection Module"
       IncludeRDSModule:
         default: "Include RDS Data Collection Module"
+      IncludeDevOpsAgentModule:
+        default: "Include DevOps Agent Data Collection Module"
       IncludeEUCUtilizationModule:
         default: "Include WorkSpaces Utilization Data Collection Module"
       IncludeRightsizingModule:
@@ -215,6 +218,11 @@ Parameters:
     Description: Collects Marketplace Agreement information
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeDevOpsAgentModule:
+    Type: String
+    Description: Collects AWS DevOps Agent operational details (e.g. agent spaces, investigations, journal records) from your accounts
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 Conditions:
   DeployModuleReadInMgmt: !Equals [!Ref AllowModuleReadInMgmt, "yes"]
 
@@ -257,6 +265,7 @@ Resources:
         IncludeServiceQuotasModule: !Ref IncludeServiceQuotasModule
         IncludeResilienceHubModule: !Ref IncludeResilienceHubModule
         IncludeMarketplaceModule: !Ref IncludeMarketplaceModule
+        IncludeDevOpsAgentModule: !Ref IncludeDevOpsAgentModule
         
   DataCollectorOrgAccountModulesReadStackSet:
     Type: AWS::CloudFormation::StackSet
@@ -303,6 +312,8 @@ Resources:
           ParameterValue: !Ref IncludeResilienceHubModule
         - ParameterKey: IncludeMarketplaceModule
           ParameterValue: !Ref IncludeMarketplaceModule
+        - ParameterKey: IncludeDevOpsAgentModule
+          ParameterValue: !Ref IncludeDevOpsAgentModule
       StackInstancesGroup:
         - DeploymentTargets:
             OrganizationalUnitIds: !Split [",", !Ref OrganizationalUnitIds]
