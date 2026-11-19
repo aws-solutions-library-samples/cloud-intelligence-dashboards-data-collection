@@ -362,8 +362,14 @@ Resources:
                       for (y, m, d) in want:
                           day_prefix = f'{region_prefix}{y}/{m}/{d}/'
                           for key in _list_objects(source_bucket, day_prefix):
-                              if key.endswith('.json.gz'):
-                                  yield account_id, region, y, m, d, key.split('/')[-1], key
+                              # Invocation logs are {dd}/{HH}/{file}.json.gz. Bedrock
+                              # stores bodies over 100 KB as separate objects under
+                              # {dd}/{HH}/data/; those are not log records, and the
+                              # log record references them via inputBodyS3Path /
+                              # outputBodyS3Path, so skip them.
+                              if not key.endswith('.json.gz') or '/data/' in key[len(day_prefix):]:
+                                  continue
+                              yield account_id, region, y, m, d, key.split('/')[-1], key
 
           def batch_register_partitions(partition_keys, sd_template):
               """Register every (account_id, region, year, month, day) partition we
@@ -428,9 +434,12 @@ Resources:
                   parsed = json.loads(stripped)
                   records = parsed if isinstance(parsed, list) else [parsed]
               except json.JSONDecodeError:
-                  # Fall back to newline-delimited JSON.
+                  # Fall back to newline-delimited JSON. Split on '\n' only:
+                  # str.splitlines() also breaks on U+2028/U+2029 and other
+                  # separators that JSON allows unescaped inside strings, which
+                  # cuts records containing them in prompt or response text.
                   records = []
-                  for line in stripped.splitlines():
+                  for line in stripped.split('\n'):
                       line = line.strip()
                       if line:
                           records.append(json.loads(line))
