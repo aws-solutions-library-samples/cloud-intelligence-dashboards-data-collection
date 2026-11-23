@@ -1,5 +1,11 @@
 # Change Log
 
+## v0.14.0
+
+- Added `EnableStandardizedCostAndRate` parameter (default `yes`) to set the `INCLUDE_STANDARDIZED_COST_AND_RATE` table configuration of the CUR 2.0 export. It adds the 14 `cost_analytics_*` columns (billed, list, contracted, effective, public equivalent billed/effective and public on-demand cost and rate).
+- Added the 14 `cost_analytics_*` columns to the CUR 2.0 table definition.
+- CUR 2.0 query is now assembled from column fragments instead of one query per `EnableSCAD`/`EnableIAMPrincipalData` combination. With `EnableStandardizedCostAndRate=no` the query is unchanged.
+
 ## v0.13.0
 
 - Fixed `SecondaryDestinationBucket`, which stopped receiving data in v0.11.0: exports were delivered directly to the destination bucket, so nothing reached the local bucket that replicates to the secondary bucket. When `SecondaryDestinationBucket` is set, exports are again delivered to the local bucket and replicated to both the destination bucket and the secondary bucket. Without it, exports keep direct delivery.
