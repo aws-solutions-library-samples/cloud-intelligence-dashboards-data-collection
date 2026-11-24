@@ -24,6 +24,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TMP_DIR="$PROJECT_ROOT/.tmp"
 OUTPUT_DIR="$PROJECT_ROOT/data-collection/deploy/layers"
 OUTPUT_FILE="boto3-layer.zip"
+# Minimum botocore required by modules using the layer (AWS Health tag enrichment: resourceTags/accountTags,
+# DescribeTagKeysForOrganization). Older SDKs silently drop the new response fields.
+MIN_BOTOCORE_VERSION="1.44.4"
 
 # Function to print error messages
 error() {
@@ -82,9 +85,9 @@ mkdir -p "$LAYER_DIR" || {
 success "Directory structure created"
 
 # Install boto3 with pip
-info "Installing latest boto3 and dependencies..."
+info "Installing latest boto3 and dependencies (botocore >= $MIN_BOTOCORE_VERSION)..."
 
-pip3 install boto3 --only-binary=:all: --platform=manylinux2014_x86_64 --target "$LAYER_DIR" --upgrade --quiet || {
+pip3 install boto3 "botocore>=$MIN_BOTOCORE_VERSION" --only-binary=:all: --platform=manylinux2014_x86_64 --target "$LAYER_DIR" --upgrade --quiet || {
     error "Failed to install boto3" "pip3 install failed" "Check network connectivity and Python version compatibility"
     exit 1
 }
@@ -98,6 +101,11 @@ INSTALLED_BOTOCORE_VERSION=$(python3 -c "import sys; sys.path.insert(0, '$LAYER_
 
 if [ "$INSTALLED_BOTO3_VERSION" = "unknown" ] || [ "$INSTALLED_BOTOCORE_VERSION" = "unknown" ]; then
     error "Failed to detect package versions" "Could not import boto3 or botocore" "Verify installation succeeded"
+    exit 5
+fi
+
+if ! python3 -c "import sys; v=lambda s: tuple(int(p) for p in s.split('.')[:3]); sys.exit(0 if v('$INSTALLED_BOTOCORE_VERSION') >= v('$MIN_BOTOCORE_VERSION') else 1)"; then
+    error "botocore $INSTALLED_BOTOCORE_VERSION is older than the required $MIN_BOTOCORE_VERSION" "The layer would not expose AWS Health tag fields" "Upgrade pip3 or check the package index"
     exit 5
 fi
 
@@ -180,6 +188,9 @@ cd "$TMP_DIR" || {
     error "Failed to change to temp directory" "Directory: $TMP_DIR" ""
     exit 4
 }
+
+# Remove any previous build: zip -r updates an existing archive in place and would keep stale files
+rm -f "$OUTPUT_PATH"
 
 # Create zip with python/ at the root
 zip -r -q "$OUTPUT_PATH" python/ || {

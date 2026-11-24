@@ -204,6 +204,18 @@ def test_service_lifecycle_catalog_data(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."service_lifecycle_catalog_data" LIMIT 10;')
     assert len(data) > 0, 'service_lifecycle_catalog_data is empty'
 
+def test_health_events_tag_columns(athena):
+    """Tag columns are always written as JSON strings ('{}' when AWS Health tag enrichment is off), so they must parse as maps."""
+    data = athena_query(athena=athena, sql_query='''SELECT count(*) AS bad FROM "optimization_data"."health_events_detail_data"
+        WHERE TRY(CAST(json_parse(resource_tags) AS map(varchar, varchar))) IS NULL
+           OR TRY(CAST(json_parse(account_tags) AS map(varchar, varchar))) IS NULL;''')
+    assert int(data[0]['bad']) == 0, 'resource_tags/account_tags missing or not JSON string maps'
+
+def test_health_events_tag_keys_table(athena):
+    """health_events_tag_keys can legitimately be empty (tag enrichment is opt-in), so assert the table and its columns exist."""
+    data = athena_query(athena=athena, sql_query='SELECT payer_account_id, tag_key, status, enabled_for_eventbridge, collection_time FROM "optimization_data"."health_events_tag_keys" LIMIT 10;')
+    assert isinstance(data, list), 'health_events_tag_keys query failed'
+
 def test_license_manager_grants(athena):
     data = athena_query(athena=athena, sql_query='SELECT * FROM "optimization_data"."license_manager_grants" LIMIT 10;')
     assert len(data) > 0, 'license_manager_grants is empty'

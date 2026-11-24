@@ -156,11 +156,12 @@ Resources:
           from datetime import date, datetime, timedelta, timezone
 
           import boto3
+          import botocore
           from botocore.config import Config
 
           logger = logging.getLogger()
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
-          logger.info("boto3 version: %s", boto3.__version__)
+          logger.info("boto3 version: %s, botocore version: %s", boto3.__version__, botocore.__version__)
 
           BUCKET_NAME = os.environ['BUCKET_NAME']
           ROLE_NAME = os.environ['ROLE_NAME']
@@ -197,6 +198,8 @@ Resources:
               'availability_zone': 'event.availabilityZone',
               'deprecated_versions': 'deprecated_versions',
               'tags': 'tags',
+              'resource_tags': 'resourceTags',
+              'account_tags': 'accountTags',
               'start_time': 'event.startTime',
               'end_time': 'event.endTime',
               'last_updated_time': 'event.lastUpdatedTime',
@@ -209,6 +212,9 @@ Resources:
           }
 
           time_fields_to_convert = ['start_time', 'end_time', 'last_updated_time', 'affected_entity_last_update']
+          # AWS Health tag enrichment maps; always written as a JSON string ('{}' when absent) so the crawler infers a stable string column
+          tag_fields_to_stringify = ['resource_tags', 'account_tags']
+          TAG_KEYS_PREFIX = f"{PREFIX}/{PREFIX}-tag-keys"
 
           def to_json(obj):
               """json helper for date, time and data"""
@@ -294,8 +300,60 @@ Resources:
                   'lastUpdatedTime': ingestion_time,
                   'statusCode': 'UNKNOWN',
                   'tags': {},
+                  'resourceTags': {},
+                  'accountTags': {},
                   'entityMetadata': {},
               }
+
+          def stringify_tags(record):
+              """Write tag maps as JSON strings ('{}' when absent) so the crawler keeps a stable string column."""
+              for tag_field in tag_fields_to_stringify:
+                  record[tag_field] = json.dumps(record.get(tag_field) or {})
+              return record
+
+          def put_tag_keys_snapshot(account_id, keys, collection_time):
+              """Overwrite the payer's tag keys file (empty when tag enrichment is off)."""
+              body = ''.join(
+                  json.dumps({
+                      'payer_account_id': account_id,
+                      'tag_key': key.get('key'),
+                      'status': key.get('status'),
+                      'enabled_for_eventbridge': key.get('enabledForEventBridge'),
+                      'collection_time': collection_time.isoformat(),
+                  }) + '\n'
+                  for key in keys
+              )
+              s3_key = f"{TAG_KEYS_PREFIX}/{account_id}.json"
+              boto3.client('s3', config=config).put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=body.encode('utf-8'))
+              logger.info(f"Recorded {len(keys)} AWS Health tag keys to s3://{BUCKET_NAME}/{s3_key}")
+
+          def collect_tag_keys(health_client, account_id, collection_time):
+              """Snapshot the tag keys configured for AWS Health tag enrichment in this organization.
+              One status call plus one key call per payer (neither takes parameters nor paginates).
+              The file is overwritten on each run so the table always holds the current configuration.
+              Tag collection is optional: if it is off or unavailable, log a warning and collect events without tags.
+              """
+              docs = "https://docs.aws.amazon.com/health/latest/ug/enabling-tag-enrichment.html"
+              if not hasattr(health_client, 'describe_tag_keys_for_organization'):
+                  logger.warning(f"botocore {botocore.__version__} predates AWS Health tags (requires >= 1.44.4). "
+                                 "Skipping tag collection. Redeploy with the Boto3 layer.")
+                  return
+              try:
+                  status = health_client.describe_tags_onboarding_status_for_organization().get('status')
+              except Exception as exc: #pylint: disable=broad-exception-caught
+                  # e.g. the management account role predates health:DescribeTagsOnboardingStatusForOrganization
+                  logger.warning(f"Could not read AWS Health tag enrichment status for payer {account_id}, skipping tag collection: {exc}")
+                  return
+              if status != 'ENABLED':
+                  # turned off (or still being turned on): clear the snapshot so dashboards don't offer stale keys
+                  logger.warning(f"AWS Health tag enrichment is {status} for payer {account_id}. Skipping tag collection; "
+                                 f"events are collected without resource and account tags. To turn it on see {docs}")
+                  put_tag_keys_snapshot(account_id, [], collection_time)
+                  return
+              keys = health_client.describe_tag_keys_for_organization().get('keys', [])
+              if not keys:
+                  logger.warning(f"AWS Health tag enrichment is ENABLED for payer {account_id} but no tag keys are configured. See {docs}")
+              put_tag_keys_snapshot(account_id, keys, collection_time)
 
           def pull_event_details(event, health_client):
               logger.debug(f"Processing event: {event['arn']}")
@@ -448,6 +506,7 @@ Resources:
                       args['filter']['regions'] = REGIONS
 
                   ingestion_time = datetime.now(timezone.utc)
+                  collect_tag_keys(health_client, account_id, ingestion_time)
                   try:
                       with open(TMP_FILE, "w", encoding='utf-8') as f:
                           f.write('eventArn,eventScopeCode\n')
@@ -499,6 +558,7 @@ Resources:
                               metadata = flatten_event.get('event_metadata')
                               metadata = json.dumps(metadata) if (not isinstance(metadata, str)) and (metadata != None) else metadata
                               flatten_event['event_metadata'] = metadata
+                              stringify_tags(flatten_event)
                               #logger.debug(f"Final flattened event: {flatten_event}")
                               f.write(to_json(flatten_event) + '\n')
                               count += 1
@@ -564,6 +624,40 @@ Resources:
       SchemaChangePolicy:
         UpdateBehavior: UPDATE_IN_DATABASE
         DeleteBehavior: LOG
+
+  # Current AWS Health tag enrichment configuration (one file per payer, overwritten each run).
+  # Pre-created and not crawled: cid-cmd reads it to offer the configured tag keys at dashboard deploy time.
+  TagKeysTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref DatabaseName
+      TableInput:
+        Name: health_events_tag_keys
+        Parameters:
+          "classification": "json"
+          "compressionType": "none"
+        StorageDescriptor:
+          Columns:
+            - Name: payer_account_id
+              Type: string
+            - Name: tag_key
+              Type: string
+            - Name: status
+              Type: string
+            - Name: enabled_for_eventbridge
+              Type: boolean
+            - Name: collection_time
+              Type: string
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tag-keys/"
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              "ignore.malformed.json": "true"
+        TableType: EXTERNAL_TABLE
+
   ModuleStepFunction:
     Type: AWS::StepFunctions::StateMachine
     Properties:

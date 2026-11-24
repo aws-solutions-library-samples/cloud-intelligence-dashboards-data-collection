@@ -1143,7 +1143,7 @@ Resources:
       Description: "CID data collection common classes (data-collection/deploy/source/common)"
       Content:
         S3Bucket: !If [ProdCFNTemplateUsed, !FindInMap [RegionMap, !Ref "AWS::Region", CodeBucket], !Ref CFNSourceBucket]
-        S3Key: "cfn/data-collection/v3.14.10/layers/common-layer.zip"
+        S3Key: "cfn/data-collection/v3.14.11/layers/common-layer.zip"
       CompatibleRuntimes:
         - python3.10
         - python3.11
@@ -1545,7 +1545,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Condition: DeployServiceLifecycleModule
     Properties:
-      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.10/module-service-lifecycle.yaml"
+      TemplateURL: !Sub "https://${CFNSourceBucket}.s3.${AWS::URLSuffix}/cfn/data-collection/v3.14.11/module-service-lifecycle.yaml"
       Parameters:
         DatabaseName: !Ref DatabaseName
         DataBucketsKmsKeysArns: !Ref DataBucketsKmsKeysArns

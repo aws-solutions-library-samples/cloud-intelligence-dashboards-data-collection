@@ -343,6 +343,8 @@ Resources:
               - "health:DescribeEventDetailsForOrganization"
               - "health:DescribeAffectedAccountsForOrganization"
               - "health:DescribeAffectedEntitiesForOrganization"
+              - "health:DescribeTagKeysForOrganization"
+              - "health:DescribeTagsOnboardingStatusForOrganization"
             Resource: "*"
       Roles:
         - Ref: LambdaRole
