@@ -70,6 +70,7 @@ fi
 
 # build lambda layers
 ./data-collection/utils/layer-utils/boto3-layer-build.sh
+./data-collection/utils/layer-utils/common-layer-build.sh
 
 # upload files
 ./data-collection/utils/upload.sh "$bucket"
