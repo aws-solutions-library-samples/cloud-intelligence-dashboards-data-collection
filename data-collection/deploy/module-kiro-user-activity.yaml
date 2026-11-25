@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Kiro User Activity - Pull-based Data Collection v3.14.6
+Description: Kiro User Activity - Pull-based Data Collection v3.14.12
 Transform: 'AWS::LanguageExtensions'
 
 Metadata:
@@ -52,11 +52,21 @@ Parameters:
     Description: Common role for module Scheduler execution
   DataBucketsKmsKeysArns:
     Type: String
-    Description: "ARNs of KMS Keys for source data buckets. Comma separated list, no spaces. Keep empty if source buckets are not encrypted with KMS."
+    Description: "ARNs of KMS Keys for the Data Collection destination bucket and/or Glue Catalog. Comma separated list, no spaces. Keep empty if they are not encrypted with KMS. For the Kiro SOURCE buckets use KiroSourceBucketsKmsKeyArns instead."
     Default: ""
+  KiroSourceBucketsKmsKeyArns:
+    Type: String
+    Description: "ARNs of the customer-managed KMS keys that encrypt the Kiro source buckets (SSE-KMS). Comma separated list, no spaces. Keep empty if the source buckets are unencrypted or use SSE-S3 (AES256). The key owner must ALSO grant this module's Lambda role kms:Decrypt in the key policy - see the KmsKeyPolicyExample stack output. Keys may live in another account and another Region than this stack. Only explicit key ARNs are accepted; wildcards are rejected on purpose, so that a blanket kms:Decrypt grant cannot be configured by accident."
+    Default: ""
+    # Explicit key ARNs only. Deliberately does NOT accept "*" or alias ARNs: a
+    # wildcard here would render as Resource:["*"], granting the collector
+    # kms:Decrypt on every key it can reach. Empty is allowed (feature disabled).
+    AllowedPattern: ^$|^arn:[a-zA-Z0-9-]+:kms:[a-z0-9-]+:\d{12}:key\/[a-zA-Z0-9-]+(,arn:[a-zA-Z0-9-]+:kms:[a-z0-9-]+:\d{12}:key\/[a-zA-Z0-9-]+)*$
+    ConstraintDescription: "Must be empty, or a comma-separated list of full KMS key ARNs with no spaces (arn:aws:kms:<region>:<account>:key/<key-id>). Wildcards and alias ARNs are not accepted."
 
 Conditions:
   NeedDataBucketsKms: !Not [ !Equals [ !Ref DataBucketsKmsKeysArns, "" ] ]
+  NeedKiroSourceKms: !Not [ !Equals [ !Ref KiroSourceBucketsKmsKeyArns, "" ] ]
   HasAnalyticsLambda: !Not [ !Equals [ !Ref LambdaAnalyticsARN, "" ] ]
 
 Outputs:
@@ -72,8 +82,27 @@ Outputs:
   TableName:
     Description: "Athena table name for the Kiro user activity data"
     Value: !Sub "${DatabaseName}.kiro_user_activity"
+  KmsKeyPolicyExample:
+    Description: "ONLY needed if a Kiro source bucket is encrypted with a customer-managed KMS key (SSE-KMS). Add BOTH statements to the KEY POLICY of that key, in the account that owns the key, and set the key ARN in the KiroSourceBucketsKmsKeyArns parameter. A bucket policy cannot authorize KMS calls, so without these the key blocks both sides: Kiro cannot WRITE reports (AccessDenied on kms:GenerateDataKey, so no report is delivered at all) and this module cannot READ them (AccessDenied on kms:Decrypt) — even though s3:PutObject and s3:GetObject are allowed. No action needed for unencrypted or SSE-S3 (AES256) buckets."
+    Value: !Sub |
+      [
+        {
+          "Sid": "AllowCIDKiroDataCollectionDecrypt",
+          "Effect": "Allow",
+          "Principal": {"AWS": "${LambdaRole.Arn}"},
+          "Action": "kms:Decrypt",
+          "Resource": "*"
+        },
+        {
+          "Sid": "AllowKiroServiceWriteSseKms",
+          "Effect": "Allow",
+          "Principal": {"Service": "q.${AWS::URLSuffix}"},
+          "Action": ["kms:GenerateDataKey*", "kms:Decrypt"],
+          "Resource": "*"
+        }
+      ]
   BucketPolicyExample:
-    Description: "Example bucket policy statements for customers to apply to their Kiro log buckets. GetObject is scoped to the Kiro prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy."
+    Description: "Example bucket policy statements for customers to apply to their Kiro log buckets. GetObject is scoped to the Kiro prefix and ListBucket is limited to that prefix via s3:prefix, matching the Lambda role's least-privilege identity policy. If the bucket is encrypted with a customer-managed KMS key, these statements are NOT sufficient on their own — see the KmsKeyPolicyExample output."
     Value: !Sub |
       [
         {
@@ -157,6 +186,31 @@ Resources:
                   Action:
                     - "kms:Decrypt"
                   Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        # Source buckets encrypted with a customer-managed key (SSE-KMS). Reading
+        # such an object needs kms:Decrypt on the key IN ADDITION to s3:GetObject
+        # on the bucket — a bucket policy alone cannot authorize the KMS call. The
+        # key is typically owned by another account, so the key policy there must
+        # also grant this role (see the KmsKeyPolicyExample output). Decrypt is the
+        # only action required: this module only reads from the source buckets.
+        - !If
+          - NeedKiroSourceKms
+          - PolicyName: "KiroSourceBucketsKms"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:Decrypt"
+                  Resource: !Split [ ',', !Ref KiroSourceBucketsKmsKeyArns ]
+                  # Restrict the grant to decryption performed by S3 on this
+                  # role's behalf (i.e. reading an encrypted object), so the role
+                  # cannot call KMS directly to decrypt arbitrary ciphertext under
+                  # the same key. The Region is wildcarded because source buckets
+                  # and their keys may be in a different Region than this stack.
+                  Condition:
+                    StringLike:
+                      "kms:ViaService": !Sub "s3.*.${AWS::URLSuffix}"
           - !Ref AWS::NoValue
     Metadata:
       cfn_nag:
@@ -309,6 +363,24 @@ Resources:
 
               return output.getvalue(), row_count
 
+          # A source bucket encrypted with a customer-managed KMS key fails here with
+          # AccessDenied even when the bucket policy allows s3:GetObject, because the
+          # Lambda role also needs kms:Decrypt on the key AND the key policy must
+          # grant this role. That is a configuration problem, not a transient one, so
+          # it is labelled explicitly instead of surfacing as a bare S3 error.
+          def describe_error(e):
+              text = f'{type(e).__name__}: {e}'
+              code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+              haystack = f'{code} {text}'
+              if 'AccessDenied' in haystack or 'KMS' in haystack or 'kms' in haystack:
+                  return (f'{text} | ACCESS DENIED. If this source bucket is encrypted with a '
+                          'customer-managed KMS key, both sides are required: set the key ARN in '
+                          'the KiroSourceBucketsKmsKeyArns stack parameter, AND have the key owner '
+                          'add the statement from the KmsKeyPolicyExample stack output to the key '
+                          'policy. Otherwise check the bucket policy against the BucketPolicyExample '
+                          'stack output.')
+              return text
+
           def parse_source_key(key):
               """From a raw Kiro key, return (account_id, region, year, month, day,
               filename) using the path layout:
@@ -433,18 +505,31 @@ Resources:
                                           register_partition(account_id, region, year, month, day, sd_template)
                                           partitions_seen.add(pkey)
                               except Exception as e:
-                                  errors.append(f'{source_bucket}/{key}: {str(e)}')
+                                  errors.append(f'{source_bucket}/{key}: {describe_error(e)}')
                   except Exception as e:
-                      errors.append(f'Error listing {source_bucket}: {str(e)}')
+                      errors.append(f'Error listing {source_bucket}: {describe_error(e)}')
 
               result = {
                   'statusCode': 200,
                   'total_files_copied': total_copied,
                   'total_rows_written': total_rows,
                   'partitions_registered': len(partitions_seen),
+                  'error_count': len(errors),
                   'errors': errors[:20]
               }
               print(json.dumps(result))
+
+              # A run that copied nothing AND hit errors is a failure, not a no-op.
+              # Returning 200 here would let a completely broken collection (e.g. no
+              # kms:Decrypt on an SSE-KMS source bucket) look healthy to the
+              # Scheduler indefinitely, which is how this class of problem goes
+              # unnoticed. Note that copying nothing with NO errors is the normal
+              # steady state: every source file has already been imported.
+              if errors and total_copied == 0:
+                  raise RuntimeError(
+                      f'Kiro collection failed: 0 files copied, {len(errors)} error(s). '
+                      f'First: {errors[0]}'
+                  )
               return result
       Handler: 'index.lambda_handler'
       MemorySize: 256
