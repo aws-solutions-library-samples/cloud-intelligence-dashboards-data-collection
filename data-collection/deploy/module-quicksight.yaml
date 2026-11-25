@@ -133,12 +133,14 @@ Resources:
           import logging
           import datetime
           from json import JSONEncoder
+          from concurrent.futures import ThreadPoolExecutor
           import boto3
           from botocore.config import Config
 
           BUCKET = os.environ["BUCKET_NAME"]
           PREFIX = os.environ["PREFIX"]
           TMP_FILE = "/tmp/tmp.json"
+          MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '8')) # parallel ListGroupMemberships calls
 
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get('LOG_LEVEL', 'INFO').upper(), logging.INFO))
@@ -146,8 +148,9 @@ Resources:
           config = Config(
             retries = {
                 'max_attempts': 10,
-                'mode': 'standard'
-            }
+                'mode': 'adaptive' # client-side rate limiting on throttling, as memberships are fetched in parallel
+            },
+            max_pool_connections=MAX_WORKERS,
           )
 
           class DateTimeEncoder(JSONEncoder):
@@ -158,7 +161,7 @@ Resources:
                   return None
 
 
-          def lambda_handler(event, context): #pylint: disable=W0613
+          def lambda_handler(event, context): #pylint: disable=W0613,R0914
               """Starting Point for Lambda"""
               account_id = context.invoked_function_arn.split(":")[4]
               logger.debug("Collecting data for account: %s", account_id)
@@ -167,44 +170,47 @@ Resources:
 
               users = []
               groups = []
-              memberships = []
+              namespace_groups_list = [] # (namespace name, client, groups) for membership collection
 
               for namespace in namespaces:
                   logger.debug(f"processing namespace={namespace}")
                   capacity_region = namespace['CapacityRegion']
                   if quicksight_client.meta.region_name != capacity_region:
                       logger.debug("Switching to %s", capacity_region)
-                      quicksight_client = boto3.client("quicksight", region_name=capacity_region)
+                      quicksight_client = boto3.client("quicksight", region_name=capacity_region, config=config)
 
-                  namespace_users = list_users(
+                  users.extend(list_users(
                       account_id=account_id,
                       namespace=namespace['Name'],
                       quicksight=quicksight_client
-                  )
-                  users.extend(namespace_users)
-
+                  ))
                   namespace_groups = list(list_groups(
                       account_id=account_id,
                       namespace=namespace['Name'],
                       quicksight=quicksight_client
                   ))
                   groups.extend(namespace_groups)
+                  namespace_groups_list.append((namespace['Name'], quicksight_client, namespace_groups))
 
-                  for group in namespace_groups:
-                      group_members = list(list_group_memberships(
-                          account_id=account_id,
-                          namespace=namespace['Name'],
-                          group_name=group['GroupName'],
-                          quicksight=quicksight_client,
-                      ))
-                      for group_member in group_members:
-                          group_member["GroupName"] = group['GroupName']
-                          group_member["GroupArn"] = group['Arn']
-                      memberships.extend(group_members)
-
-              #Upload the User, Groups, GroupMembershipData to S3
+              # Upload users and groups first, so they are kept even if membership collection runs out of time
               s3_upload(account_id=account_id, item_list=users, data_type="user")
               s3_upload(account_id=account_id, item_list=groups, data_type="group")
+
+              memberships = []
+              with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                  for namespace_name, client, namespace_groups in namespace_groups_list:
+                      results = executor.map(
+                          lambda group, ns=namespace_name, qs=client: (group, list_group_memberships(
+                              account_id=account_id, namespace=ns, group_name=group['GroupName'], quicksight=qs,
+                          )),
+                          namespace_groups,
+                      )
+                      for group, group_members in results:
+                          for group_member in group_members:
+                              group_member["GroupName"] = group['GroupName']
+                              group_member["GroupArn"] = group['Arn']
+                          memberships.extend(group_members)
+              logger.info("Collected memberships for %s groups with %s workers", len(groups), MAX_WORKERS)
               s3_upload(account_id=account_id, item_list=memberships, data_type="groupmembership")
 
 
@@ -256,7 +262,7 @@ Resources:
           def list_group_memberships(account_id, namespace, group_name, quicksight):
               """Listing User & Group mapping"""
               try:
-                  return (
+                  return list( # read all pages here, so errors are caught below and not in the caller
                       quicksight
                         .get_paginator('list_group_memberships')
                         .paginate(AwsAccountId=account_id, Namespace=namespace, GroupName=group_name)
