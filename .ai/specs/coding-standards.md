@@ -160,8 +160,11 @@ us before — e.g. `event_metadata` in the Health module). Rules:
     UpdateBehavior: UPDATE_IN_DATABASE
     DeleteBehavior: LOG
   ```
-  `TableThreshold` = the number of distinct S3 target paths that combine into one
-  table (usually `1`). This config is standard across the modules — e.g.
+  `TableThreshold` is the maximum number of tables the crawler may create. Set it
+  to the number of tables the crawler maintains: `1` for a crawler with one S3
+  target, `4` for a crawler with four targets that each back their own table.
+  If the crawler would exceed it, the crawl
+  fails instead of creating extra tables. This config is standard across the modules — e.g.
   `module-trusted-advisor.yaml`, `module-inventory.yaml`, `module-health-events.yaml`,
   `module-identity-center.yaml`, `module-pricing.yaml`, and `module-resilience-hub.yaml`.
 - **Prefer `string` (raw JSON) over `array<struct<…>>` or `map<…>` for variable
@@ -184,6 +187,8 @@ us before — e.g. `event_metadata` in the Health module). Rules:
   response shape, and the Lambda conforms every record to the table before
   writing (`common.record_schema.RecordSchema`). Reference:
   `data-collection/samples/hello-dc/module-hello-dc.yaml`.
+  **Not on `main` yet** (see §2.5): until the common layer is merged, build the
+  key inline in the module Lambda with the same layout.
 
 ### 1.9 Template Versions in Nested-Stack URLs
 
@@ -252,6 +257,30 @@ partitions:
   mention it in the release notes for changes that touch many crawlers.
 - Test the upgrade path, not only a fresh install (§6.6).
 
+### 1.12 Customer Content in Collected Data
+
+Most modules collect metadata (ids, states, counts, timestamps). Some APIs also
+return content written by customers or by an AI agent: chat messages, incident
+findings, ticket text, error messages that echo inputs. Anyone with access to
+the data bucket, the Athena tables, or the dashboard datasets can read what the
+module stores.
+
+- **Store only what the dashboard uses.** Parse the content at collection time
+  and write the fields you need, truncated to a fixed length. Don't store raw
+  payloads "just in case".
+- **Say what is stored.** Describe it accurately: don't call a module "metadata
+  only" or say it "doesn't store raw content" if it stores truncated text. Add a
+  **Data stored** section to the module README listing each free-text column,
+  what it holds, and its length limit, and mention it in the `Include…Module`
+  parameter description.
+- **Give an opt-out.** Add a `yes`/`no` parameter in `deploy-data-collection.yaml`
+  (named `<Module>IncludeMessageText` or similar) passed to the module, so the
+  Lambda writes those columns as null. Keep ids, counts, and classifications so
+  the dashboard still works without the text. The default can be `yes` when the
+  dashboard needs the text; document what stops working with `no`.
+- **Note that the switch is not retroactive.** Changing it affects new
+  collections only; the README should say how to remove files already stored.
+
 ---
 
 ## 2. Inline Lambda Functions (Python)
@@ -300,6 +329,11 @@ Standard inline suppressions used in Lambda code:
 
 ### 2.5 Common Lambda Layer
 
+> **Status: not on `main` yet.** The layer, `samples/hello-dc/`, `DcUtils` and
+> `common.record_schema` are on the unmerged `erichre-common-layer` branch. Until
+> it is merged, new modules use a self-contained inline Lambda (`Code.ZipFile`)
+> that follows §2.1–§2.4 and §2.6–§2.8. Don't import or reference these names.
+
 - Source of truth: `data-collection/deploy/source/common/` (versioned by
   `__version__` in `__init__.py`). `local-test/lambdas/common` is a symlink to it.
 - Build with `data-collection/utils/layer-utils/common-layer-build.sh` →
@@ -308,6 +342,74 @@ Standard inline suppressions used in Lambda code:
   `COLLECTORS`, and override hooks rather than copying superclass code:
   `session_for` (credentials), `output_key` (S3 layout), `conform` (record shape).
 - Starting point for a new module: `data-collection/samples/hello-dc/`.
+
+### 2.6 Time Budget (900 s Lambda Timeout)
+
+A module Lambda that is killed at its timeout uploads nothing, and the next run
+usually times out on the same account again, so that account never gets data.
+When collection for one account can take minutes (many pages, many regions,
+large child objects), design for the deadline:
+
+- **Read the deadline from `context.get_remaining_time_in_millis()`** and keep a
+  reserve for uploads (60–90 s).
+- **Check the deadline before every API page**, inside the pagination loop, not
+  only between top-level items. One item with thousands of pages can otherwise
+  run past the limit.
+- **Don't use `with ThreadPoolExecutor(...)` for deadline-bound work.** Leaving
+  the `with` block calls `shutdown(wait=True)`, which waits for every running
+  worker, even after `break` or `cancel_futures=True`. Create the pool directly,
+  wait with `concurrent.futures.wait(pending, timeout=..., return_when=FIRST_COMPLETED)`
+  in short slices, and finish with `pool.shutdown(wait=False, cancel_futures=True)`.
+- **Write files and counters from the main thread only.** Workers return their
+  rows and their own `Counter`; the main thread merges them.
+- **Upload incrementally** (per region or per batch), so a hard timeout loses
+  one part, not the whole account.
+- **Set client timeouts**: `Config(connect_timeout=10, read_timeout=60, retries={...})`,
+  so one stuck call can't use the whole budget.
+- **Count what was deferred** (`tasks_deferred`, `regions_deferred`) and return
+  it in the Lambda result. Document in the module README what the next run picks
+  up and what is lost.
+
+### 2.7 Errors: Skip, Count, or Raise
+
+The main state machine fails the whole run, including the crawler, when too
+many accounts raise (see [implementation.md](implementation.md#failure-handling)).
+For a LINKED module, decide for each failure:
+
+| Situation | Typical signal | Do |
+|---|---|---|
+| Account not in scope: the linked-account stack is not deployed or not updated | `AssumeRole` → `AccessDenied` | Skip: log a warning, count it (e.g. `account_not_in_scope`), return 200 |
+| Module not enabled in that account (`Include<Name>Module=no`) | Service API → `AccessDenied` / `AccessDeniedException` | Skip, count (e.g. `regions_not_enabled`) |
+| Service not available in the region | `botocore.exceptions.EndpointConnectionError` | Skip, count (e.g. `regions_unsupported`) |
+| Region not enabled in the data collection account | STS → `InvalidClientTokenId` / `RegionDisabledException` | Skip, count (`regions_unsupported`) |
+| One item failed (a space, task, resource) | Any other `ClientError` | Log, count, continue; list it in the result's `errors` |
+| Data lost: S3 upload failed (S3 or KMS denied) | Upload exception | **Raise** |
+| Unexpected errors and nothing was collected for the account | All attempted regions failed with non-skip errors | **Raise** |
+
+- **Customers enable modules in only some accounts**, and the Account Collector
+  returns every account in scope. If "not in scope" raises, most accounts fail,
+  the map exceeds its failure tolerance, and the crawler is skipped for every
+  account, including the ones that collected data.
+- Raise with a short message that names the account and the errors, so the
+  failure shows in the `Error` metric and the `logs/modules/` error log.
+- §2.4's `broad-exception-caught` suppression is for item-level errors. It does
+  not mean a module should never raise.
+
+### 2.8 Incremental Collection Without Stored State
+
+Modules don't keep state between runs. When a full collection is too large for
+one run, re-collect within lookback windows and remove duplicates in Athena:
+
+- **Re-collect objects that can still change.** A lookback on creation date
+  alone (`createdAfter`) leaves long-running objects (open tasks, running
+  executions, open tickets) stuck at the snapshot taken before they left the
+  window. Also list objects in non-terminal states regardless of age, and
+  objects updated within the lookback.
+- **Remove duplicates in views**, not in the Lambda: keep the latest snapshot per
+  key with `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY collection_time DESC)`.
+  Include `collection_time` in every row.
+- **Document the gaps** in the module README (for example, objects older than
+  the longest window that change are not refreshed).
 
 ---
 
@@ -355,6 +457,27 @@ The custom pylint runner (`utils/pylint.py`) disables these checks for inline La
   `client.get_paginator(...)` (or an explicit token loop). Never read a single
   response page: APIs such as `describe_pending_maintenance_actions` cap results
   per page and silently truncate collection for large accounts.
+- **Check enum and filter values against the botocore service model** before
+  using them in API calls. botocore doesn't check enum values on the client, so
+  a guessed value (for example a task status the API doesn't have) fails only at
+  the service, or is silently ignored. Read the allowed values and list limits
+  from the model:
+  ```python
+  import botocore.session
+  op = botocore.session.get_session().get_service_model('<service>').operation_model('<Operation>')
+  shape = op.input_shape.members['filter'].members['status']
+  print(shape.member.enum, shape.metadata)   # allowed values, min/max list length
+  ```
+- **Regions:** modules receive the main stack's `RegionsInScope`, which other
+  modules share, so it can include regions where the service is not available.
+  Handle that per §2.7. Don't filter with `Session().get_available_regions()`:
+  it returns an empty list for services missing from botocore's endpoint data,
+  which includes new services such as `devops-agent`.
+- **New services missing from the Lambda runtime's boto3:** use the CID Boto3
+  layer. Add the module to the `DeployBoto3Layer` condition (`!Or`) in
+  `deploy-data-collection.yaml`, pass `Boto3LayerArn` to the nested stack (see
+  `HealthEventsModule`), and fail fast when the layer is missing:
+  `if '<service>' not in boto3.session.Session().get_available_services(): raise RuntimeError(...)`.
 - Temp files go in `/tmp/` (Lambda constraint)
 - JSONL format for data files (one JSON object per line, newline-delimited)
 - Add docstrings to all functions and methods in standalone scripts
@@ -487,3 +610,18 @@ the section with detail):
 - [ ] **Upgrade safety** — changes to existing column types or crawler
       configuration are called out in the release notes, and the in-place
       upgrade was tested (§1.11, §6.6).
+- [ ] **Time budget** — a Lambda that can run for minutes checks the deadline
+      before every API page, doesn't leave a `with ThreadPoolExecutor` block
+      while workers run, and uploads before the timeout (§2.6).
+- [ ] **Skip vs raise** — accounts and regions where the module isn't deployed,
+      not enabled, or not available are skipped and counted; only data loss or
+      "nothing collected" raises (§2.7).
+- [ ] **Changing objects** — objects that can still change are re-collected
+      after they leave a creation-date lookback; views keep the latest snapshot
+      (§2.8).
+- [ ] **API values** — enum and filter values were checked against the
+      botocore service model (§4).
+- [ ] **Customer content** — any stored free text is listed in a README
+      "Data stored" section and can be turned off by a parameter (§1.12).
+- [ ] **Module README** — `data-collection/README-<name>.md` exists and is
+      linked from `data-collection/README.md` (MODULE_GUIDELINES §6).

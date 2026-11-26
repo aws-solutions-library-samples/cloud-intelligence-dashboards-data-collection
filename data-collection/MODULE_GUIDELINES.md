@@ -107,3 +107,26 @@ A new module must be registered in the deploy stacks following the existing cont
   assume-role trust for `${ResourcePrefix}<name>-LambdaRole`.
 - **`deploy/deploy-in-management-account.yaml`**: only if the module reads
   management/payer-account data. LINKED-only modules do **not** touch this stack.
+
+## 6. Module README
+
+Each new module gets a `data-collection/README-<name>.md`, linked from the module
+table in `data-collection/README.md`. Write it for the customer deploying and
+querying the module. Cover:
+
+- **Overview**: what is collected, from which accounts and regions, schedule,
+  and the dashboard it feeds.
+- **How it works**: the collection flow (APIs called, per account / region / item),
+  and for incremental modules what each run re-collects and what it skips
+  (coding-standards §2.8).
+- **Deployment**: prerequisites per stack, which accounts need the
+  `Include<Name>Module=yes` setting, region notes, the S3 layout and partition keys,
+  module parameters, and the IAM actions granted (the same list as the policy in
+  `deploy-in-linked-account.yaml`).
+- **Tables**: every table and column with type and meaning.
+- **Data stored**: required when free text is stored (coding-standards §1.12).
+- **Errors and skipped accounts**: what is skipped and counted, and what fails the
+  account (coding-standards §2.7).
+- **Known constraints**: limits, best-effort coverage, gaps.
+
+`data-collection/README-service-quotas.md` is an example.

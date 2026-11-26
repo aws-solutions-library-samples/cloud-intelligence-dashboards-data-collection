@@ -26,8 +26,11 @@ jobs:
           gem install cfn-nag
       - name: Install cfn-lint
         run: |
-          pip install cfn-lint checkov
-          pip install --no-cache-dir packaging cyclonedx-python-lib=='5.2.0' #https://github.com/bridgecrewio/checkov/issues/5841
+          # Pin checkov so a new release can't break CI; let it pick its own cyclonedx-python-lib.
+          # (The old cyclonedx-python-lib==5.2.0 pin for checkov#5841 breaks checkov 3.4+, which needs >=8.)
+          pip install cfn-lint checkov==3.4.8
+          # pyston-autoload (a checkov dependency on Python 3.10) can't load on the runner; remove it to silence the .pth error.
+          pip uninstall -y pyston-autoload pyston
       - name: Scan all templates
         run: |
           utils/lint.sh
