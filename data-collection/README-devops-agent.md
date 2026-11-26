@@ -36,7 +36,18 @@ Tasks are processed in parallel inside the Lambda (`ThreadPoolExecutor`, 8 worke
 
 **Time budget.** The Lambda has a 900 s timeout and keeps 90 s in reserve for uploads. Workers check the remaining time before every API page and stop when only the reserve is left; the main thread waits for them in bounded slices and does not join the pool, so a long journal cannot hold the Lambda past its reserve. Tasks, spaces and chats that were not finished are counted as deferred (`tasks_deferred`, `spaces_deferred`, `chats_deferred` in the Lambda result) and are picked up by the next run while they are still inside the lookback windows below. A deferred task whose journal changes again later is re-read then; one that leaves `JournalLookbackDays` while deferred on every run is not, so if `tasks_deferred` stays above zero, raise the collection frequency or lower `TaskLookbackDays`.
 
-**Errors.** API errors for a single space, task or chat are logged and counted, and collection continues. The Lambda raises, so the state machine records an error for that account, when every region failed (for example a missing cross-account role or `aidevops` permission) or when an upload to S3 failed. Partial failures are returned in the result's `errors` list.
+**Accounts and regions without DevOps Agent.** The Account Collector returns every account in scope, but only accounts that run DevOps Agent need `IncludeDevOpsAgentModule=yes` in the linked-account stack, and `RegionsInScope` is shared with other modules. So these cases are skipped, not treated as errors, and the Lambda returns success for them:
+
+| Case | Detected by | Counted as |
+|---|---|---|
+| Cross-account role missing or not trusted (linked-account stack not deployed or not updated) | `AssumeRole` returns `AccessDenied` | `account_not_in_scope` |
+| Role exists but has no `aidevops` permission (`IncludeDevOpsAgentModule=no`) | `ListAgentSpaces` returns `AccessDeniedException` | `regions_not_enabled` |
+| DevOps Agent not available in the region | `EndpointConnectionError` on the service endpoint | `regions_unsupported` |
+| Region not enabled in the data collection account | `AssumeRole` returns `InvalidClientTokenId` | `regions_unsupported` |
+
+A region where DevOps Agent is available but no Agent Space exists returns an empty list from `ListAgentSpaces` and is collected normally (nothing to write). `account-usage` rows are written only for regions with Agent Spaces or non-zero hours.
+
+**Errors.** API errors for a single space, task status, task or chat are logged and counted, and collection continues. The Lambda raises, so the state machine records an error for that account, only when an upload to S3 failed or when unexpected errors left no region collected. Partial failures are returned in the result's `errors` list. Skipped accounts never raise, so they can't push the account map over its failure tolerance and skip the crawler.
 
 ### Incremental collection
 
@@ -95,7 +106,7 @@ This is customer chat and incident content. It is readable by anyone with access
 - `deploy-in-linked-account.yaml` deployed in each member account that runs DevOps Agent, with `IncludeDevOpsAgentModule=yes`
 - Data Collection account with the main `deploy-data-collection.yaml` stack and `IncludeDevOpsAgentModule=yes`
 
-DevOps Agent is a regional service. Set `RegionsInScope` in the main stack to every region where Agent Spaces exist; the default is the deployment region only.
+DevOps Agent is a regional service. Set `RegionsInScope` in the main stack to every region where Agent Spaces exist; the default is the deployment region only. `RegionsInScope` is shared with other modules, so it can include regions where DevOps Agent is not available; those are skipped (`regions_unsupported`) on every run, not reported as errors. Deploy `IncludeDevOpsAgentModule=yes` only in the member accounts that use DevOps Agent; the other accounts are skipped (`account_not_in_scope` or `regions_not_enabled`).
 
 ### S3 Bucket Layout
 

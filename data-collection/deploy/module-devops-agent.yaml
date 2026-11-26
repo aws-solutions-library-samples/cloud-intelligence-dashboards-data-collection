@@ -230,6 +230,7 @@ Resources:
 
           import boto3
           from botocore.client import Config
+          from botocore.exceptions import ClientError, EndpointConnectionError
 
           PREFIX = os.environ["PREFIX"]
           BUCKET = os.environ["BUCKET_NAME"]
@@ -287,6 +288,21 @@ Resources:
               """ Raised inside workers when the Lambda time budget is used up; the work is deferred to the next run. """
 
 
+          class RegionSkipped(Exception):
+              """ The account or region is not in scope: no cross-account role, no aidevops permission, or no service endpoint. """
+              def __init__(self, reason, detail):
+                  super().__init__(f"{reason}: {detail}")
+                  self.reason = reason
+
+
+          ACCESS_DENIED_CODES = {"AccessDenied", "AccessDeniedException"}
+          REGION_DISABLED_CODES = {"InvalidClientTokenId", "RegionDisabledException"}
+
+
+          def error_code(exc):
+              return exc.response.get("Error", {}).get("Code", "") if isinstance(exc, ClientError) else ""
+
+
           def lambda_handler(event, context):
               if "account" not in event:
                   raise ValueError(
@@ -323,8 +339,22 @@ Resources:
                   paths = {ds: f"/tmp/{ds}-{region}.json" for ds in DATASETS}
                   files = {ds: open(path, "w", encoding="utf-8") for ds, path in paths.items()}  # pylint: disable=consider-using-with
                   try:
-                      client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
+                      try:
+                          client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
+                      except EndpointConnectionError as exc:
+                          raise RegionSkipped("regions_unsupported", "no STS endpoint in this region") from exc
+                      except ClientError as exc:
+                          if error_code(exc) in ACCESS_DENIED_CODES:
+                              raise RegionSkipped("account_not_in_scope", "cross-account role missing or not trusted") from exc
+                          if error_code(exc) in REGION_DISABLED_CODES:  # region not enabled in the data collection account
+                              raise RegionSkipped("regions_unsupported", f"STS returned {error_code(exc)}") from exc
+                          raise
                       collect_region(client, region, ctx, files, counts)
+                      counts["regions_collected"] += 1
+                  except RegionSkipped as skip:
+                      # Not an error: accounts or regions without DevOps Agent must not fail the account map (and skip the crawler).
+                      logger.warning(f"[{account_id}/{region}] skipped, {skip}")
+                      counts[skip.reason] += 1
                   except Exception as exc:  # pylint: disable=broad-exception-caught
                       logger.error(f"[{account_id}/{region}] collection failed: {type(exc).__name__}: {exc}")
                       counts["region_errors"] += 1
@@ -337,10 +367,9 @@ Resources:
                           counts["upload_errors"] += 1
                           errors.append(f"{region}: upload of {ds} failed")
               logger.info(f"[{account_id}] done: {dict(counts)}")
-              attempted = len(REGIONS) - counts["regions_deferred"]
-              # Raise when nothing could be collected or data was lost, so the state machine records an error for this account
-              # (missing role or aidevops permissions, S3 or KMS denied). Partial region failures are reported in the payload.
-              if counts["upload_errors"] or (attempted and counts["region_errors"] == attempted):
+              # Raise only for data loss (upload failed) or when unexpected errors left nothing collected, so the state machine
+              # records an error for this account. Accounts and regions without DevOps Agent are skipped, not failed.
+              if counts["upload_errors"] or (counts["region_errors"] and not counts["regions_collected"]):
                   raise RuntimeError(f"[{account_id}] DevOps Agent collection failed: {'; '.join(errors)[:900]}")
               return {"statusCode": 200, "body": {**dict(counts), "errors": errors}}
 
@@ -352,10 +381,17 @@ Resources:
                   "region": region,
                   "collection_time": ctx["collection_time"],
               }
-              collect_account_usage(client, base, files, counts)
-              spaces = paginate(client, "list_agent_spaces", "agentSpaces", maxResults=100)
+              try:
+                  spaces = paginate(client, "list_agent_spaces", "agentSpaces", maxResults=100)
+              except EndpointConnectionError as exc:
+                  raise RegionSkipped("regions_unsupported", "no DevOps Agent endpoint in this region") from exc
+              except ClientError as exc:
+                  if error_code(exc) not in ACCESS_DENIED_CODES:
+                      raise
+                  raise RegionSkipped("regions_not_enabled", "no aidevops permission (IncludeDevOpsAgentModule=no in this account?)") from exc
               logger.info(f"[{base['account_id']}/{region}] {len(spaces)} agent space(s)")
               counts["agent_spaces"] += len(spaces)
+              collect_account_usage(client, base, files, counts, has_spaces=bool(spaces))
               work = list_recent_tasks(client, base, spaces, ctx, counts)
               chat_ids = collect_tasks(client, base, work, ctx, files, counts) if work else {}
               if chat_ids:
@@ -363,13 +399,18 @@ Resources:
                   collect_chats(client, base, chat_ids, space_names, ctx, files, counts)
 
 
-          def collect_account_usage(client, base, files, counts):
-              """ Monthly usage hours; account + region scoped, independent of agent spaces. """
+          def collect_account_usage(client, base, files, counts, has_spaces=True):
+              """ Monthly usage hours; account + region scoped. Written for regions with Agent Spaces or non-zero hours, so the
+              many regions in RegionsInScope without DevOps Agent don't add rows of zeros. """
               tag = f"[{base['account_id']}/{base['region']}]"
               try:
                   usage = client.get_account_usage()
               except Exception as exc:  # pylint: disable=broad-exception-caught
-                  logger.warning(f"{tag} get_account_usage failed: {type(exc).__name__}: {exc}")
+                  # Regions without Agent Spaces can return AccessDeniedException here; that is expected, not a warning.
+                  log = logger.info if not has_spaces and error_code(exc) in ACCESS_DENIED_CODES else logger.warning
+                  log(f"{tag} get_account_usage failed: {type(exc).__name__}: {exc}")
+                  return
+              if not has_spaces and not any(to_float((usage.get(k) or {}).get("usage")) for k in usage if k.startswith("monthlyAccount")):
                   return
               row = dict(base)
               row.update({
@@ -408,8 +449,16 @@ Resources:
                                         filter={"createdAfter": ctx["refresh_horizon"]})
                       tasks = {t["taskId"]: t for t in listed if t.get("taskId") and wanted_task(t, ctx)}
                       for status in ACTIVE_TASK_STATUSES:
-                          for t in paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
-                                            filter={"status": [status], "createdBefore": ctx["refresh_horizon"]}):
+                          try:  # one call per status; a failed call must not discard the tasks already listed for this space
+                              older = paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
+                                               filter={"status": [status], "createdBefore": ctx["refresh_horizon"]})
+                          except OutOfTime:
+                              raise
+                          except Exception as exc:  # pylint: disable=broad-exception-caught
+                              logger.warning(f"{tag} list_backlog_tasks(status={status}) failed: {type(exc).__name__}: {exc}")
+                              counts["task_status_list_errors"] += 1
+                              continue
+                          for t in older:
                               if t.get("taskId"):
                                   tasks.setdefault(t["taskId"], t)
                   except OutOfTime:
