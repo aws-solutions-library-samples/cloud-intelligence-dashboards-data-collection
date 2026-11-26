@@ -23,6 +23,7 @@ Metadata:
         - IncludeServiceQuotasModule
         - IncludeResilienceHubModule
         - IncludeMarketplaceModule
+        - IncludeDevOpsAgentModule
     ParameterLabels:
       DataCollectionAccountID:
         default: 'Data Collection Account ID'
@@ -52,6 +53,8 @@ Metadata:
         default: 'Include Resilience Hub Module'
       IncludeMarketplaceModule:
         default: 'Include Marketplace Agreements Module'
+      IncludeDevOpsAgentModule:
+        default: 'Include DevOps Agent Data Collection Module'
 
 Parameters:
   DataCollectionAccountID:
@@ -125,6 +128,11 @@ Parameters:
     Description: Collects Marketplace Agreement data from your accounts
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  IncludeDevOpsAgentModule:
+    Type: String
+    Description: Collects AWS DevOps Agent operational details (e.g. investigations, chats, journal records, tool calls) from your accounts. Stores truncated chat, finding and error text unless DevOpsAgentIncludeMessageText is no in the data collection stack
+    AllowedValues: ['yes', 'no']
+    Default: 'no'
 
 Conditions:
   IncludeTAModulePolicy:                 !Equals [!Ref IncludeTAModule, "yes"]
@@ -139,6 +147,7 @@ Conditions:
   IncludeServiceQuotasModulePolicy:      !Equals [!Ref IncludeServiceQuotasModule, "yes"]
   IncludeResilienceHubModulePolicy:      !Equals [!Ref IncludeResilienceHubModule, "yes"]
   IncludeMarketplaceModulePolicy:         !Equals [!Ref IncludeMarketplaceModule, "yes"]
+  IncludeDevOpsAgentModulePolicy:        !Equals [!Ref IncludeDevOpsAgentModule, "yes"]
 
 Outputs:
   LambdaRole:
@@ -172,6 +181,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}resilience-hub-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}marketplace-LambdaRole"
                   - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}rds-LambdaRole"
+                  - !Sub "arn:${AWS::Partition}:iam::${DataCollectionAccountID}:role/${ResourcePrefix}devops-agent-LambdaRole"
       Path: /
     Metadata:
       cfn_nag:
@@ -390,6 +400,30 @@ Resources:
         rules_to_suppress:
           - id: W12
             reason: "DescribePendingMaintenanceActions does not support resource-level permissions"
+  # DevOps Agent Module policy - agent spaces, backlog tasks, executions, journal records, account usage (read-only)
+  DevOpsAgentModulePolicy:
+    Type: 'AWS::IAM::Policy'
+    Condition: IncludeDevOpsAgentModulePolicy
+    Properties:
+      PolicyName: DevOpsAgentModulePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "aidevops:ListAgentSpaces"
+              - "aidevops:ListBacklogTasks"
+              - "aidevops:ListExecutions"
+              - "aidevops:ListJournalRecords"
+              - "aidevops:GetAccountUsage"
+            Resource: "*" # Wildcard required: list and account-usage actions do not support resource-level permissions
+      Roles:
+        - Ref: LambdaRole
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "DevOps Agent list and account-usage actions do not support resource-level permissions"
   # EUC Utilization policy
   EUCUtilizationPolicy:
     Type: 'AWS::IAM::Policy'

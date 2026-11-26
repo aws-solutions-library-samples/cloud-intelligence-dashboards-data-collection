@@ -1,0 +1,1412 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retrieves AWS DevOps Agent operational data across the AWS organization
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Collection Settings'
+        Parameters:
+          - RegionsInScope
+          - Schedule
+          - TaskLookbackDays
+          - JournalLookbackDays
+          - IncludeMessageText
+      - Label:
+          default: 'Advanced (only change if non-default CID deployment)'
+        Parameters:
+          - ResourcePrefix
+          - CFDataName
+      - Label:
+          default: 'CID Parent Stack Parameters (auto-populated when deployed as nested stack)'
+        Parameters:
+          - GlueRoleARN
+          - DestinationBucket
+          - DestinationBucketARN
+          - DatabaseName
+          - LambdaAnalyticsARN
+          - AccountCollectorLambdaARN
+          - MultiAccountRoleName
+          - StepFunctionTemplate
+          - CodeBucket
+          - StepFunctionExecutionRoleARN
+          - DataBucketsKmsKeysArns
+          - SchedulerExecutionRoleARN
+          - LambdaManageGlueTableARN
+          - Boto3LayerArn
+    ParameterLabels:
+      RegionsInScope:
+        default: 'AWS Regions to collect DevOps Agent data from'
+      Schedule:
+        default: 'Collection schedule'
+      TaskLookbackDays:
+        default: 'Task lookback window (days)'
+      JournalLookbackDays:
+        default: 'Journal lookback window (days)'
+      IncludeMessageText:
+        default: 'Store message and finding text'
+
+Parameters:
+  DatabaseName:
+    Type: String
+    Description: Name of the Athena database to be created to hold lambda information
+    Default: optimization_data
+  DataBucketsKmsKeysArns:
+    Type: String
+    Description: KMS Key ARNs used for encrypting data in S3 buckets (comma separated)
+    Default: ''
+  DestinationBucket:
+    Type: String
+    Description: Name of the S3 Bucket to be created to hold data information
+    AllowedPattern: (?=^.{3,63}$)(?!^(\d+\.)+\d+$)(^(([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])\.)*([a-z0-9]|[a-z0-9][a-z0-9\-]*[a-z0-9])$)
+  DestinationBucketARN:
+    Type: String
+    Description: ARN of the S3 Bucket that exists or needs to be created to hold data information
+  MultiAccountRoleName:
+    Type: String
+    Description: Name of the IAM role deployed in all accounts which can retrieve AWS Data.
+  CFDataName:
+    Type: String
+    Description: The name of what this cf is doing.
+    Default: devops-agent
+  GlueRoleARN:
+    Type: String
+    Description: Arn for the Glue Crawler role
+  Schedule:
+    Type: String
+    Description: EventBridge Schedule to trigger the data collection
+    Default: "rate(1 day)"
+  ResourcePrefix:
+    Type: String
+    Description: This prefix will be placed in front of all roles created. Note you may wish to add a dash at the end to make more readable
+  LambdaAnalyticsARN:
+    Type: String
+    Description: Arn of lambda for Analytics
+  AccountCollectorLambdaARN:
+    Type: String
+    Description: Arn of the Account Collector Lambda
+  CodeBucket:
+    Type: String
+    Description: Source code bucket
+  StepFunctionTemplate:
+    Type: String
+    Description: S3 key to the JSON template for the StepFunction
+  StepFunctionExecutionRoleARN:
+    Type: String
+    Description: Common role for Step Function execution
+  SchedulerExecutionRoleARN:
+    Type: String
+    Description: Common role for module Scheduler execution
+  LambdaManageGlueTableARN:
+    Type: String
+    Description: ARN of a Lambda for Managing GlueTable
+  Boto3LayerArn:
+    Type: String
+    Description: "ARN of the Boto3 Lambda Layer (leave empty if the runtime's boto3 already includes the devops-agent service)"
+    Default: ''
+  RegionsInScope:
+    Type: String
+    Description: "Comma-separated list of AWS regions where Agent Spaces exist (DevOps Agent is regional). Ex: us-east-1,us-west-2,eu-west-1"
+    Default: us-east-1
+  TaskLookbackDays:
+    Type: Number
+    Description: Re-collect backlog tasks created within this many days. Older tasks are also re-collected while they are active or after they change (within 90 days of creation). Views keep the latest snapshot per task.
+    Default: 14
+    MinValue: 1
+    MaxValue: 90
+  JournalLookbackDays:
+    Type: Number
+    Description: Fetch journal records for executions that are still running or were updated within this many days. Must be at least the collection interval.
+    Default: 3
+    MinValue: 1
+    MaxValue: 90
+  IncludeMessageText:
+    Type: String
+    Description: "Store free text from the agent's journal: user and agent message previews (500 chars), task, chat and finding titles, finding and mitigation text (2,000 chars) and tool error messages (200 chars). This is customer chat and incident content. Set to 'no' to write these columns as null; counts, statuses, tool names, error classes and resource ARNs are still collected."
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
+
+Conditions:
+  NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
+  UseBoto3Layer: !Not [!Equals [!Ref Boto3LayerArn, '']]
+
+Outputs:
+  StepFunctionARN:
+    Description: ARN for the module's Step Function
+    Value: !GetAtt ModuleStepFunction.Arn
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ResourcePrefix}${CFDataName}-LambdaRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - !Sub "lambda.${AWS::URLSuffix}"
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Path: /
+      Policies:
+        - !If
+          - NeedDataBucketsKms
+          - PolicyName: "KMS"
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "kms:GenerateDataKey"
+                  Resource: !Split [ ',', !Ref DataBucketsKmsKeysArns ]
+          - !Ref AWS::NoValue
+        - PolicyName: "AssumeMultiAccountRole"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "sts:AssumeRole"
+                Resource: !Sub "arn:${AWS::Partition}:iam::*:role/${MultiAccountRoleName}"
+        - PolicyName: "S3Access"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${DestinationBucketARN}/*"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28 # Resource found with an explicit name, this disallows updates that require replacement of this resource
+            reason: "Need explicit name to identify role actions"
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}${CFDataName}-Lambda'
+      Description: !Sub "Lambda function to retrieve ${CFDataName}"
+      Runtime: python3.13
+      Architectures: [x86_64]
+      Layers: !If
+        - UseBoto3Layer
+        - [!Ref Boto3LayerArn]
+        - !Ref AWS::NoValue
+      Code:
+        ZipFile: |
+          """ CID Data Collection - AWS DevOps Agent module Lambda.
+
+          Collects, per linked account and region, from the DevOps Agent API only:
+            tasks            one row per backlog task (investigation, evaluation, system learning, custom, ...)
+                             joined with its primary execution, plus one row per chat discovered in task journals
+            journal-records  one row per journal record of recently active executions, with the fields the
+                             dashboard needs promoted to columns (the full record content is not kept; truncated
+                             message, finding and title text is, see INCLUDE_MESSAGE_TEXT)
+            tool-usage       one row per tool invocation found in journal messages, with the matching result
+            account-usage    one row per account and region: monthly DevOps Agent hours by category
+
+          Chats: the API lists chats for the calling identity only, so an account-wide collector cannot
+          enumerate them. The agent's own System Learning tasks call `list_power_chat_sessions`, whose
+          result (a list of chat execution ids) is in their journal; those ids are read with
+          ListJournalRecords and stored as task_type CHAT. Coverage is best effort.
+
+          Free text (message previews, finding and task titles, finding text, tool error messages) is stored truncated
+          unless INCLUDE_MESSAGE_TEXT is "no", in which case those columns are written as null.
+
+          Invoked by the CID main state machine with {"account": "<json>", "params": ...}.
+          """
+          import os
+          import re
+          import json
+          import logging
+          from collections import Counter
+          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+          from datetime import datetime, timezone, timedelta
+
+          import boto3
+          from botocore.client import Config
+          from botocore.exceptions import ClientError, EndpointConnectionError
+
+          PREFIX = os.environ["PREFIX"]
+          BUCKET = os.environ["BUCKET_NAME"]
+          ROLE_NAME = os.environ["ROLENAME"]
+          REGIONS = [r.strip() for r in os.environ.get("REGIONS", "us-east-1").split(",") if r.strip()]
+          TASK_LOOKBACK_DAYS = int(os.environ.get("TASK_LOOKBACK_DAYS", "14"))
+          JOURNAL_LOOKBACK_DAYS = int(os.environ.get("JOURNAL_LOOKBACK_DAYS", "3"))
+          INCLUDE_MESSAGE_TEXT = os.environ.get("INCLUDE_MESSAGE_TEXT", "yes").lower() == "yes"
+          MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
+          TIME_RESERVE_MS = int(os.environ.get("TIME_RESERVE_MS", "90000"))  # stop collecting when less remains
+          REFRESH_HORIZON_DAYS = max(90, TASK_LOOKBACK_DAYS)  # tasks created within this window are listed so late status changes are seen
+          TEXT_PREVIEW_LEN = 500
+          TEXT_LEN = 2000
+          ERROR_LEN = 200
+          # Task statuses that can still change. ListBacklogTasks accepts one status per call.
+          ACTIVE_TASK_STATUSES = ("PENDING_TRIAGE", "PENDING_START", "IN_PROGRESS", "PENDING_CUSTOMER_APPROVAL")
+          TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED", "CANCELLED", "TIMED_OUT", "STOPPED", "SKIPPED", "LINKED"}
+          # Columns that can hold customer-written or agent-written free text; nulled when INCLUDE_MESSAGE_TEXT is "no".
+          FREE_TEXT_COLUMNS = {
+              "tasks": ("title",),
+              "journal-records": ("text_preview", "title", "text", "resolution_reason"),
+              "tool-usage": ("error_message",),
+          }
+          ID_RECORD_TYPES = {"skill_reference", "custom_agent_reference"}  # title/text hold a skill name and id, not free text
+          DATASETS = ["tasks", "journal-records", "tool-usage", "account-usage"]
+          CHAT_LIST_TOOLS = ("list_power_chat_sessions", "list_chat_executions")  # result / input carry chat execution ids
+          UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+          SKILL_PATH_RE = re.compile(r"/skills/(?:system/|learned/|custom/|members?/(?:[^/]+/)?|user/)?([^/]+)")
+          FINDING_RECORD_TYPES = {"symptom", "observation", "finding", "investigation_gap", "mitigation_summary",
+                                  "investigation_summary", "evaluation_summary", "investigation_result"}
+          ERROR_CLASSES = (  # first match wins; mirrors the dashboard's historical classification
+              (re.compile(r"Cancelled mutative operation|BLOCKED by safety policy|Do not run infrastructure deployment"), "Blocked by guardrail"),
+              (re.compile(r"Report evaluation:"), "Rejected by self-check"),
+              (re.compile(r"(?i)jmespath|In function [a-z_]+\(\), invalid type"), "Bad query or filter syntax"),
+              (re.compile(r"Failed to get skill resource|knowledge_item_id"), "Skill or knowledge lookup failed"),
+              (re.compile(r"Failed to resolve template"), "Template resolution failed"),
+              (re.compile(r"AccessDenied|not authorized|UnauthorizedOperation|AuthorizationError"), "Permission denied"),
+              (re.compile(r"Throttl|Rate exceeded|TooManyRequests|SlowDown"), "Throttled"),
+              (re.compile(r"ResourceNotFound|NoSuch|does not exist|not found|FileNotFoundError"), "Not found"),
+              (re.compile(r"ValidationException|InvalidParameter|Invalid|validation error|Parameter validation"), "Invalid input"),
+              (re.compile(r"(?i)timed? ?out|deadline exceeded"), "Timeout"),
+              (re.compile(r"(?i)too large|exceeds|limit exceeded|truncated"), "Output too large"),
+          )
+          DENIED_ACTION_RE = re.compile(r"not authorized to perform: ([A-Za-z0-9-]+:[A-Za-z0-9]+)")
+          # Tool results arrive as JSON text, sometimes JSON-encoded twice; accept quotes with or without backslashes.
+          STAT_RE = {k: re.compile(rf'\\*"{k}\\*"\s*:\s*([0-9]+(?:\.[0-9]+)?)') for k in ("bytesScanned", "recordsScanned", "recordsMatched")}
+          QUERY_ID_RE = re.compile(r'\\*"queryId\\*"\s*:\s*\\*"([^"\\]+)')
+
+          config = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 6, "mode": "standard"})
+          logger = logging.getLogger(__name__)
+          logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+
+          class OutOfTime(Exception):
+              """ Raised inside workers when the Lambda time budget is used up; the work is deferred to the next run. """
+
+
+          class RegionSkipped(Exception):
+              """ The account or region is not in scope: no cross-account role, no aidevops permission, or no service endpoint. """
+              def __init__(self, reason, detail):
+                  super().__init__(f"{reason}: {detail}")
+                  self.reason = reason
+
+
+          ACCESS_DENIED_CODES = {"AccessDenied", "AccessDeniedException"}
+          REGION_DISABLED_CODES = {"InvalidClientTokenId", "RegionDisabledException"}
+
+
+          def error_code(exc):
+              return exc.response.get("Error", {}).get("Code", "") if isinstance(exc, ClientError) else ""
+
+
+          def lambda_handler(event, context):
+              if "account" not in event:
+                  raise ValueError(
+                      "Please do not trigger this Lambda manually. "
+                      "Find the corresponding state machine in Step Functions and Trigger from there."
+                  )
+              if "devops-agent" not in boto3.session.Session().get_available_services():
+                  raise RuntimeError("boto3 in this runtime has no 'devops-agent' service model. Attach the CID Boto3 layer.")
+
+              account = json.loads(event["account"])
+              account_id = account["account_id"]
+              payer_id = account["payer_id"]
+              collection_time = datetime.now(timezone.utc)
+              deadline = time_left_fn(context)
+              ctx = {
+                  "account_id": account_id,
+                  "account_name": account.get("account_name", ""),
+                  "payer_id": payer_id,
+                  "collection_time": collection_time.isoformat(),
+                  "task_cutoff": collection_time - timedelta(days=TASK_LOOKBACK_DAYS),
+                  "refresh_horizon": (collection_time - timedelta(days=REFRESH_HORIZON_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "journal_cutoff": collection_time - timedelta(days=JOURNAL_LOOKBACK_DAYS),
+                  "deadline": deadline,
+                  "out_of_time": lambda: deadline() < TIME_RESERVE_MS,
+              }
+              counts = Counter()
+              errors = []
+              for region in REGIONS:
+                  if ctx["out_of_time"]():
+                      logger.warning(f"[{account_id}] out of time before region {region}; it will be collected next run")
+                      counts["regions_deferred"] += 1
+                      continue
+                  # One set of files per region, uploaded as soon as the region is done: a hard timeout loses one region at most.
+                  paths = {ds: f"/tmp/{ds}-{region}.json" for ds in DATASETS}
+                  files = {ds: open(path, "w", encoding="utf-8") for ds, path in paths.items()}  # pylint: disable=consider-using-with
+                  try:
+                      try:
+                          client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
+                      except EndpointConnectionError as exc:
+                          raise RegionSkipped("regions_unsupported", "no STS endpoint in this region") from exc
+                      except ClientError as exc:
+                          if error_code(exc) in ACCESS_DENIED_CODES:
+                              raise RegionSkipped("account_not_in_scope", "cross-account role missing or not trusted") from exc
+                          if error_code(exc) in REGION_DISABLED_CODES:  # region not enabled in the data collection account
+                              raise RegionSkipped("regions_unsupported", f"STS returned {error_code(exc)}") from exc
+                          raise
+                      collect_region(client, region, ctx, files, counts)
+                      counts["regions_collected"] += 1
+                  except RegionSkipped as skip:
+                      # Not an error: accounts or regions without DevOps Agent must not fail the account map (and skip the crawler).
+                      logger.warning(f"[{account_id}/{region}] skipped, {skip}")
+                      counts[skip.reason] += 1
+                  except Exception as exc:  # pylint: disable=broad-exception-caught
+                      logger.error(f"[{account_id}/{region}] collection failed: {type(exc).__name__}: {exc}")
+                      counts["region_errors"] += 1
+                      errors.append(f"{region}: {type(exc).__name__}: {exc}")
+                  finally:
+                      for f in files.values():
+                          f.close()
+                  for ds, path in paths.items():
+                      if not upload_to_s3(account_id, payer_id, ds, region, path, collection_time):
+                          counts["upload_errors"] += 1
+                          errors.append(f"{region}: upload of {ds} failed")
+              logger.info(f"[{account_id}] done: {dict(counts)}")
+              # Raise only for data loss (upload failed) or when unexpected errors left nothing collected, so the state machine
+              # records an error for this account. Accounts and regions without DevOps Agent are skipped, not failed.
+              if counts["upload_errors"] or (counts["region_errors"] and not counts["regions_collected"]):
+                  raise RuntimeError(f"[{account_id}] DevOps Agent collection failed: {'; '.join(errors)[:900]}")
+              return {"statusCode": 200, "body": {**dict(counts), "errors": errors}}
+
+
+          def collect_region(client, region, ctx, files, counts):
+              base = {
+                  "account_id": ctx["account_id"],
+                  "account_name": ctx["account_name"],
+                  "region": region,
+                  "collection_time": ctx["collection_time"],
+              }
+              try:
+                  spaces = paginate(client, "list_agent_spaces", "agentSpaces", maxResults=100)
+              except EndpointConnectionError as exc:
+                  raise RegionSkipped("regions_unsupported", "no DevOps Agent endpoint in this region") from exc
+              except ClientError as exc:
+                  if error_code(exc) not in ACCESS_DENIED_CODES:
+                      raise
+                  raise RegionSkipped("regions_not_enabled", "no aidevops permission (IncludeDevOpsAgentModule=no in this account?)") from exc
+              logger.info(f"[{base['account_id']}/{region}] {len(spaces)} agent space(s)")
+              counts["agent_spaces"] += len(spaces)
+              collect_account_usage(client, base, files, counts, has_spaces=bool(spaces))
+              work = list_recent_tasks(client, base, spaces, ctx, counts)
+              chat_ids = collect_tasks(client, base, work, ctx, files, counts) if work else {}
+              if chat_ids:
+                  space_names = {s.get("agentSpaceId"): s.get("name") for s in spaces}
+                  collect_chats(client, base, chat_ids, space_names, ctx, files, counts)
+
+
+          def collect_account_usage(client, base, files, counts, has_spaces=True):
+              """ Monthly usage hours; account + region scoped. Written for regions with Agent Spaces or non-zero hours, so the
+              many regions in RegionsInScope without DevOps Agent don't add rows of zeros. """
+              tag = f"[{base['account_id']}/{base['region']}]"
+              try:
+                  usage = client.get_account_usage()
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  # Regions without Agent Spaces can return AccessDeniedException here; that is expected, not a warning.
+                  log = logger.info if not has_spaces and error_code(exc) in ACCESS_DENIED_CODES else logger.warning
+                  log(f"{tag} get_account_usage failed: {type(exc).__name__}: {exc}")
+                  return
+              if not has_spaces and not any(to_float((usage.get(k) or {}).get("usage")) for k in usage if k.startswith("monthlyAccount")):
+                  return
+              row = dict(base)
+              row.update({
+                  "usage_period_start": iso(usage.get("usagePeriodStartTime")),
+                  "usage_period_end": iso(usage.get("usagePeriodEndTime")),
+              })
+              for api_key, col in (
+                  ("monthlyAccountInvestigationHours", "investigation"),
+                  ("monthlyAccountEvaluationHours", "evaluation"),
+                  ("monthlyAccountSystemLearningHours", "system_learning"),
+                  ("monthlyAccountOnDemandHours", "on_demand"),
+                  ("monthlyAccountGraderHours", "grader"),
+              ):
+                  metric = usage.get(api_key) or {}
+                  row[f"{col}_hours"] = to_float(metric.get("usage")) or 0.0
+                  row[f"{col}_hours_limit"] = to_float(metric.get("limit")) if metric.get("limit") is not None else -1.0
+              write(files["account-usage"], row)
+              counts["account_usage"] += 1
+
+
+          def list_recent_tasks(client, base, spaces, ctx, counts):
+              """ Tasks to (re-)collect, across all spaces. Returns [(space_ctx, task)].
+              A task is collected when it was created within TaskLookbackDays, is still active, or was updated within
+              JournalLookbackDays (ListBacklogTasks has no updatedAfter filter, so tasks created within REFRESH_HORIZON_DAYS
+              are listed and filtered here). Active tasks older than the horizon are listed by status.
+              """
+              work = []
+              for space in spaces:
+                  sid = space.get("agentSpaceId")
+                  tag = f"[{base['account_id']}/{base['region']}/{sid}]"
+                  space_ctx = dict(base)
+                  space_ctx.update({"agent_space_id": sid, "agent_space_name": space.get("name")})
+                  stop = ctx["out_of_time"]
+                  try:
+                      listed = paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
+                                        filter={"createdAfter": ctx["refresh_horizon"]})
+                      tasks = {t["taskId"]: t for t in listed if t.get("taskId") and wanted_task(t, ctx)}
+                      for status in ACTIVE_TASK_STATUSES:
+                          try:  # one call per status; a failed call must not discard the tasks already listed for this space
+                              older = paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
+                                               filter={"status": [status], "createdBefore": ctx["refresh_horizon"]})
+                          except OutOfTime:
+                              raise
+                          except Exception as exc:  # pylint: disable=broad-exception-caught
+                              logger.warning(f"{tag} list_backlog_tasks(status={status}) failed: {type(exc).__name__}: {exc}")
+                              counts["task_status_list_errors"] += 1
+                              continue
+                          for t in older:
+                              if t.get("taskId"):
+                                  tasks.setdefault(t["taskId"], t)
+                  except OutOfTime:
+                      logger.warning(f"{tag} out of time while listing tasks; this space is deferred to the next run")
+                      counts["spaces_deferred"] += 1
+                      continue
+                  except Exception as exc:  # pylint: disable=broad-exception-caught
+                      logger.warning(f"{tag} list_backlog_tasks failed: {type(exc).__name__}: {exc}")
+                      counts["task_list_errors"] += 1
+                      continue
+                  logger.info(f"{tag} {len(tasks)} task(s) to collect ({len(listed)} listed since {ctx['refresh_horizon']})")
+                  work.extend((space_ctx, task) for task in tasks.values())
+              return work
+
+
+          def wanted_task(task, ctx):
+              if (task.get("status") or "").upper() in ACTIVE_TASK_STATUSES:
+                  return True
+              created = to_dt(task.get("createdAt"))
+              if created is None or created >= ctx["task_cutoff"]:
+                  return True
+              updated = to_dt(task.get("updatedAt"))
+              return updated is not None and updated >= ctx["journal_cutoff"]
+
+
+          def collect_tasks(client, base, work, ctx, files, counts):
+              """ Executions + journal, one unit of work per task, in parallel. Stops early when the Lambda runs out of time.
+              Returns {agent_space_id: set(chat execution ids)} discovered in the journals.
+              Workers check the budget between API pages (OutOfTime); the main thread waits in bounded slices and never joins
+              the pool, so in-flight workers cannot hold the Lambda past its reserve. Only the main thread writes files and counts.
+              """
+              tag = f"[{base['account_id']}/{base['region']}]"
+              chat_ids = {}
+              pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)  # not a context manager: its exit would wait for running workers
+              futures = {pool.submit(collect_task, client, space_ctx, task, ctx): task["taskId"] for space_ctx, task in work}
+              pending = set(futures)
+              try:
+                  while pending:
+                      budget_s = (ctx["deadline"]() - TIME_RESERVE_MS) / 1000.0
+                      if budget_s <= 0:
+                          break
+                      done, pending = wait(pending, timeout=min(budget_s, 10.0), return_when=FIRST_COMPLETED)
+                      for future in done:
+                          try:
+                              result = future.result()
+                          except OutOfTime:
+                              counts["tasks_deferred"] += 1
+                              continue
+                          except Exception as exc:  # pylint: disable=broad-exception-caught
+                              logger.warning(f"{tag} task {futures[future]} failed: {type(exc).__name__}: {exc}")
+                              counts["task_errors"] += 1
+                              continue
+                          counts.update(result.pop("counts"))
+                          write_task_result(files, result, counts)
+                          for sid, ids in result["chat_ids"].items():
+                              chat_ids.setdefault(sid, set()).update(ids)
+              finally:
+                  if pending:
+                      logger.warning(f"{tag} out of time; deferring {len(pending)} task(s) to next run")
+                      counts["tasks_deferred"] += len(pending)
+                  pool.shutdown(wait=False, cancel_futures=True)
+              return chat_ids
+
+
+          def write_task_result(files, result, counts):
+              write(files["tasks"], redact(result["task_row"], "tasks"))
+              counts["tasks"] += 1
+              for row in result["journal_rows"]:
+                  write(files["journal-records"], redact(row, "journal-records"))
+              for row in result["tool_rows"]:
+                  write(files["tool-usage"], redact(row, "tool-usage"))
+              counts["journal_records"] += len(result["journal_rows"])
+              counts["tool_usage"] += len(result["tool_rows"])
+
+
+          def collect_task(client, space_ctx, task, ctx):
+              """ One task: list its executions, build the task row, fetch journals when recently active.
+              Runs in a worker thread: counts are local and merged by the main thread. Raises OutOfTime when the budget is used up.
+              """
+              sid = space_ctx["agent_space_id"]
+              counts = Counter()
+              stop = ctx["out_of_time"]
+              executions = []
+              try:
+                  executions = paginate(client, "list_executions", "executions", stop=stop, agentSpaceId=sid, taskId=task["taskId"])
+              except OutOfTime:
+                  raise
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.warning(f"[{sid}] list_executions({task['taskId']}) failed: {type(exc).__name__}: {exc}")
+                  counts["execution_list_errors"] += 1
+              primary = next((e for e in executions if e.get("executionId") == task.get("executionId")), None)
+              if primary is None and executions:
+                  primary = executions[0]
+              if primary is None and task.get("executionId"):
+                  primary = {"executionId": task["executionId"]}
+              result = {"task_row": task_row(space_ctx, task, primary), "journal_rows": [], "tool_rows": [], "chat_ids": {},
+                        "counts": counts}
+              if not needs_journal(task, primary, ctx["journal_cutoff"]):
+                  return result
+              seen = set()
+              for execution in (executions or ([primary] if primary else [])):
+                  eid = execution.get("executionId")
+                  if not eid or eid in seen:
+                      continue
+                  seen.add(eid)
+                  records = fetch_journal(client, sid, eid, counts, stop)
+                  if records is None:
+                      continue
+                  run = {"task_id": task.get("taskId"), "task_type": task.get("taskType"),
+                         "execution_id": eid, "agent_type": execution.get("agentType")}
+                  parse_journal(space_ctx, run, records, result)
+              return result
+
+
+          def fetch_journal(client, sid, eid, counts, stop=None):
+              """ All journal records of one execution, or None on an API error. OutOfTime propagates to the caller. """
+              try:
+                  return paginate(client, "list_journal_records", "records", stop=stop,
+                                  agentSpaceId=sid, executionId=eid, limit=100, order="ASC")
+              except OutOfTime:
+                  raise
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.warning(f"[{sid}] list_journal_records({eid}) failed: {type(exc).__name__}: {exc}")
+                  counts["journal_errors"] += 1
+                  return None
+
+
+          def needs_journal(task, primary, cutoff):
+              """ Fetch the journal for executions that are still running or changed recently.
+              Finished executions older than the journal lookback were already captured by a previous run.
+              """
+              status = (task.get("status") or "").upper()
+              exec_status = ((primary or {}).get("executionStatus") or "").upper()
+              if status and status not in TERMINAL_STATUSES:
+                  return True
+              if exec_status and exec_status not in TERMINAL_STATUSES:
+                  return True
+              updated = latest_dt(task.get("updatedAt"), (primary or {}).get("updatedAt"), task.get("createdAt"))
+              return updated is None or updated >= cutoff
+
+
+          def task_row(space_ctx, task, primary):
+              primary = primary or {}
+              ref = task.get("reference") or {}
+              metadata = task.get("metadata") or {}
+              exec_created = to_dt(primary.get("createdAt"))
+              exec_updated = to_dt(primary.get("updatedAt"))
+              duration = None
+              if exec_created and exec_updated and (primary.get("executionStatus") or "").upper() in TERMINAL_STATUSES:
+                  duration = round((exec_updated - exec_created).total_seconds(), 3)
+              row = dict(space_ctx)
+              row.update({
+                  "task_id": task.get("taskId"),
+                  "task_type": task.get("taskType"),
+                  "title": task.get("title"),
+                  "status": task.get("status"),
+                  "status_reason": task.get("statusReason"),
+                  "priority": task.get("priority"),
+                  "primary_task_id": task.get("primaryTaskId"),
+                  "reference_system": ref.get("system"),
+                  "reference_id": ref.get("referenceId"),
+                  "reference_url": ref.get("referenceUrl"),
+                  "linked_recommendations": len(metadata.get("related_recommendations") or []) if isinstance(metadata.get("related_recommendations"), list) else 0,
+                  "created_at": iso(task.get("createdAt")),
+                  "updated_at": iso(task.get("updatedAt")),
+                  "execution_id": primary.get("executionId") or task.get("executionId"),
+                  "agent_type": primary.get("agentType"),
+                  "execution_status": primary.get("executionStatus"),
+                  "execution_created_at": iso(exec_created),
+                  "execution_updated_at": iso(exec_updated),
+                  "execution_duration_seconds": duration,
+              })
+              return row
+
+
+          # ---------- journal parsing ----------
+          def parse_journal(space_ctx, run, records, result):
+              """ Flatten one execution's records into journal rows and tool rows; collect chat ids it exposes. """
+              tool_results = collect_tool_results(records)
+              for record in records:
+                  content = parse_json(record.get("content"))
+                  user_ref = record.get("userReference") or {}
+                  row = dict(space_ctx)
+                  row.update(run)
+                  row.update({
+                      "record_id": record.get("recordId"),
+                      "record_type": record.get("recordType") or "",
+                      "created_at": iso(record.get("createdAt")),
+                      "user_type": user_ref.get("userType"),
+                      "message_role": None, "agent_name": None, "text_preview": None,
+                      "tool_use_count": 0, "tool_error_count": 0,
+                      "title": None, "text": None, "finding_type": None, "resolution": None, "resolution_reason": None,
+                      "related_resources": [], "supporting_observations": None, "plan_steps": None,
+                  })
+                  if isinstance(content, dict):
+                      message = as_message(content)
+                      if message is not None:
+                          promote_message(row, message, tool_results, result, space_ctx["agent_space_id"], run)
+                      elif row["record_type"] == "usage_metrics":
+                          row["agent_name"] = (content.get("metadata") or {}).get("agent_name")
+                          row["text_preview"] = (content.get("message") or "")[:TEXT_PREVIEW_LEN] or None
+                      elif row["record_type"] in FINDING_RECORD_TYPES:
+                          promote_finding(row, content)
+                      elif row["record_type"] in ("skill_reference", "custom_agent_reference"):
+                          row["title"] = first_str(content, ("name",))
+                          row["text"] = first_str(content, ("knowledge_item_id",))
+                      else:
+                          row["title"] = first_str(content, ("title", "name"))
+                          row["text_preview"] = summary_text(content)[:TEXT_PREVIEW_LEN] or None
+                  elif isinstance(content, str):
+                      row["text_preview"] = content[:TEXT_PREVIEW_LEN] or None
+                  result["journal_rows"].append(row)
+              link_logs_query_stats(result["tool_rows"], run["execution_id"])
+
+
+          def link_logs_query_stats(tool_rows, execution_id):
+              """ Logs Insights reports bytes/records scanned on get_query_results, not on start_query. Move the statistics to the
+              start_query row that started the same queryId in this execution and clear them elsewhere, so each query is counted
+              once and only queries the agent itself started are counted (read-backs of other queries are not its cost).
+              """
+              starts = {r["logs_query_id"]: r for r in tool_rows if r["execution_id"] == execution_id and r["aws_operation"] == "start_query" and r["logs_query_id"]}
+              for r in tool_rows:
+                  if r["execution_id"] != execution_id or r["aws_operation"] == "start_query":
+                      continue
+                  start = starts.get(r["logs_query_id"])
+                  if start is not None and r["logs_bytes_scanned"] is not None:
+                      for col in ("logs_bytes_scanned", "logs_records_scanned", "logs_records_matched"):
+                          start[col] = max(start[col] or 0.0, r[col] or 0.0)
+                  for col in ("logs_bytes_scanned", "logs_records_scanned", "logs_records_matched"):
+                      r[col] = None
+
+
+          def collect_tool_results(records):
+              """ Map toolUseId -> (status, result text) across all records of one execution.
+              A tool_use lives in an assistant message; its tool_result arrives in the following user message.
+              """
+              results = {}
+              for record in records:
+                  content = parse_json(record.get("content"))
+                  if not isinstance(content, dict):
+                      continue
+                  message = as_message(content)
+                  for block in (message or {}).get("content") or []:
+                      if not isinstance(block, dict):
+                          continue
+                      if isinstance(block.get("toolResult"), dict):
+                          tr = block["toolResult"]
+                          results[tr.get("toolUseId")] = (tr.get("status"), block_text(tr.get("content")))
+                      elif block.get("type") == "tool_result":
+                          results[block.get("id") or block.get("tool_use_id")] = (block.get("status"), block_text(block.get("content")))
+              return results
+
+
+          def promote_message(row, message, tool_results, result, sid, run):
+              role = message.get("role")
+              texts, tool_uses = extract_blocks(message.get("content"))
+              row["message_role"] = role
+              row["text_preview"] = "\n".join(texts)[:TEXT_PREVIEW_LEN] or None
+              errors = 0
+              for use in tool_uses:
+                  status, text = tool_results.get(use.get("id"), (None, ""))
+                  tool = tool_row(row, run, use, status, text)
+                  result["tool_rows"].append(tool)
+                  errors += 1 if status == "error" else 0
+                  if use["name"] in CHAT_LIST_TOOLS:
+                      result["chat_ids"].setdefault(sid, set()).update(chat_ids_from(text, use.get("input")))
+              row["tool_use_count"] = len(tool_uses)
+              row["tool_error_count"] = errors
+
+
+          def tool_row(record_row, run, use, status, text):
+              name = use["name"]
+              inp = use.get("input") if isinstance(use.get("input"), dict) else {}
+              service, operation = aws_call(name, inp)
+              row = {k: record_row[k] for k in ("account_id", "account_name", "region", "collection_time", "agent_space_id", "agent_space_name",
+                                                "record_id", "record_type", "created_at", "message_role")}
+              row.update(run)
+              row.update({
+                  "tool_name": name,
+                  "tool_use_id": use.get("id"),
+                  "status": status,
+                  "is_error": 1 if status == "error" else 0,
+                  "aws_service": service,
+                  "aws_operation": operation,
+                  "aws_region": inp.get("aws_region"),
+                  "tool_category": tool_category(name, service, operation),
+                  "skill_name": skill_name(name, inp),
+                  "error_class": error_class(status, text),
+                  "denied_action": (DENIED_ACTION_RE.search(text or "") or [None, None])[1] if status == "error" else None,
+                  "error_message": re.sub(r"\s+", " ", text or "")[:ERROR_LEN] if status == "error" else None,
+              })
+              row.update(logs_query_fields(name, service, operation, inp, text))
+              return row
+
+
+          def aws_call(name, inp):
+              if name == "use_aws":
+                  return inp.get("service_name"), inp.get("operation_name")
+              if name == "lookup_cloudtrail_events":
+                  return "cloudtrail", "lookup_events"
+              if name == "query_cloudwatch_logs":
+                  return "logs", "start_query"
+              if name in ("get_metric_data", "get_cloudwatch_metrics"):
+                  return "cloudwatch", "get_metric_data"
+              return None, None
+
+
+          TOOL_CATEGORY_BY_NAME = {
+              "subagent": "Sub-agent", "run_subagent": "Sub-agent", "subagent_wait": "Sub-agent", "gather_context": "Sub-agent", "list_agent_executions": "Sub-agent",
+              "ask_user": "Conversation with user", "system_signal": "Conversation with user", "generate_artifact": "Conversation with user", "distill": "Conversation with user",
+              "write_evidence_finding": "Findings & reports", "RiskFinding": "Findings & reports", "create_or_update_artifact": "Findings & reports",
+              "compose_table_element": "Findings & reports", "generate_report": "Findings & reports",
+              "datetime": "Agent internal", "get_tool_calls": "Agent internal", "list_power_chat_sessions": "Agent internal", "list_chat_executions": "Agent internal",
+              "fs_read": "Files & shell", "fs_write": "Files & shell", "fs_edit": "Files & shell", "fs_tree": "Files & shell", "fs_grep": "Files & shell", "fs_ls": "Files & shell", "shell": "Files & shell",
+              "steer_task": "Tasks",
+          }
+          TOOL_CATEGORY_BY_KEYWORD = (  # substring of the tool name -> category, first match wins
+              ("skill", "Skills"), ("custom_agent", "Custom agents"), ("investigation", "Tasks"), ("release", "Tasks"),
+              ("repo", "Source control"), ("git", "Source control"), ("branch", "Source control"), ("association", "Source control"),
+              ("memor", "Memory & notes"), ("scratchpad", "Memory & notes"), ("knowledge", "Memory & notes"),
+          )
+
+
+          def tool_category(name, service, operation):
+              """ Coarse grouping of tools for the dashboard. AWS calls are grouped by what they read. """
+              if service == "logs" or name == "query_cloudwatch_logs":
+                  return "Logs"
+              if service == "cloudtrail":
+                  return "CloudTrail"
+              if service == "cloudwatch" and operation in ("get_metric_data", "get_metric_statistics", "list_metrics"):
+                  return "Metrics"
+              if service:
+                  return "AWS API"
+              if name in TOOL_CATEGORY_BY_NAME:
+                  return TOOL_CATEGORY_BY_NAME[name]
+              return next((cat for key, cat in TOOL_CATEGORY_BY_KEYWORD if key in name), "Other tool")
+
+
+          def skill_name(name, inp):
+              """ Which skill a tool call loads, reads or edits: a skill name, or a knowledge item id (ki-...) for custom skills,
+              which the dashboard views resolve to a name through skill_reference records. """
+              if name in ("skills", "read_skill_resource", "skill_read", "update_skill", "get_skill", "get_skill_resource", "get_skill_resource_manifest"):
+                  value = inp.get("skill_name") or inp.get("skill_id") or inp.get("name") or inp.get("knowledge_item_id")
+                  return value if isinstance(value, str) and value and value != "ki-" else None
+              if name in ("fs_read", "fs_tree", "fs_grep", "fs_ls", "fs_write", "fs_edit", "upload_artifact"):
+                  path = inp.get("path") or inp.get("file_path") or ""
+                  match = SKILL_PATH_RE.search(path) if "/skills/" in path else None
+                  if match and match.group(1) not in ("SKILL.md", "references", "members", "member", "system", "learned", "custom", "user"):
+                      return match.group(1)
+              return None
+
+
+          def error_class(status, text):
+              if status != "error":
+                  return None
+              for pattern, label in ERROR_CLASSES:
+                  if pattern.search(text or ""):
+                      return label
+              return "Other error"
+
+
+          def logs_query_fields(name, service, operation, inp, text):
+              """ CloudWatch Logs Insights usage: which log group and window were queried, and what the service reported as scanned. """
+              out = {"log_group": None, "logs_query_id": None, "query_window_hours": None,
+                     "logs_bytes_scanned": None, "logs_records_scanned": None, "logs_records_matched": None}
+              if not (name == "query_cloudwatch_logs" or service in ("logs", "cloudtrail")):
+                  return out
+              params = inp.get("parameters") if isinstance(inp.get("parameters"), dict) else {}
+              groups = params.get("logGroupNames") if isinstance(params.get("logGroupNames"), list) else []
+              out["log_group"] = params.get("logGroupName") or inp.get("log_group") or (groups[0] if groups else None)
+              start = to_dt_any(params.get("startTime") or params.get("StartTime") or inp.get("start_time") or inp.get("start"))
+              end = to_dt_any(params.get("endTime") or params.get("EndTime") or inp.get("end_time") or inp.get("end"))
+              if start and end and operation in ("start_query", "filter_log_events", "lookup_events"):
+                  out["query_window_hours"] = round((end - start).total_seconds() / 3600.0, 3)
+              text = text or ""
+              qid = params.get("queryId") or params.get("QueryId")
+              if not qid and operation == "start_query":
+                  match = QUERY_ID_RE.search(text)
+                  qid = match.group(1) if match else None
+              out["logs_query_id"] = qid
+              if "bytesScanned" in text:
+                  for key, col in (("bytesScanned", "logs_bytes_scanned"), ("recordsScanned", "logs_records_scanned"), ("recordsMatched", "logs_records_matched")):
+                      match = STAT_RE[key].search(text)
+                      out[col] = float(match.group(1)) if match else None
+              return out
+
+
+          def promote_finding(row, content):
+              """ symptom / observation / finding / gap / mitigation / summary records: the fields the dashboard shows. """
+              row["title"] = first_str(content, ("title", "name"))
+              mitigation = content.get("mitigation_summary") if isinstance(content.get("mitigation_summary"), dict) else None
+              if mitigation:
+                  row["title"] = row["title"] or (mitigation.get("action") or "")[:200]
+                  row["text"] = "\n".join(s for s in (mitigation.get("action"), mitigation.get("reasoning")) if s)[:TEXT_LEN] or None
+                  plan = content.get("execution_plan")
+                  row["plan_steps"] = len(plan) if isinstance(plan, list) else None
+              else:
+                  row["text"] = (first_str(content, ("description", "text", "summary", "evaluation_summary", "investigation_summary", "message")) or "")[:TEXT_LEN] or None
+              row["text_preview"] = (row["text"] or row["title"] or "")[:TEXT_PREVIEW_LEN] or None
+              row["finding_type"] = {"root_cause": "Root cause", "cause": "Cause", "hypothesis": "Hypothesis"}.get(content.get("finding_type"), content.get("finding_type"))
+              row["resolution"] = {"ruled_in_as_cause": "Ruled in", "ruled_out": "Ruled out"}.get(content.get("resolution"), "Open" if content.get("finding_type") else None)
+              row["resolution_reason"] = (content.get("resolution_reason") or "")[:400] or None
+              obs = content.get("supporting_observations")
+              row["supporting_observations"] = len(obs) if isinstance(obs, list) else None
+              row["related_resources"] = [resource_id(r) for r in (content.get("related_resources") or []) if resource_id(r)][:50]
+
+
+          def resource_id(res):
+              if isinstance(res, str):
+                  return res
+              if isinstance(res, dict):
+                  return res.get("arn") or res.get("name") or res.get("id")
+              return None
+
+
+          def chat_ids_from(text, inp):
+              """ list_power_chat_sessions returns {"execution_ids": [...]}; list_chat_executions takes the same list as input. """
+              ids = set()
+              for source in (parse_json(text or ""), inp):
+                  if isinstance(source, dict) and isinstance(source.get("execution_ids"), list):
+                      ids.update(i for i in source["execution_ids"] if isinstance(i, str) and UUID_RE.match(i))
+              return ids
+
+
+          # ---------- chats ----------
+          def collect_chats(client, base, chat_ids, space_names, ctx, files, counts):
+              """ Chats are read like task executions. Each becomes a task row (task_type CHAT) plus its journal and tool rows. """
+              tag = f"[{base['account_id']}/{base['region']}]"
+              total = sum(len(ids) for ids in chat_ids.values())
+              logger.info(f"{tag} {total} chat(s) discovered in task journals")
+              counts["chats_discovered"] += total
+              for sid, ids in chat_ids.items():
+                  space_ctx = dict(base)
+                  space_ctx.update({"agent_space_id": sid, "agent_space_name": space_names.get(sid)})
+                  for eid in sorted(ids):
+                      if ctx["out_of_time"]():
+                          counts["chats_deferred"] += 1
+                          continue
+                      if not chat_changed_since(client, sid, eid, ctx["journal_cutoff"]):
+                          counts["chats_unchanged"] += 1
+                          continue
+                      try:
+                          records = fetch_journal(client, sid, eid, counts, ctx["out_of_time"])
+                      except OutOfTime:
+                          counts["chats_deferred"] += 1
+                          continue
+                      if not records:
+                          counts["chats_unreadable"] += 1
+                          continue
+                      result = {"task_row": None, "journal_rows": [], "tool_rows": [], "chat_ids": {}}
+                      run = {"task_id": eid, "task_type": "CHAT", "execution_id": eid, "agent_type": "chat"}
+                      parse_journal(space_ctx, run, records, result)
+                      result["task_row"] = chat_row(space_ctx, eid, records, result["journal_rows"])
+                      write_task_result(files, result, counts)
+                      counts["chats"] += 1
+
+
+          def chat_changed_since(client, sid, eid, cutoff):
+              """ Chats have no status or updatedAt to check before reading them. Peek at the newest journal record instead:
+              a chat whose last record is older than the journal lookback was already captured by a previous run. """
+              try:
+                  newest = client.list_journal_records(agentSpaceId=sid, executionId=eid, limit=1, order="DESC").get("records") or []
+              except Exception:  # pylint: disable=broad-exception-caught
+                  return True  # let fetch_journal report the error
+              last = to_dt(newest[0].get("createdAt")) if newest else None
+              return last is None or last >= cutoff
+
+
+          def chat_row(space_ctx, eid, records, journal_rows):
+              title = next((r["title"] for r in journal_rows if r["record_type"] == "chat_title" and r["title"]), None)
+              first_user = next((r["text_preview"] for r in journal_rows if r["record_type"] == "message" and r["message_role"] == "user" and r["text_preview"]), None)
+              row = dict(space_ctx)
+              row.update({
+                  "task_id": eid, "task_type": "CHAT", "title": title or (first_user or "")[:120] or None,
+                  "status": None, "status_reason": None, "priority": None, "primary_task_id": None,
+                  "reference_system": None, "reference_id": None, "reference_url": None,
+                  "linked_recommendations": 0,
+                  "created_at": iso(records[0].get("createdAt")), "updated_at": iso(records[-1].get("createdAt")),
+                  "execution_id": eid, "agent_type": "chat", "execution_status": None,
+                  "execution_created_at": iso(records[0].get("createdAt")), "execution_updated_at": iso(records[-1].get("createdAt")),
+                  "execution_duration_seconds": None,
+              })
+              return row
+
+
+          # ---------- content helpers ----------
+          def as_message(content):
+              """ Return the chat message dict for `message` / `agent_message` records, else None. """
+              if isinstance(content.get("message"), dict) and "role" in content["message"]:
+                  return content["message"]
+              if "role" in content and isinstance(content.get("content"), list):
+                  return content
+              return None
+
+
+          def extract_blocks(blocks):
+              """ Walk message content blocks (Bedrock converse style or Anthropic style). Returns (texts, tool_uses). """
+              texts, tools = [], []
+              for block in blocks or []:
+                  if not isinstance(block, dict):
+                      continue
+                  if isinstance(block.get("text"), str) and block.get("type") in (None, "text"):
+                      texts.append(block["text"])
+                  if isinstance(block.get("toolUse"), dict):
+                      tool = block["toolUse"]
+                      tools.append({"name": tool.get("name") or "unknown", "id": tool.get("toolUseId"), "input": tool.get("input")})
+                  elif block.get("type") == "tool_use":
+                      tools.append({"name": block.get("tool_name") or block.get("name") or "unknown", "id": block.get("id"), "input": block.get("input")})
+              return texts, tools
+
+
+          def block_text(blocks):
+              if isinstance(blocks, str):
+                  return blocks
+              if isinstance(blocks, list):
+                  return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in blocks)
+              return ""
+
+
+          def first_str(content, keys):
+              for key in keys:
+                  value = content.get(key)
+                  if isinstance(value, str) and value:
+                      return value
+              return None
+
+
+          def summary_text(content):
+              value = first_str(content, ("text", "message", "summary", "evaluation_summary", "investigation_summary", "title"))
+              if value:
+                  return value
+              report = content.get("report")
+              if isinstance(report, dict):
+                  return first_str(report, ("summary", "verdict", "decisionReasoning")) or ""
+              return ""
+
+
+          # ---------- helpers ----------
+          def paginate(client, method, key, stop=None, **kwargs):
+              """ Follow nextToken. `stop` is checked before every page; when it returns True, raise OutOfTime. """
+              items, token = [], None
+              while True:
+                  if stop is not None and stop():
+                      raise OutOfTime(method)
+                  if token:
+                      kwargs["nextToken"] = token
+                  response = getattr(client, method)(**kwargs)
+                  items.extend(response.get(key) or [])
+                  token = response.get("nextToken")
+                  if not token:
+                      return items
+
+
+          def time_left_fn(context):
+              if context is not None and hasattr(context, "get_remaining_time_in_millis"):
+                  return context.get_remaining_time_in_millis
+              return lambda: 10 ** 9
+
+
+          def assume_role(account_id, service, region, role):
+              partition = boto3.session.Session().get_partition_for_region(region_name=region)
+              assumed = boto3.client("sts", region_name=region).assume_role(
+                  RoleArn=f"arn:{partition}:iam::{account_id}:role/{role}",
+                  RoleSessionName="data_collection",
+              )
+              creds = assumed["Credentials"]
+              return boto3.client(
+                  service, region_name=region,
+                  aws_access_key_id=creds["AccessKeyId"],
+                  aws_secret_access_key=creds["SecretAccessKey"],
+                  aws_session_token=creds["SessionToken"],
+                  config=config,
+              )
+
+
+          def upload_to_s3(account_id, payer_id, dataset, region, tmp_file, collection_time):
+              """ Upload one region's file for a dataset. Returns False when the upload failed (the caller raises). """
+              if not os.path.exists(tmp_file):
+                  return True
+              if os.path.getsize(tmp_file) == 0:
+                  os.unlink(tmp_file)
+                  return True
+              key = collection_time.strftime(
+                  f"{PREFIX}/{PREFIX}-{dataset}-data/payer_id={payer_id}/year=%Y/month=%m/"
+                  f"{PREFIX}-{dataset}-{account_id}-{region}-%Y%m%d-%H%M%S.json"
+              )
+              try:
+                  boto3.client("s3", config=config).upload_file(tmp_file, BUCKET, key)
+                  logger.info(f"[{account_id}] {dataset} -> s3://{BUCKET}/{key}")
+                  return True
+              except Exception as exc:  # pylint: disable=broad-exception-caught
+                  logger.error(f"[{account_id}] upload of {dataset} failed: {type(exc).__name__}: {exc}")
+                  return False
+              finally:
+                  if os.path.exists(tmp_file):
+                      os.unlink(tmp_file)
+
+
+          def redact(row, dataset):
+              """ Null the free-text columns when INCLUDE_MESSAGE_TEXT is "no". Skill and custom agent references keep their id. """
+              if INCLUDE_MESSAGE_TEXT or row.get("record_type") in ID_RECORD_TYPES:
+                  return row
+              return {k: (None if k in FREE_TEXT_COLUMNS[dataset] else v) for k, v in row.items()}
+
+
+          def write(handle, row):
+              handle.write(json.dumps(row, default=str) + "\n")
+
+
+          def parse_json(value):
+              if isinstance(value, str):
+                  try:
+                      return json.loads(value)
+                  except ValueError:
+                      return value
+              return value
+
+
+          def to_dt(value):
+              if value is None or value == "":
+                  return None
+              if isinstance(value, datetime):
+                  return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+              try:
+                  return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+              except ValueError:
+                  return None
+
+
+          def to_dt_any(value):
+              """ Timestamps as the agent passes them to AWS APIs: epoch seconds, epoch millis or ISO-8601. """
+              if value is None or value == "":
+                  return None
+              if isinstance(value, (int, float)) or (isinstance(value, str) and re.match(r"^[0-9]+(\.[0-9]+)?$", value)):
+                  num = float(value)
+                  if num > 1e12:
+                      num /= 1000.0
+                  try:
+                      return datetime.fromtimestamp(num, tz=timezone.utc)
+                  except (OverflowError, OSError, ValueError):
+                      return None
+              return to_dt(value)
+
+
+          def latest_dt(*values):
+              dts = [d for d in (to_dt(v) for v in values) if d is not None]
+              return max(dts) if dts else None
+
+
+          def iso(value):
+              dt = to_dt(value)
+              return dt.astimezone(timezone.utc).isoformat() if dt else None
+
+
+          def to_float(value):
+              try:
+                  return float(value) if value is not None else None
+              except (TypeError, ValueError):
+                  return None
+      Handler: 'index.lambda_handler'
+      MemorySize: 2048
+      Timeout: 900
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DestinationBucket
+          PREFIX: !Ref CFDataName
+          ROLENAME: !Ref MultiAccountRoleName
+          REGIONS: !Ref RegionsInScope
+          TASK_LOOKBACK_DAYS: !Ref TaskLookbackDays
+          JOURNAL_LOOKBACK_DAYS: !Ref JournalLookbackDays
+          INCLUDE_MESSAGE_TEXT: !Ref IncludeMessageText
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89 # Lambda functions should be deployed inside a VPC
+            reason: "No need for VPC in this case"
+          - id: W92 #  Lambda functions should define ReservedConcurrentExecutions to reserve simultaneous executions
+            reason: "No need for simultaneous execution"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 60
+
+  Crawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+      Role: !Ref GlueRoleARN
+      DatabaseName: !Ref DatabaseName
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tasks-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-journal-records-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tool-usage-data/"
+          - Path: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-usage-data/"
+      Configuration: |
+        {
+          "Version": 1.0,
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          },
+          "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
+            "Tables": {
+              "TableThreshold": 4,
+              "AddOrUpdateBehavior": "MergeNewColumns"
+            }
+          }
+        }
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  TasksTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_tasks_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: title, Type: string }
+            - { Name: status, Type: string }
+            - { Name: status_reason, Type: string }
+            - { Name: priority, Type: string }
+            - { Name: primary_task_id, Type: string }
+            - { Name: reference_system, Type: string }
+            - { Name: reference_id, Type: string }
+            - { Name: reference_url, Type: string }
+            - { Name: linked_recommendations, Type: int }
+            - { Name: created_at, Type: string }
+            - { Name: updated_at, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: execution_status, Type: string }
+            - { Name: execution_created_at, Type: string }
+            - { Name: execution_updated_at, Type: string }
+            - { Name: execution_duration_seconds, Type: double }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tasks-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  JournalRecordsTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_journal_records_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: record_id, Type: string }
+            - { Name: record_type, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: user_type, Type: string }
+            - { Name: message_role, Type: string }
+            - { Name: agent_name, Type: string }
+            - { Name: text_preview, Type: string }
+            - { Name: tool_use_count, Type: int }
+            - { Name: tool_error_count, Type: int }
+            - { Name: title, Type: string }
+            - { Name: text, Type: string }
+            - { Name: finding_type, Type: string }
+            - { Name: resolution, Type: string }
+            - { Name: resolution_reason, Type: string }
+            - { Name: related_resources, Type: array<string> }
+            - { Name: supporting_observations, Type: int }
+            - { Name: plan_steps, Type: int }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-journal-records-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ToolUsageTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_tool_usage_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: agent_space_id, Type: string }
+            - { Name: agent_space_name, Type: string }
+            - { Name: record_id, Type: string }
+            - { Name: record_type, Type: string }
+            - { Name: created_at, Type: string }
+            - { Name: message_role, Type: string }
+            - { Name: task_id, Type: string }
+            - { Name: task_type, Type: string }
+            - { Name: execution_id, Type: string }
+            - { Name: agent_type, Type: string }
+            - { Name: tool_name, Type: string }
+            - { Name: tool_use_id, Type: string }
+            - { Name: status, Type: string }
+            - { Name: is_error, Type: int }
+            - { Name: aws_service, Type: string }
+            - { Name: aws_operation, Type: string }
+            - { Name: aws_region, Type: string }
+            - { Name: tool_category, Type: string }
+            - { Name: skill_name, Type: string }
+            - { Name: error_class, Type: string }
+            - { Name: denied_action, Type: string }
+            - { Name: error_message, Type: string }
+            - { Name: log_group, Type: string }
+            - { Name: logs_query_id, Type: string }
+            - { Name: query_window_hours, Type: double }
+            - { Name: logs_bytes_scanned, Type: double }
+            - { Name: logs_records_scanned, Type: double }
+            - { Name: logs_records_matched, Type: double }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-tool-usage-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  AccountUsageTable:
+    Type: Custom::ManageGlueTable
+    Properties:
+      ServiceToken: !Ref LambdaManageGlueTableARN
+      TableInput:
+        Name: devops_agent_account_usage_data
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: none
+          UPDATED_BY_CRAWLER: !Sub '${ResourcePrefix}${CFDataName}-Crawler'
+        PartitionKeys:
+          - { Name: payer_id, Type: string }
+          - { Name: year, Type: string }
+          - { Name: month, Type: string }
+        StorageDescriptor:
+          Columns:
+            - { Name: account_id, Type: string }
+            - { Name: account_name, Type: string }
+            - { Name: region, Type: string }
+            - { Name: collection_time, Type: string }
+            - { Name: usage_period_start, Type: string }
+            - { Name: usage_period_end, Type: string }
+            - { Name: investigation_hours, Type: double }
+            - { Name: investigation_hours_limit, Type: double }
+            - { Name: evaluation_hours, Type: double }
+            - { Name: evaluation_hours_limit, Type: double }
+            - { Name: system_learning_hours, Type: double }
+            - { Name: system_learning_hours_limit, Type: double }
+            - { Name: on_demand_hours, Type: double }
+            - { Name: on_demand_hours_limit, Type: double }
+            - { Name: grader_hours, Type: double }
+            - { Name: grader_hours_limit, Type: double }
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Location: !Sub "s3://${DestinationBucket}/${CFDataName}/${CFDataName}-account-usage-data/"
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  ModuleStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ResourcePrefix}${CFDataName}-StateMachine'
+      StateMachineType: STANDARD
+      RoleArn: !Ref StepFunctionExecutionRoleARN
+      DefinitionS3Location:
+        Bucket: !Ref CodeBucket
+        Key: !Ref StepFunctionTemplate
+      DefinitionSubstitutions:
+        AccountCollectorLambdaARN: !Ref AccountCollectorLambdaARN
+        ModuleLambdaARN: !GetAtt LambdaFunction.Arn
+        Crawlers: !Sub '["${ResourcePrefix}${CFDataName}-Crawler"]'
+        CollectionType: "LINKED"
+        Params: ''
+        Module: !Ref CFDataName
+        DeployRegion: !Ref AWS::Region
+        Account: !Ref AWS::AccountId
+        Prefix: !Ref ResourcePrefix
+        Bucket: !Ref DestinationBucket
+
+  ModuleRefreshSchedule:
+    Type: 'AWS::Scheduler::Schedule'
+    Properties:
+      Description: !Sub 'Scheduler for the ODC ${CFDataName} module'
+      Name: !Sub '${ResourcePrefix}${CFDataName}-RefreshSchedule'
+      ScheduleExpression: !Ref Schedule
+      State: ENABLED
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: 'FLEXIBLE'
+      Target:
+        Arn: !GetAtt ModuleStepFunction.Arn
+        RoleArn: !Ref SchedulerExecutionRoleARN
+        Input: !Sub '{"module_lambda":"${LambdaFunction.Arn}","crawlers": ["${ResourcePrefix}${CFDataName}-Crawler"]}'
+
+  AnalyticsExecutor:
+    Type: Custom::LambdaAnalyticsExecutor
+    Properties:
+      ServiceToken: !Ref LambdaAnalyticsARN
+      Name: !Ref CFDataName
