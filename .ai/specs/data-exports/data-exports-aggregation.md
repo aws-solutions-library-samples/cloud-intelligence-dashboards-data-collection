@@ -1,7 +1,7 @@
 # Data Exports Aggregation Template Specification
 
 Template: `data-exports/deploy/data-exports-aggregation.yaml`
-Version: v0.11.1 (AWS Solution SO9011)
+Version: v0.14.0 (AWS Solution SO9011)
 
 ## Overview
 
@@ -41,6 +41,10 @@ Resources created:
 - **SourceS3** (conditional) — Legacy local bucket `{prefix}-{accountId}-data-local`, created when `LegacyLocalBucket=yes` or `SecondaryDestinationBucket` is non-empty
 - **ReplicationRole** (conditional) — IAM role for S3 replication, created only when `SecondaryDestinationBucket` is non-empty
 - **COH Service Linked Role** (conditional) — Created via custom resource when COH export is enabled
+
+## CUR 2.0 Query Assembly
+
+The CUR 2.0 `QueryStatement` is built with `Fn::Join` from `Mappings.DataExports.CUR2` fragments: `BaseSelect` + `SCADColumns` (if `EnableSCAD`) + `TagsColumn` + `IAMPrincipalColumns` (if `EnableIAMPrincipalData`) + `StandardizedCostAndRateColumns` (if `EnableStandardizedCostAndRate`) + `FromClause`. Any column added to the query must also be in the `CURTable` Glue column list, and any table configuration must be set in both `LocalCUR2viaCFN` and `LocalCUR2viaCustomResource`.
 
 ## Data Delivery Model
 
@@ -106,6 +110,8 @@ Each crawler excludes:
 | `ManageCUR2/FOCUS/COH/Carbon` | `no` | Enable each export type |
 | `SourceAccountIds` | `''` | Comma-separated source account IDs (destination only) |
 | `EnableSCAD` | `yes` | Include Split Cost Allocation Data in CUR 2.0 |
+| `EnableIAMPrincipalData` | `yes` | Include IAM principal (`line_item_iam_principal`) in CUR 2.0 |
+| `EnableStandardizedCostAndRate` | `yes` | Set `INCLUDE_STANDARDIZED_COST_AND_RATE` in CUR 2.0: adds 14 `cost_analytics_*` columns |
 | `LegacyLocalBucket` | `yes` | Retain local S3 bucket for backward compatibility |
 | `SecondaryDestinationBucket` | `''` | Optional bucket for secondary data replication |
 | `LakeFormationEnabled` | `no` | Enable Lake Formation tag associations |
