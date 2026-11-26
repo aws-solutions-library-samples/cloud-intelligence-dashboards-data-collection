@@ -83,7 +83,7 @@ Outputs:
     Description: "Athena table name for the Kiro user activity data"
     Value: !Sub "${DatabaseName}.kiro_user_activity"
   KmsKeyPolicyExample:
-    Description: "ONLY needed if a Kiro source bucket is encrypted with a customer-managed KMS key (SSE-KMS). Add BOTH statements to the KEY POLICY of that key, in the account that owns the key, and set the key ARN in the KiroSourceBucketsKmsKeyArns parameter. A bucket policy cannot authorize KMS calls, so without these the key blocks both sides: Kiro cannot WRITE reports (AccessDenied on kms:GenerateDataKey, so no report is delivered at all) and this module cannot READ them (AccessDenied on kms:Decrypt) — even though s3:PutObject and s3:GetObject are allowed. No action needed for unencrypted or SSE-S3 (AES256) buckets."
+    Description: "ONLY needed if a Kiro source bucket is encrypted with a customer-managed KMS key (SSE-KMS). Replace YOUR-KIRO-BUCKET-NAME, then add BOTH statements to the KEY POLICY of that key, in the account that owns the key, and set the key ARN in the KiroSourceBucketsKmsKeyArns parameter. A bucket policy cannot authorize KMS calls, so without these the key blocks both sides: Kiro cannot WRITE reports (AccessDenied on kms:GenerateDataKey, so no report is delivered at all) and this module cannot READ them (AccessDenied on kms:Decrypt) — even though s3:PutObject and s3:GetObject are allowed. The encryption-context condition confines both grants to that one bucket; keep its trailing '*', because S3 passes the BUCKET arn as context when S3 Bucket Keys are enabled and the OBJECT arn when they are not. No action needed for unencrypted or SSE-S3 (AES256) buckets."
     Value: !Sub |
       [
         {
@@ -91,14 +91,16 @@ Outputs:
           "Effect": "Allow",
           "Principal": {"AWS": "${LambdaRole.Arn}"},
           "Action": "kms:Decrypt",
-          "Resource": "*"
+          "Resource": "*",
+          "Condition": {"StringLike": {"kms:EncryptionContext:aws:s3:arn": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME*"}}
         },
         {
           "Sid": "AllowKiroServiceWriteSseKms",
           "Effect": "Allow",
           "Principal": {"Service": "q.${AWS::URLSuffix}"},
-          "Action": ["kms:GenerateDataKey*", "kms:Decrypt"],
-          "Resource": "*"
+          "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+          "Resource": "*",
+          "Condition": {"StringLike": {"kms:EncryptionContext:aws:s3:arn": "arn:${AWS::Partition}:s3:::YOUR-KIRO-BUCKET-NAME*"}}
         }
       ]
   BucketPolicyExample:
