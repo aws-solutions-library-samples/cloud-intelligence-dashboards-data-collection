@@ -54,7 +54,7 @@ A region where DevOps Agent is available but no Agent Space exists returns an em
 The module is stateless. Each run collects:
 
 - every task created within `TaskLookbackDays` (default 14), so status changes after creation are captured by re-collection;
-- older tasks that are still active (`PENDING_TRIAGE`, `PENDING_START`, `IN_PROGRESS`, `PENDING_CUSTOMER_APPROVAL`, `WAITING`), at any age;
+- older tasks that are still active (`PENDING_TRIAGE`, `PENDING_START`, `IN_PROGRESS`, `PENDING_CUSTOMER_APPROVAL`), at any age;
 - older tasks that were updated within `JournalLookbackDays`, so a task that finishes after it left `TaskLookbackDays` gets its final status and journal. `ListBacklogTasks` has no "updated after" filter, so the module lists the tasks created in the last 90 days and filters on `updatedAt`; a task older than 90 days that finishes is not refreshed;
 - journal records only for executions that are still running or were updated within `JournalLookbackDays` (default 3). Finished executions older than that were already captured by an earlier run;
 - chats have no status or update timestamp, so the module reads their newest journal record first (`ListJournalRecords` with `limit=1, order=DESC`) and only reads the full journal when that record is inside `JournalLookbackDays`.

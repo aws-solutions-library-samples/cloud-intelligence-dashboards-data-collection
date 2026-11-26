@@ -246,7 +246,7 @@ Resources:
           TEXT_LEN = 2000
           ERROR_LEN = 200
           # Task statuses that can still change. ListBacklogTasks accepts one status per call.
-          ACTIVE_TASK_STATUSES = ("PENDING_TRIAGE", "PENDING_START", "IN_PROGRESS", "PENDING_CUSTOMER_APPROVAL", "WAITING")
+          ACTIVE_TASK_STATUSES = ("PENDING_TRIAGE", "PENDING_START", "IN_PROGRESS", "PENDING_CUSTOMER_APPROVAL")
           TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED", "CANCELLED", "TIMED_OUT", "STOPPED", "SKIPPED", "LINKED"}
           # Columns that can hold customer-written or agent-written free text; nulled when INCLUDE_MESSAGE_TEXT is "no".
           FREE_TEXT_COLUMNS = {
