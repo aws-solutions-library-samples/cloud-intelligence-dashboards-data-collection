@@ -130,7 +130,7 @@ Parameters:
     Default: 'no'
   IncludeDevOpsAgentModule:
     Type: String
-    Description: Collects AWS DevOps Agent operational details (e.g. agent spaces, investigations, journal records) from your accounts
+    Description: Collects AWS DevOps Agent operational details (e.g. investigations, chats, journal records, tool calls) from your accounts. Stores truncated chat, finding and error text unless DevOpsAgentIncludeMessageText is no in the data collection stack
     AllowedValues: ['yes', 'no']
     Default: 'no'
 

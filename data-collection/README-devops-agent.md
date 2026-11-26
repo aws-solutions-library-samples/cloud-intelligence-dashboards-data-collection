@@ -23,22 +23,28 @@ EventBridge Scheduler (rate 1 day)
             → For each region in RegionsInScope:
                 GetAccountUsage          → account-usage
                 ListAgentSpaces          → the spaces to visit
-                ListBacklogTasks         → tasks created in the last TaskLookbackDays
+                ListBacklogTasks         → tasks to re-collect (see Incremental collection)
                 ListExecutions           → per task, joined with the task row      → tasks
                 ListJournalRecords       → per execution that is running or was updated
                                            in the last JournalLookbackDays           → journal-records, tool-usage
                 ListJournalRecords       → per chat discovered in those journals     → tasks (CHAT), journal-records, tool-usage
-            → Writes JSONL files to S3
+            → Writes JSONL files to S3, one set per region as soon as the region is done
       → Glue Crawler — registers new partitions
 ```
 
-Tasks are processed in parallel inside the Lambda (`ThreadPoolExecutor`, 8 workers) because one `ListJournalRecords` page holds at most 100 records and a long investigation can have several thousand. The Lambda stops starting new work 90 s before its 900 s timeout and defers the rest to the next run; nothing is lost because the next run re-collects anything still inside the lookback windows.
+Tasks are processed in parallel inside the Lambda (`ThreadPoolExecutor`, 8 workers) because one `ListJournalRecords` page holds at most 100 records and a long investigation can have several thousand.
+
+**Time budget.** The Lambda has a 900 s timeout and keeps 90 s in reserve for uploads. Workers check the remaining time before every API page and stop when only the reserve is left; the main thread waits for them in bounded slices and does not join the pool, so a long journal cannot hold the Lambda past its reserve. Tasks, spaces and chats that were not finished are counted as deferred (`tasks_deferred`, `spaces_deferred`, `chats_deferred` in the Lambda result) and are picked up by the next run while they are still inside the lookback windows below. A deferred task whose journal changes again later is re-read then; one that leaves `JournalLookbackDays` while deferred on every run is not, so if `tasks_deferred` stays above zero, raise the collection frequency or lower `TaskLookbackDays`.
+
+**Errors.** API errors for a single space, task or chat are logged and counted, and collection continues. The Lambda raises, so the state machine records an error for that account, when every region failed (for example a missing cross-account role or `aidevops` permission) or when an upload to S3 failed. Partial failures are returned in the result's `errors` list.
 
 ### Incremental collection
 
 The module is stateless. Each run collects:
 
 - every task created within `TaskLookbackDays` (default 14), so status changes after creation are captured by re-collection;
+- older tasks that are still active (`PENDING_TRIAGE`, `PENDING_START`, `IN_PROGRESS`, `PENDING_CUSTOMER_APPROVAL`, `WAITING`), at any age;
+- older tasks that were updated within `JournalLookbackDays`, so a task that finishes after it left `TaskLookbackDays` gets its final status and journal. `ListBacklogTasks` has no "updated after" filter, so the module lists the tasks created in the last 90 days and filters on `updatedAt`; a task older than 90 days that finishes is not refreshed;
 - journal records only for executions that are still running or were updated within `JournalLookbackDays` (default 3). Finished executions older than that were already captured by an earlier run;
 - chats have no status or update timestamp, so the module reads their newest journal record first (`ListJournalRecords` with `limit=1, order=DESC`) and only reads the full journal when that record is inside `JournalLookbackDays`.
 
@@ -46,7 +52,7 @@ Because the same task or record can be written more than once, the dashboard vie
 
 ### How journal records are stored
 
-A journal record is `{recordId, recordType, createdAt, userReference, content}`. `content` is free-form JSON that differs per `record_type`. The module does **not** store the raw `content`; it parses each record once at collection time and writes only the fields the dashboard needs:
+A journal record is `{recordId, recordType, createdAt, userReference, content}`. `content` is free-form JSON that differs per `record_type`. The module does not keep the full `content` (raw tool inputs and outputs, full messages); it parses each record once at collection time and writes the fields the dashboard needs, **including truncated free text** (see [Data stored](#data-stored)):
 
 | `record_type` | Columns filled |
 |---|---|
@@ -62,6 +68,23 @@ A journal record is `{recordId, recordType, createdAt, userReference, content}`.
 ### How chats are discovered
 
 The DevOps Agent API lists chats for the **calling identity only** (`ListChats` resolves the user from the session), so an account-wide collector cannot enumerate them. The module instead relies on the agent itself: its periodic System Learning tasks call the internal tool `list_power_chat_sessions`, and the resulting list of chat execution ids is in their journal. The module reads those ids with `ListJournalRecords` like any other execution and stores each chat as a task row with `task_type = CHAT`, together with its journal and tool rows. Coverage is best effort: a chat appears after the next System Learning run in its Agent Space, and chats in spaces where that task never runs are not collected.
+
+### Data stored
+
+The tables hold content written by your users and by the agent, not only metrics. With `IncludeMessageText=yes` (the default) the module stores:
+
+| Table | Column | Content | Limit |
+|---|---|---|---|
+| tasks | `title` | Task titles as typed by users or integrations; for chats, the chat title or the first user message | API value / 120 chars |
+| journal-records | `text_preview` | User and agent chat messages, usage messages, summaries | 500 chars |
+| journal-records | `title` | Titles of findings, symptoms, gaps, mitigations and summaries | API value |
+| journal-records | `text` | Finding, gap and summary text; mitigation action and reasoning | 2,000 chars |
+| journal-records | `resolution_reason` | Why a hypothesis was ruled in or out | 400 chars |
+| tool-usage | `error_message` | Error text returned by a tool | 200 chars |
+
+Always stored, regardless of the setting: identifiers and metadata such as account, Agent Space, task and execution ids, statuses, timestamps, tool names, AWS service and operation, error classes, the IAM action named in an access-denied error, log group names, and the resource ARNs or names listed in findings (`related_resources`).
+
+This is customer chat and incident content. It is readable by anyone with access to the data bucket, the Athena tables and the dashboard's datasets. Set `DevOpsAgentIncludeMessageText=no` in the main stack (`IncludeMessageText` in this module) to write the free-text columns above as null. Counts, statuses and classifications keep working; the dashboard's lists of questions, findings and mitigations, and the chat intent classification, then show no text. Changing the setting affects new collections only; remove existing files from `s3://{DestinationBucket}/devops-agent/` to drop text already stored.
 
 ---
 
@@ -90,10 +113,10 @@ s3://{DestinationBucket}/
         └── payer_id={X}/
             └── year={YYYY}/
                 └── month={MM}/
-                    └── devops-agent-<dataset>-<account_id>-<YYYYMMDD-HHMMSS>.json   ← JSONL
+                    └── devops-agent-<dataset>-<account_id>-<region>-<YYYYMMDD-HHMMSS>.json   ← JSONL
 ```
 
-`payer_id`, `year` and `month` are **Athena partition keys**. `account_id` and `region` are regular columns because one Lambda invocation writes one file per dataset covering all regions of an account.
+`payer_id`, `year` and `month` are **Athena partition keys**. `account_id` and `region` are regular columns; each Lambda invocation writes one file per dataset and region.
 
 ### Parameters
 
@@ -101,8 +124,9 @@ s3://{DestinationBucket}/
 |---|---|---|
 | `RegionsInScope` | Comma-separated regions where Agent Spaces exist | Deployment region |
 | `Schedule` | EventBridge schedule expression (wired to `ScheduleFrequent` in the main stack) | `rate(1 day)` |
-| `TaskLookbackDays` | Collect tasks created within this many days (1–90) | `14` |
+| `TaskLookbackDays` | Re-collect tasks created within this many days (1–90). Older tasks are also re-collected while active or after they change | `14` |
 | `JournalLookbackDays` | Fetch journals for executions running or updated within this many days (1–90). Must be ≥ the collection interval | `3` |
+| `IncludeMessageText` | `yes` stores truncated free text (see [Data stored](#data-stored)); `no` writes those columns as null. Set through `DevOpsAgentIncludeMessageText` in the main stack | `yes` |
 | `Boto3LayerArn` | CID Boto3 Lambda layer. Required until the Lambda runtime's bundled boto3 includes the `devops-agent` service | Set by the main stack |
 | `DatabaseName` | Athena database | `optimization_data` |
 | `MultiAccountRoleName` | Cross-account IAM role name in member accounts | `Optimization-Data-Multi-Account-Role` |
@@ -114,9 +138,7 @@ Lambda: Python 3.13, 2048 MB, 900 s timeout. Files are staged in `/tmp` (512 MB)
 Granted by `DevOpsAgentModulePolicy` in `deploy-in-linked-account.yaml` (read-only; the IAM service prefix is `aidevops`, not `devops-agent`):
 
 - `aidevops:ListAgentSpaces`
-- `aidevops:GetAgentSpace`
 - `aidevops:ListBacklogTasks`
-- `aidevops:GetBacklogTask`
 - `aidevops:ListExecutions`
 - `aidevops:ListJournalRecords`
 - `aidevops:GetAccountUsage`
@@ -148,7 +170,7 @@ One row per backlog task per run, joined with its primary execution; plus one ro
 | `agent_space_id`, `agent_space_name` | string | Owning Agent Space |
 | `task_id` | string | Backlog task identifier; the chat execution id for chats |
 | `task_type` | string | `INVESTIGATION`, `EVALUATION`, `SYSTEM_LEARNING`, `RELEASE_READINESS_REVIEW`, `CUSTOM`, `CHAT`, … |
-| `title` | string | Task title; for chats the chat title or the first user message |
+| `title` | string | Task title; for chats the chat title or the first user message. Null when `IncludeMessageText=no` |
 | `status`, `status_reason` | string | Task status and reason (null for chats) |
 | `priority` | string | Task priority |
 | `primary_task_id` | string | Parent task for linked/sub tasks |
@@ -174,13 +196,13 @@ One row per journal record. Largest table.
 | `user_type` | string | Who caused the record (user or agent) |
 | `message_role` | string | `user` or `assistant` for message records |
 | `agent_name` | string | Agent name from `usage_metrics` |
-| `text_preview` | string | First 500 chars of the text content |
+| `text_preview` | string | First 500 chars of the text content. Null when `IncludeMessageText=no` |
 | `tool_use_count`, `tool_error_count` | int | Tool calls in this record and how many returned an error |
-| `title` | string | Title of a finding, symptom, gap, mitigation (the action) or summary |
-| `text` | string | Body text (up to 2,000 chars): finding description, gap text, mitigation action + reasoning |
+| `title` | string | Title of a finding, symptom, gap, mitigation (the action) or summary; the skill or custom agent name for `skill_reference` / `custom_agent_reference`. Null when `IncludeMessageText=no`, except for references |
+| `text` | string | Body text (up to 2,000 chars): finding description, gap text, mitigation action + reasoning; the knowledge item id for references. Null when `IncludeMessageText=no`, except for references |
 | `finding_type` | string | `Root cause`, `Cause`, `Hypothesis` for `finding` records |
 | `resolution` | string | `Ruled in`, `Ruled out`, `Open` for `finding` records |
-| `resolution_reason` | string | Why a hypothesis was ruled in or out |
+| `resolution_reason` | string | Why a hypothesis was ruled in or out. Null when `IncludeMessageText=no` |
 | `related_resources` | array<string> | Resources (ARNs or names) named in the record |
 | `supporting_observations` | int | Observations backing a finding |
 | `plan_steps` | int | Steps in a mitigation's execution plan |
@@ -201,7 +223,7 @@ One row per tool invocation.
 | `skill_name` | string | Skill loaded, read or edited by this call, if any |
 | `error_class` | string | For errors: `Blocked by guardrail`, `Permission denied`, `Not found`, `Invalid input`, `Throttled`, `Timeout`, `Output too large`, … |
 | `denied_action` | string | IAM action named in an access-denied error |
-| `error_message` | string | First 200 chars of the error text |
+| `error_message` | string | First 200 chars of the error text. Null when `IncludeMessageText=no` |
 | `log_group` | string | Log group queried (Logs Insights, FilterLogEvents) |
 | `logs_query_id` | string | Logs Insights query id |
 | `query_window_hours` | double | Time window of a log or CloudTrail query |

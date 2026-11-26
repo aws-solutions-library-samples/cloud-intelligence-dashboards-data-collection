@@ -55,6 +55,10 @@ Metadata:
           default: 'Kiro User Activity Module Configuration'
         Parameters:
           - KiroSourceBuckets
+      - Label:
+          default: 'DevOps Agent Module Configuration'
+        Parameters:
+          - DevOpsAgentIncludeMessageText
     ParameterLabels:
       DestinationBucket:
         default: 'Destination S3 bucket prefix'
@@ -132,6 +136,8 @@ Metadata:
         default: 'Include Kiro User Activity Data Collection Module'
       KiroSourceBuckets:
         default: 'Kiro Source Bucket Names (comma-separated)'
+      DevOpsAgentIncludeMessageText:
+        default: 'DevOps Agent: store message and finding text'
 
 Mappings:
   RegionMap:
@@ -343,9 +349,14 @@ Parameters:
     Default: 'no'
   IncludeDevOpsAgentModule:
     Type: String
-    Description: Collects AWS DevOps Agent operational details (e.g. agent spaces, investigations, journal records) from your accounts
+    Description: Collects AWS DevOps Agent operational details (e.g. investigations, chats, journal records, tool calls) from your accounts. Stores truncated chat, finding and error text unless DevOpsAgentIncludeMessageText is no
     AllowedValues: ['yes', 'no']
     Default: 'no'
+  DevOpsAgentIncludeMessageText:
+    Type: String
+    Description: "Used only when IncludeDevOpsAgentModule is yes. 'yes' stores truncated free text from the agent's journal (message previews, task, chat and finding titles, finding text, tool error messages), which is customer chat and incident content. 'no' writes those columns as null and keeps counts, statuses and identifiers."
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
 Conditions:
   DeployTAModule: !Equals [ !Ref IncludeTAModule, "yes"]
   DeployRightsizingModule: !Equals [ !Ref IncludeRightsizingModule, "yes"]
@@ -1749,6 +1760,7 @@ Resources:
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         LambdaManageGlueTableARN: !GetAtt LambdaManageGlueTable.Arn
         Boto3LayerArn: !Ref Boto3LayerVersion
+        IncludeMessageText: !Ref DevOpsAgentIncludeMessageText
         RegionsInScope:
           Fn::If:
             - RegionsInScopeIsEmpty

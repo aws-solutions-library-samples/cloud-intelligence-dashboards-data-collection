@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Retrieves AWS DevOps Agent operational and configuration data across the AWS organization
+Description: Retrieves AWS DevOps Agent operational data across the AWS organization
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -11,6 +11,7 @@ Metadata:
           - Schedule
           - TaskLookbackDays
           - JournalLookbackDays
+          - IncludeMessageText
       - Label:
           default: 'Advanced (only change if non-default CID deployment)'
         Parameters:
@@ -42,6 +43,8 @@ Metadata:
         default: 'Task lookback window (days)'
       JournalLookbackDays:
         default: 'Journal lookback window (days)'
+      IncludeMessageText:
+        default: 'Store message and finding text'
 
 Parameters:
   DatabaseName:
@@ -107,7 +110,7 @@ Parameters:
     Default: us-east-1
   TaskLookbackDays:
     Type: Number
-    Description: Collect backlog tasks created within this many days. Re-collecting lets status changes be captured; views keep the latest snapshot per task.
+    Description: Re-collect backlog tasks created within this many days. Older tasks are also re-collected while they are active or after they change (within 90 days of creation). Views keep the latest snapshot per task.
     Default: 14
     MinValue: 1
     MaxValue: 90
@@ -117,6 +120,11 @@ Parameters:
     Default: 3
     MinValue: 1
     MaxValue: 90
+  IncludeMessageText:
+    Type: String
+    Description: "Store free text from the agent's journal: user and agent message previews (500 chars), task, chat and finding titles, finding and mitigation text (2,000 chars) and tool error messages (200 chars). This is customer chat and incident content. Set to 'no' to write these columns as null; counts, statuses, tool names, error classes and resource ARNs are still collected."
+    AllowedValues: ['yes', 'no']
+    Default: 'yes'
 
 Conditions:
   NeedDataBucketsKms: !Not [!Equals [!Ref DataBucketsKmsKeysArns, '']]
@@ -197,7 +205,8 @@ Resources:
             tasks            one row per backlog task (investigation, evaluation, system learning, custom, ...)
                              joined with its primary execution, plus one row per chat discovered in task journals
             journal-records  one row per journal record of recently active executions, with the fields the
-                             dashboard needs promoted to columns (raw content is not stored)
+                             dashboard needs promoted to columns (the full record content is not kept; truncated
+                             message, finding and title text is, see INCLUDE_MESSAGE_TEXT)
             tool-usage       one row per tool invocation found in journal messages, with the matching result
             account-usage    one row per account and region: monthly DevOps Agent hours by category
 
@@ -206,6 +215,9 @@ Resources:
           result (a list of chat execution ids) is in their journal; those ids are read with
           ListJournalRecords and stored as task_type CHAT. Coverage is best effort.
 
+          Free text (message previews, finding and task titles, finding text, tool error messages) is stored truncated
+          unless INCLUDE_MESSAGE_TEXT is "no", in which case those columns are written as null.
+
           Invoked by the CID main state machine with {"account": "<json>", "params": ...}.
           """
           import os
@@ -213,7 +225,7 @@ Resources:
           import json
           import logging
           from collections import Counter
-          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
           from datetime import datetime, timezone, timedelta
 
           import boto3
@@ -225,12 +237,23 @@ Resources:
           REGIONS = [r.strip() for r in os.environ.get("REGIONS", "us-east-1").split(",") if r.strip()]
           TASK_LOOKBACK_DAYS = int(os.environ.get("TASK_LOOKBACK_DAYS", "14"))
           JOURNAL_LOOKBACK_DAYS = int(os.environ.get("JOURNAL_LOOKBACK_DAYS", "3"))
+          INCLUDE_MESSAGE_TEXT = os.environ.get("INCLUDE_MESSAGE_TEXT", "yes").lower() == "yes"
           MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
           TIME_RESERVE_MS = int(os.environ.get("TIME_RESERVE_MS", "90000"))  # stop collecting when less remains
+          REFRESH_HORIZON_DAYS = max(90, TASK_LOOKBACK_DAYS)  # tasks created within this window are listed so late status changes are seen
           TEXT_PREVIEW_LEN = 500
           TEXT_LEN = 2000
           ERROR_LEN = 200
-          TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED", "CANCELLED", "TIMED_OUT", "STOPPED"}
+          # Task statuses that can still change. ListBacklogTasks accepts one status per call.
+          ACTIVE_TASK_STATUSES = ("PENDING_TRIAGE", "PENDING_START", "IN_PROGRESS", "PENDING_CUSTOMER_APPROVAL", "WAITING")
+          TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED", "CANCELLED", "TIMED_OUT", "STOPPED", "SKIPPED", "LINKED"}
+          # Columns that can hold customer-written or agent-written free text; nulled when INCLUDE_MESSAGE_TEXT is "no".
+          FREE_TEXT_COLUMNS = {
+              "tasks": ("title",),
+              "journal-records": ("text_preview", "title", "text", "resolution_reason"),
+              "tool-usage": ("error_message",),
+          }
+          ID_RECORD_TYPES = {"skill_reference", "custom_agent_reference"}  # title/text hold a skill name and id, not free text
           DATASETS = ["tasks", "journal-records", "tool-usage", "account-usage"]
           CHAT_LIST_TOOLS = ("list_power_chat_sessions", "list_chat_executions")  # result / input carry chat execution ids
           UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -251,12 +274,17 @@ Resources:
               (re.compile(r"(?i)too large|exceeds|limit exceeded|truncated"), "Output too large"),
           )
           DENIED_ACTION_RE = re.compile(r"not authorized to perform: ([A-Za-z0-9-]+:[A-Za-z0-9]+)")
-          STAT_RE = {k: re.compile(rf'"{k}":\s*([0-9]+(?:\.[0-9]+)?)') for k in ("bytesScanned", "recordsScanned", "recordsMatched")}
-          QUERY_ID_RE = re.compile(r'"queryId":\s*"([^"]+)"')
+          # Tool results arrive as JSON text, sometimes JSON-encoded twice; accept quotes with or without backslashes.
+          STAT_RE = {k: re.compile(rf'\\*"{k}\\*"\s*:\s*([0-9]+(?:\.[0-9]+)?)') for k in ("bytesScanned", "recordsScanned", "recordsMatched")}
+          QUERY_ID_RE = re.compile(r'\\*"queryId\\*"\s*:\s*\\*"([^"\\]+)')
 
-          config = Config(retries={"max_attempts": 6, "mode": "standard"})
+          config = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 6, "mode": "standard"})
           logger = logging.getLogger(__name__)
           logger.setLevel(getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+
+          class OutOfTime(Exception):
+              """ Raised inside workers when the Lambda time budget is used up; the work is deferred to the next run. """
 
 
           def lambda_handler(event, context):
@@ -272,36 +300,49 @@ Resources:
               account_id = account["account_id"]
               payer_id = account["payer_id"]
               collection_time = datetime.now(timezone.utc)
+              deadline = time_left_fn(context)
               ctx = {
                   "account_id": account_id,
                   "account_name": account.get("account_name", ""),
                   "payer_id": payer_id,
                   "collection_time": collection_time.isoformat(),
-                  "task_created_after": (collection_time - timedelta(days=TASK_LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "task_cutoff": collection_time - timedelta(days=TASK_LOOKBACK_DAYS),
+                  "refresh_horizon": (collection_time - timedelta(days=REFRESH_HORIZON_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   "journal_cutoff": collection_time - timedelta(days=JOURNAL_LOOKBACK_DAYS),
-                  "deadline": time_left_fn(context),
+                  "deadline": deadline,
+                  "out_of_time": lambda: deadline() < TIME_RESERVE_MS,
               }
-              files = {ds: open(f"/tmp/{ds}.json", "w", encoding="utf-8") for ds in DATASETS}  # pylint: disable=consider-using-with
               counts = Counter()
-              try:
-                  for region in REGIONS:
-                      if ctx["deadline"]() < TIME_RESERVE_MS:
-                          logger.warning(f"[{account_id}] out of time before region {region}; it will be collected next run")
-                          counts["regions_deferred"] += 1
-                          continue
-                      try:
-                          client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
-                          collect_region(client, region, ctx, files, counts)
-                      except Exception as exc:  # pylint: disable=broad-exception-caught
-                          logger.warning(f"[{account_id}/{region}] skipped: {type(exc).__name__}: {exc}")
-                          counts["region_errors"] += 1
-              finally:
-                  for f in files.values():
-                      f.close()
-              for ds in DATASETS:
-                  upload_to_s3(account_id, payer_id, ds, f"/tmp/{ds}.json", collection_time)
+              errors = []
+              for region in REGIONS:
+                  if ctx["out_of_time"]():
+                      logger.warning(f"[{account_id}] out of time before region {region}; it will be collected next run")
+                      counts["regions_deferred"] += 1
+                      continue
+                  # One set of files per region, uploaded as soon as the region is done: a hard timeout loses one region at most.
+                  paths = {ds: f"/tmp/{ds}-{region}.json" for ds in DATASETS}
+                  files = {ds: open(path, "w", encoding="utf-8") for ds, path in paths.items()}  # pylint: disable=consider-using-with
+                  try:
+                      client = assume_role(account_id, "devops-agent", region, ROLE_NAME)
+                      collect_region(client, region, ctx, files, counts)
+                  except Exception as exc:  # pylint: disable=broad-exception-caught
+                      logger.error(f"[{account_id}/{region}] collection failed: {type(exc).__name__}: {exc}")
+                      counts["region_errors"] += 1
+                      errors.append(f"{region}: {type(exc).__name__}: {exc}")
+                  finally:
+                      for f in files.values():
+                          f.close()
+                  for ds, path in paths.items():
+                      if not upload_to_s3(account_id, payer_id, ds, region, path, collection_time):
+                          counts["upload_errors"] += 1
+                          errors.append(f"{region}: upload of {ds} failed")
               logger.info(f"[{account_id}] done: {dict(counts)}")
-              return {"statusCode": 200, "body": dict(counts)}
+              attempted = len(REGIONS) - counts["regions_deferred"]
+              # Raise when nothing could be collected or data was lost, so the state machine records an error for this account
+              # (missing role or aidevops permissions, S3 or KMS denied). Partial region failures are reported in the payload.
+              if counts["upload_errors"] or (attempted and counts["region_errors"] == attempted):
+                  raise RuntimeError(f"[{account_id}] DevOps Agent collection failed: {'; '.join(errors)[:900]}")
+              return {"statusCode": 200, "body": {**dict(counts), "errors": errors}}
 
 
           def collect_region(client, region, ctx, files, counts):
@@ -350,73 +391,112 @@ Resources:
 
 
           def list_recent_tasks(client, base, spaces, ctx, counts):
-              """ Tasks created within the lookback window, across all spaces. Returns [(space_ctx, task)]. """
+              """ Tasks to (re-)collect, across all spaces. Returns [(space_ctx, task)].
+              A task is collected when it was created within TaskLookbackDays, is still active, or was updated within
+              JournalLookbackDays (ListBacklogTasks has no updatedAfter filter, so tasks created within REFRESH_HORIZON_DAYS
+              are listed and filtered here). Active tasks older than the horizon are listed by status.
+              """
               work = []
               for space in spaces:
                   sid = space.get("agentSpaceId")
                   tag = f"[{base['account_id']}/{base['region']}/{sid}]"
                   space_ctx = dict(base)
                   space_ctx.update({"agent_space_id": sid, "agent_space_name": space.get("name")})
+                  stop = ctx["out_of_time"]
                   try:
-                      tasks = paginate(
-                          client, "list_backlog_tasks", "tasks",
-                          agentSpaceId=sid, limit=100, filter={"createdAfter": ctx["task_created_after"]},
-                      )
+                      listed = paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
+                                        filter={"createdAfter": ctx["refresh_horizon"]})
+                      tasks = {t["taskId"]: t for t in listed if t.get("taskId") and wanted_task(t, ctx)}
+                      for status in ACTIVE_TASK_STATUSES:
+                          for t in paginate(client, "list_backlog_tasks", "tasks", stop=stop, agentSpaceId=sid, limit=100,
+                                            filter={"status": [status], "createdBefore": ctx["refresh_horizon"]}):
+                              if t.get("taskId"):
+                                  tasks.setdefault(t["taskId"], t)
+                  except OutOfTime:
+                      logger.warning(f"{tag} out of time while listing tasks; this space is deferred to the next run")
+                      counts["spaces_deferred"] += 1
+                      continue
                   except Exception as exc:  # pylint: disable=broad-exception-caught
                       logger.warning(f"{tag} list_backlog_tasks failed: {type(exc).__name__}: {exc}")
                       counts["task_list_errors"] += 1
                       continue
-                  logger.info(f"{tag} {len(tasks)} task(s) created since {ctx['task_created_after']}")
-                  work.extend((space_ctx, task) for task in tasks)
+                  logger.info(f"{tag} {len(tasks)} task(s) to collect ({len(listed)} listed since {ctx['refresh_horizon']})")
+                  work.extend((space_ctx, task) for task in tasks.values())
               return work
+
+
+          def wanted_task(task, ctx):
+              if (task.get("status") or "").upper() in ACTIVE_TASK_STATUSES:
+                  return True
+              created = to_dt(task.get("createdAt"))
+              if created is None or created >= ctx["task_cutoff"]:
+                  return True
+              updated = to_dt(task.get("updatedAt"))
+              return updated is not None and updated >= ctx["journal_cutoff"]
 
 
           def collect_tasks(client, base, work, ctx, files, counts):
               """ Executions + journal, one unit of work per task, in parallel. Stops early when the Lambda runs out of time.
               Returns {agent_space_id: set(chat execution ids)} discovered in the journals.
+              Workers check the budget between API pages (OutOfTime); the main thread waits in bounded slices and never joins
+              the pool, so in-flight workers cannot hold the Lambda past its reserve. Only the main thread writes files and counts.
               """
               tag = f"[{base['account_id']}/{base['region']}]"
               chat_ids = {}
-              with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-                  futures = {pool.submit(collect_task, client, space_ctx, task, ctx, counts): task["taskId"] for space_ctx, task in work}
-                  try:
-                      for future in as_completed(futures):
-                          if ctx["deadline"]() < TIME_RESERVE_MS:
-                              pending = sum(1 for f in futures if not f.done())
-                              logger.warning(f"{tag} out of time; deferring {pending} task(s) to next run")
-                              counts["tasks_deferred"] += pending
-                              break
+              pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)  # not a context manager: its exit would wait for running workers
+              futures = {pool.submit(collect_task, client, space_ctx, task, ctx): task["taskId"] for space_ctx, task in work}
+              pending = set(futures)
+              try:
+                  while pending:
+                      budget_s = (ctx["deadline"]() - TIME_RESERVE_MS) / 1000.0
+                      if budget_s <= 0:
+                          break
+                      done, pending = wait(pending, timeout=min(budget_s, 10.0), return_when=FIRST_COMPLETED)
+                      for future in done:
                           try:
                               result = future.result()
+                          except OutOfTime:
+                              counts["tasks_deferred"] += 1
+                              continue
                           except Exception as exc:  # pylint: disable=broad-exception-caught
                               logger.warning(f"{tag} task {futures[future]} failed: {type(exc).__name__}: {exc}")
                               counts["task_errors"] += 1
                               continue
+                          counts.update(result.pop("counts"))
                           write_task_result(files, result, counts)
                           for sid, ids in result["chat_ids"].items():
                               chat_ids.setdefault(sid, set()).update(ids)
-                  finally:
-                      pool.shutdown(wait=False, cancel_futures=True)
+              finally:
+                  if pending:
+                      logger.warning(f"{tag} out of time; deferring {len(pending)} task(s) to next run")
+                      counts["tasks_deferred"] += len(pending)
+                  pool.shutdown(wait=False, cancel_futures=True)
               return chat_ids
 
 
           def write_task_result(files, result, counts):
-              write(files["tasks"], result["task_row"])
+              write(files["tasks"], redact(result["task_row"], "tasks"))
               counts["tasks"] += 1
               for row in result["journal_rows"]:
-                  write(files["journal-records"], row)
+                  write(files["journal-records"], redact(row, "journal-records"))
               for row in result["tool_rows"]:
-                  write(files["tool-usage"], row)
+                  write(files["tool-usage"], redact(row, "tool-usage"))
               counts["journal_records"] += len(result["journal_rows"])
               counts["tool_usage"] += len(result["tool_rows"])
 
 
-          def collect_task(client, space_ctx, task, ctx, counts):
-              """ One task: list its executions, build the task row, fetch journals when recently active. """
+          def collect_task(client, space_ctx, task, ctx):
+              """ One task: list its executions, build the task row, fetch journals when recently active.
+              Runs in a worker thread: counts are local and merged by the main thread. Raises OutOfTime when the budget is used up.
+              """
               sid = space_ctx["agent_space_id"]
+              counts = Counter()
+              stop = ctx["out_of_time"]
               executions = []
               try:
-                  executions = paginate(client, "list_executions", "executions", agentSpaceId=sid, taskId=task["taskId"])
+                  executions = paginate(client, "list_executions", "executions", stop=stop, agentSpaceId=sid, taskId=task["taskId"])
+              except OutOfTime:
+                  raise
               except Exception as exc:  # pylint: disable=broad-exception-caught
                   logger.warning(f"[{sid}] list_executions({task['taskId']}) failed: {type(exc).__name__}: {exc}")
                   counts["execution_list_errors"] += 1
@@ -425,7 +505,8 @@ Resources:
                   primary = executions[0]
               if primary is None and task.get("executionId"):
                   primary = {"executionId": task["executionId"]}
-              result = {"task_row": task_row(space_ctx, task, primary), "journal_rows": [], "tool_rows": [], "chat_ids": {}}
+              result = {"task_row": task_row(space_ctx, task, primary), "journal_rows": [], "tool_rows": [], "chat_ids": {},
+                        "counts": counts}
               if not needs_journal(task, primary, ctx["journal_cutoff"]):
                   return result
               seen = set()
@@ -434,7 +515,7 @@ Resources:
                   if not eid or eid in seen:
                       continue
                   seen.add(eid)
-                  records = fetch_journal(client, sid, eid, counts)
+                  records = fetch_journal(client, sid, eid, counts, stop)
                   if records is None:
                       continue
                   run = {"task_id": task.get("taskId"), "task_type": task.get("taskType"),
@@ -443,9 +524,13 @@ Resources:
               return result
 
 
-          def fetch_journal(client, sid, eid, counts):
+          def fetch_journal(client, sid, eid, counts, stop=None):
+              """ All journal records of one execution, or None on an API error. OutOfTime propagates to the caller. """
               try:
-                  return paginate(client, "list_journal_records", "records", agentSpaceId=sid, executionId=eid, limit=100, order="ASC")
+                  return paginate(client, "list_journal_records", "records", stop=stop,
+                                  agentSpaceId=sid, executionId=eid, limit=100, order="ASC")
+              except OutOfTime:
+                  raise
               except Exception as exc:  # pylint: disable=broad-exception-caught
                   logger.warning(f"[{sid}] list_journal_records({eid}) failed: {type(exc).__name__}: {exc}")
                   counts["journal_errors"] += 1
@@ -760,13 +845,17 @@ Resources:
                   space_ctx = dict(base)
                   space_ctx.update({"agent_space_id": sid, "agent_space_name": space_names.get(sid)})
                   for eid in sorted(ids):
-                      if ctx["deadline"]() < TIME_RESERVE_MS:
+                      if ctx["out_of_time"]():
                           counts["chats_deferred"] += 1
                           continue
                       if not chat_changed_since(client, sid, eid, ctx["journal_cutoff"]):
                           counts["chats_unchanged"] += 1
                           continue
-                      records = fetch_journal(client, sid, eid, counts)
+                      try:
+                          records = fetch_journal(client, sid, eid, counts, ctx["out_of_time"])
+                      except OutOfTime:
+                          counts["chats_deferred"] += 1
+                          continue
                       if not records:
                           counts["chats_unreadable"] += 1
                           continue
@@ -859,9 +948,12 @@ Resources:
 
 
           # ---------- helpers ----------
-          def paginate(client, method, key, **kwargs):
+          def paginate(client, method, key, stop=None, **kwargs):
+              """ Follow nextToken. `stop` is checked before every page; when it returns True, raise OutOfTime. """
               items, token = [], None
               while True:
+                  if stop is not None and stop():
+                      raise OutOfTime(method)
                   if token:
                       kwargs["nextToken"] = token
                   response = getattr(client, method)(**kwargs)
@@ -893,23 +985,34 @@ Resources:
               )
 
 
-          def upload_to_s3(account_id, payer_id, dataset, tmp_file, collection_time):
+          def upload_to_s3(account_id, payer_id, dataset, region, tmp_file, collection_time):
+              """ Upload one region's file for a dataset. Returns False when the upload failed (the caller raises). """
               if not os.path.exists(tmp_file):
-                  return
+                  return True
               if os.path.getsize(tmp_file) == 0:
                   os.unlink(tmp_file)
-                  return
+                  return True
               key = collection_time.strftime(
-                  f"{PREFIX}/{PREFIX}-{dataset}-data/payer_id={payer_id}/year=%Y/month=%m/{PREFIX}-{dataset}-{account_id}-%Y%m%d-%H%M%S.json"
+                  f"{PREFIX}/{PREFIX}-{dataset}-data/payer_id={payer_id}/year=%Y/month=%m/"
+                  f"{PREFIX}-{dataset}-{account_id}-{region}-%Y%m%d-%H%M%S.json"
               )
               try:
-                  boto3.client("s3").upload_file(tmp_file, BUCKET, key)
+                  boto3.client("s3", config=config).upload_file(tmp_file, BUCKET, key)
                   logger.info(f"[{account_id}] {dataset} -> s3://{BUCKET}/{key}")
+                  return True
               except Exception as exc:  # pylint: disable=broad-exception-caught
                   logger.error(f"[{account_id}] upload of {dataset} failed: {type(exc).__name__}: {exc}")
+                  return False
               finally:
                   if os.path.exists(tmp_file):
                       os.unlink(tmp_file)
+
+
+          def redact(row, dataset):
+              """ Null the free-text columns when INCLUDE_MESSAGE_TEXT is "no". Skill and custom agent references keep their id. """
+              if INCLUDE_MESSAGE_TEXT or row.get("record_type") in ID_RECORD_TYPES:
+                  return row
+              return {k: (None if k in FREE_TEXT_COLUMNS[dataset] else v) for k, v in row.items()}
 
 
           def write(handle, row):
@@ -978,6 +1081,7 @@ Resources:
           REGIONS: !Ref RegionsInScope
           TASK_LOOKBACK_DAYS: !Ref TaskLookbackDays
           JOURNAL_LOOKBACK_DAYS: !Ref JournalLookbackDays
+          INCLUDE_MESSAGE_TEXT: !Ref IncludeMessageText
     Metadata:
       cfn_nag:
         rules_to_suppress:
