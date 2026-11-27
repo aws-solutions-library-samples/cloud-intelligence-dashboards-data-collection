@@ -56,6 +56,7 @@ Metadata:
           default: 'Kiro User Activity Module Configuration'
         Parameters:
           - KiroSourceBuckets
+          - KiroSourceBucketsKmsKeyArns
       - Label:
           default: 'Amazon Bedrock Module Configuration'
         Parameters:
@@ -141,6 +142,8 @@ Metadata:
         default: 'Include Kiro User Activity Data Collection Module'
       KiroSourceBuckets:
         default: 'Kiro Source Bucket Names (comma-separated)'
+      KiroSourceBucketsKmsKeyArns:
+        default: 'Kiro Source Bucket KMS Key ARNs (only if SSE-KMS encrypted)'
       IncludeBedrockModule:
         default: 'Include Amazon Bedrock Data Collection Module'
       BedrockSourceBuckets:
@@ -340,6 +343,10 @@ Parameters:
   KiroSourceBuckets:
     Type: String
     Description: "Comma-separated list of S3 bucket names where Kiro writes user activity reports. Required if IncludeKiroUserActivityModule is yes. Example: my-kiro-bucket-111111111111,my-kiro-bucket-222222222222"
+    Default: ""
+  KiroSourceBucketsKmsKeyArns:
+    Type: String
+    Description: "Only needed if a Kiro source bucket is encrypted with a customer-managed KMS key (SSE-KMS). Comma-separated list of those key ARNs, no spaces. Leave empty for unencrypted or SSE-S3 (AES256) buckets. The key owner must also add the KmsKeyPolicyExample statement (Kiro module stack output) to the key policy. Keys may be in another account and Region."
     Default: ""
   IncludeBedrockModule:
     Type: String
@@ -1691,6 +1698,7 @@ Resources:
         LambdaAnalyticsARN: !GetAtt LambdaAnalytics.Arn
         SchedulerExecutionRoleARN: !GetAtt SchedulerExecutionRole.Arn
         KiroSourceBuckets: !Ref KiroSourceBuckets
+        KiroSourceBucketsKmsKeyArns: !Ref KiroSourceBucketsKmsKeyArns
 
   BedrockModule:
     Type: AWS::CloudFormation::Stack
